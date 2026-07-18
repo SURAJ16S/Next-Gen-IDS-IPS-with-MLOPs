@@ -1,0 +1,162 @@
+Building a Go-based eBPF application that monitors both incoming (ingress) and outgoing (egress) traffic for a dynamically selected port requires using the TC (Traffic Control) hook. XDP only works for incoming traffic, but TC allows us to intercept packets in both directions.Here are the detailed, step-by-step instructions to build this foundational MVP using the cilium/ebpf library.Step 1: Install the PrerequisitesYou need the C compiler toolchain to build the kernel code, and Go for the user-space application.Install required packages on your Linux machine (Ubuntu/Debian example):Bashsudo apt update
+sudo apt install -y golang clang llvm libbpf-dev linux-headers-$(uname -r)
+Initialize your Go project:Bashmkdir ebpf-port-monitor && cd ebpf-port-monitor
+go mod init ebpf-port-monitor
+go get github.com/cilium/ebpf@latest
+go install github.com/cilium/ebpf/cmd/bpf2go@latest
+Step 2: Define the eBPF Kernel Code (C)Create a file named monitor.c. This code runs inside the Linux kernel. It will check the port, and if it matches the user's choice, it pushes the packet metadata to Go.1. Define the Maps (The Bridge):You need two maps: one for the Go app to tell C which port to monitor, and a Ring Buffer for C to send packet data back to Go.C// monitor.c
+#include <linux/bpf.h>
+#include <linux/pkt_cls.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
+
+// 1. Map to store the target port selected by the user
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);   // We will use 0 as the single key
+    __type(value, __u16); // The port number
+    __uint(max_entries, 1);
+} port_config SEC(".maps");
+
+// 2. Ring buffer to send packet data to Go
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24); // 16 MB buffer
+} packet_events SEC(".maps");
+
+// Structure of the data sent to Go
+struct packet_event {
+    __u32 src_ip;
+    __u32 dest_ip;
+    __u16 src_port;
+    __u16 dest_port;
+    __u8 direction; // 0 for Ingress, 1 for Egress
+};
+2. Write the Logic:Attach functions to TC to read the packet, check the port, and send it to the ring buffer.Cstatic inline int process_packet(struct __sk_buff *skb, __u8 direction) {
+    // Read the target port from the config map
+    __u32 key = 0;
+    __u16 *target_port = bpf_map_lookup_elem(&port_config, &key);
+    if (!target_port) return TC_ACT_OK; // If no port set, let packet pass
+
+    // Logic to parse Ethernet, IP, and TCP headers goes here
+    // (Omitted for brevity, but you use bpf_skb_load_bytes to read the TCP dest/src port)
+    
+    __u16 packet_port = 8080; // Example: The port parsed from the packet
+
+    // If the packet matches the user's port, send an event to Go
+    if (packet_port == *target_port) {
+        struct packet_event *event;
+        event = bpf_ringbuf_reserve(&packet_events, sizeof(*event), 0);
+        if (event) {
+            event->direction = direction;
+            // populate IPs and ports...
+            bpf_ringbuf_submit(event, 0);
+        }
+    }
+    return TC_ACT_OK; // Let the packet continue normally
+}
+
+SEC("tc_ingress")
+int handle_ingress(struct __sk_buff *skb) {
+    return process_packet(skb, 0);
+}
+
+SEC("tc_egress")
+int handle_egress(struct __sk_buff *skb) {
+    return process_packet(skb, 1);
+}
+
+char __license[] SEC("license") = "GPL";
+Step 3: Generate the Go BindingsInstead of writing complex C-to-Go loaders manually, the cilium/ebpf library automates this.Create a file named gen.go:Gopackage main
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -type packet_event bpf monitor.c
+Run the generator in your terminal:Bashgo generate
+This command compiles monitor.c into eBPF bytecode and generates bpf_bpfel.go, which contains all the native Go structs and loading functions.  Step 4: Write the Go Control ApplicationCreate your main.go file. This application will ask for the port, load the eBPF program, update the map, and listen to the Ring Buffer.  Gopackage main
+
+import (
+    "bytes"
+    "encoding/binary"
+    "fmt"
+    "log"
+    "net"
+    "os"
+    "os/signal"
+
+    "github.com/cilium/ebpf/link"
+    "github.com/cilium/ebpf/ringbuf"
+)
+
+func main() {
+    // 1. Get port from User Input
+    var targetPort uint16
+    fmt.Print("Enter the port you want to monitor: ")
+    fmt.Scanf("%d", &targetPort)
+
+    // 2. Load the compiled eBPF program into the kernel
+    objs := bpfObjects{}
+    if err := loadBpfObjects(&objs, nil); err != nil {
+        log.Fatalf("Loading objects: %v", err)
+    }
+    defer objs.Close()
+
+    // 3. Update the Config Map with the user's port
+    key := uint32(0)
+    if err := objs.PortConfig.Put(&key, &targetPort); err != nil {
+        log.Fatalf("Failed to set port in eBPF map: %v", err)
+    }
+
+    // 4. Attach the eBPF program to a network interface (e.g., eth0)
+    iface, _ := net.InterfaceByName("eth0") // Change to your active interface
+    
+    // Attach Ingress
+    ingressLink, _ := link.AttachTCX(link.TCXOptions{
+        Interface: iface.Index,
+        Program:   objs.HandleIngress,
+        Attach:    link.TCXIngress,
+    })
+    defer ingressLink.Close()
+
+    // Attach Egress
+    egressLink, _ := link.AttachTCX(link.TCXOptions{
+        Interface: iface.Index,
+        Program:   objs.HandleEgress,
+        Attach:    link.TCXEgress,
+    })
+    defer egressLink.Close()
+
+    fmt.Printf("Started monitoring Port %d on interface %s\n", targetPort, iface.Name)
+
+    // 5. Open the Ring Buffer to read events from the kernel
+    rd, _ := ringbuf.NewReader(objs.PacketEvents)
+    defer rd.Close()
+
+    go func() {
+        var event bpfPacketEvent
+        for {
+            record, err := rd.Read()
+            if err != nil {
+                log.Printf("Read error: %v", err)
+                return
+            }
+            // Parse the raw bytes back into our Go struct
+            binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event)
+            
+            direction := "INCOMING"
+            if event.Direction == 1 {
+                direction = "OUTGOING"
+            }
+            fmt.Printf("[%s] Packet detected!\n", direction)
+        }
+    }()
+
+    // 6. Keep application running until Ctrl+C
+    c := make(chan os.Signal, 1)
+    signal.Notify(c, os.Interrupt)
+    <-c
+    fmt.Println("Detaching eBPF program and exiting...")
+}
+Step 5: Build and RunBecause eBPF interacts directly with the Linux kernel, the final application must be run with root (sudo) privileges.Build the Go binary:Bashgo build -o port-monitor
+Run the application:Bashsudo ./port-monitor
+How to Expand this to your WAF ProjectOnce you confirm this works, transforming it into your WAF project is straightforward:Instead of just passing src_ip and dest_port in the C code, you use bpf_skb_load_bytes to grab the first 256 bytes of the HTTP/SSH payload.In the Go code, instead of just printing "Packet detected", you format the event into JSON and send it via WebSockets to your central MERN stack.You create a second eBPF map called blocked_ips. When your MERN stack detects an attack, Go writes the IP into blocked_ips. You add two lines of C code to check that map and return TC_ACT_SHOT (which drops the packet) if the IP is found.
