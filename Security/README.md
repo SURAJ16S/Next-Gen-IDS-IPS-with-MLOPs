@@ -60,6 +60,12 @@ make all
 sudo ./ngfw-monitor
 ```
 
+### Reverse Proxy Mode (Deep Packet Inspection)
+Run the application in Layer 7 proxy mode to inspect traffic content, detect attacks (SQLi, brute-force, etc.), and generate JSONL logs:
+```bash
+sudo ./ngfw-monitor --proxy --config proxy_config.yaml
+```
+
 ### CLI flags
 ```bash
 # Monitor port 8080 on eth0
@@ -73,6 +79,7 @@ sudo ./ngfw-monitor -port 443 -iface wlan0
 ```bash
 make run                  # Interactive mode
 make run-port PORT=8080   # Specify port
+make run-proxy            # Run reverse proxy with DPI engine
 ```
 
 ## Dashboard

@@ -30,6 +30,9 @@ run: build ## Build + run with sudo
 run-port: build ## Build + run on a specific port (usage: make run-port PORT=8080)
 	sudo ./$(BINARY) -port $(PORT)
 
+run-proxy: build ## Build + run the reverse proxy engine with detection
+	sudo ./$(BINARY) --proxy --config proxy_config.yaml
+
 clean: ## Remove generated files and binary
 	rm -f $(BINARY)
 	rm -f bpf_bpfel.go bpf_bpfeb.go bpf_bpfel.o bpf_bpfeb.o

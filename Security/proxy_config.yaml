@@ -1,0 +1,61 @@
+# NGFW Reverse Proxy Configuration
+
+# Global proxy settings
+global:
+  max_connections: 10000
+  connect_timeout_ms: 5000
+  read_timeout_ms: 30000
+  write_timeout_ms: 30000
+
+# Logging and Telemetry
+logging:
+  level: "info"
+  dir: "logs"
+  max_file_size_mb: 100
+
+# Behavioral Detection settings
+behavioral:
+  conn_per_min_threshold: 120
+  port_scan_threshold: 10
+  brute_force_threshold: 5
+
+# TLS Interception settings
+tls_interception:
+  enabled: true
+  cert_dir: "certs"
+  max_cached_certs: 1000
+
+# Port listeners
+listeners:
+  - name: "http-proxy"
+    port: 8080
+    protocol: "tcp"
+    backend_addr: "127.0.0.1:80"
+    enabled: true
+    tls_intercept: false
+
+  - name: "https-proxy"
+    port: 8443
+    protocol: "tcp"
+    backend_addr: "127.0.0.1:443"
+    enabled: true
+    tls_intercept: true
+
+  - name: "ssh-proxy"
+    port: 2222
+    protocol: "tcp"
+    backend_addr: "127.0.0.1:22"
+    enabled: true
+    tls_intercept: false
+
+  - name: "dns-proxy-udp"
+    port: 5353
+    protocol: "udp"
+    backend_addr: "127.0.0.1:53"
+    enabled: true
+
+  - name: "dns-proxy-tcp"
+    port: 5353
+    protocol: "tcp"
+    backend_addr: "127.0.0.1:53"
+    enabled: true

@@ -25,6 +25,9 @@ import (
 	ebpflib "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
+
+	"ngfw-monitor/detect"
+	"ngfw-monitor/proxy"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -497,9 +500,16 @@ func (d *dashboard) render() {
 
 func main() {
 	// ── Parse CLI flags ──
-	portFlag := flag.Int("port", 0, "Port number to monitor (required)")
+	portFlag := flag.Int("port", 0, "Port number to monitor (required in monitor mode)")
 	ifaceFlag := flag.String("iface", "eth0", "Network interface to attach eBPF programs to")
+	proxyFlag := flag.Bool("proxy", false, "Run in reverse proxy mode with detection engine")
+	configFlag := flag.String("config", "proxy_config.yaml", "Path to proxy configuration file")
 	flag.Parse()
+
+	if *proxyFlag {
+		runProxyMode(*configFlag)
+		return
+	}
 
 	var targetPort uint16
 
@@ -755,6 +765,85 @@ func main() {
 			fmt.Println(ingressStyle.Render("  ✓ eBPF programs detached. Goodbye!"))
 			fmt.Println()
 			return
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Proxy Mode Entry Point
+// ──────────────────────────────────────────────────────────────────────────────
+
+func runProxyMode(configPath string) {
+	clearScreen()
+	fmt.Println(bannerStyle.Render(`
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║              NGFW — Detection Reverse Proxy                      ║
+  ║              Deep Packet Inspection Engine                       ║
+  ╚══════════════════════════════════════════════════════════════════╝`))
+	fmt.Println()
+
+	// 1. Load config
+	fmt.Printf("  %s Loading configuration from %s...\n", statLabelStyle.Render("⚙"), configPath)
+	cfg, err := proxy.LoadConfig(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("  %s Config file not found, creating default at %s\n", statLabelStyle.Render("ℹ"), configPath)
+			cfg = proxy.DefaultConfig()
+			if err := proxy.SaveConfig(cfg, configPath); err != nil {
+				log.Fatalf("❌ Failed to create default config: %v", err)
+			}
+		} else {
+			log.Fatalf("❌ Failed to load configuration: %v", err)
+		}
+	}
+	fmt.Printf("  %s Loaded %d enabled listeners\n\n", ingressStyle.Render("✓"), len(cfg.EnabledListeners()))
+
+	// 2. Initialize telemetry & logging
+	stats := detect.NewStatsCollector()
+	
+	// Create detection bus and attach JSON logger
+	bus := detect.NewDetectionBus()
+	jsonLogger, err := detect.NewJSONLLogger(cfg.Logging.Dir, cfg.Logging.MaxFileSizeMB)
+	if err != nil {
+		log.Fatalf("❌ Failed to initialize JSONL logger: %v", err)
+	}
+	defer jsonLogger.Close()
+	bus.Subscribe(jsonLogger)
+
+	// Attach stats collector to bus
+	bus.Subscribe(stats)
+
+	// 3. Initialize Proxy Engine
+	engine := proxy.NewProxyEngine(cfg, bus, stats)
+
+	// 4. Start Engine
+	if err := engine.Start(); err != nil {
+		log.Fatalf("❌ Failed to start proxy engine: %v", err)
+	}
+	defer engine.Stop()
+
+	// 5. Signal handling & dashboard update
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sig:
+			fmt.Println("\n  " + ingressStyle.Render("✓") + " Shutting down reverse proxy gracefully...")
+			return
+		case <-ticker.C:
+			// Print brief status update
+			active := stats.ActiveConnections()
+			total := stats.TotalConnections()
+			dets := stats.TotalDetections()
+			sevs := stats.SeverityCounts()
+			crit := sevs["CRITICAL"]
+			high := sevs["HIGH"]
+			fmt.Printf("  \r\033[K%s Active Conns: %d | Total Conns: %d | Detections: %d (Critical: %d, High: %d)",
+				statLabelStyle.Render("⚡"), active, total, dets, crit, high)
 		}
 	}
 }
