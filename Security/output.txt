@@ -1,16 +1,64 @@
 ================================================================================
   NGFW eBPF Traffic Monitor — Packet Log
-  Started: 2026-07-20 12:04:25 +06
+  Started: 2026-07-21 00:16:22 +06
 ================================================================================
 
 #      DIRECTION  SOURCE                  DESTINATION             PROTO  FLAGS            SIZE      TTL   TOS   IP-ID    SEQ           ACK           WINDOW   IPHL 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1      OUTGOING   127.0.0.1:38144         127.0.0.1:80            TCP    [SYN]            60 B      64    0     7376     557806537     0             65495    20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 40 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+2      INCOMING   127.0.0.1:38144         127.0.0.1:80            TCP    [SYN]            60 B      64    0     7376     557806537     0             65495    20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 40 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+3      OUTGOING   127.0.0.1:80            127.0.0.1:38144         TCP    [SYN,ACK]        60 B      64    0     0        3939402509    557806538     65483    20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 40 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+4      INCOMING   127.0.0.1:80            127.0.0.1:38144         TCP    [SYN,ACK]        60 B      64    0     0        3939402509    557806538     65483    20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 40 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+5      OUTGOING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK]            52 B      64    0     7377     557806538     3939402510    64       20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+6      INCOMING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK]            52 B      64    0     7377     557806538     3939402510    64       20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+7      OUTGOING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK,PSH]        125 B     64    0     7378     557806538     3939402510    64       20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~73 B
+8      INCOMING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK,PSH]        125 B     64    0     7378     557806538     3939402510    64       20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~73 B
+9      OUTGOING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK]            52 B      64    0     13289    3939402510    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+10     INCOMING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK]            52 B      64    0     13289    3939402510    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.606  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+11     OUTGOING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK,PSH]        208 B     64    0     13290    3939402510    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~156 B
+12     INCOMING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK,PSH]        208 B     64    0     13290    3939402510    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~156 B
+13     OUTGOING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK]            52 B      64    0     7379     557806611     3939402666    64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+14     INCOMING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK]            52 B      64    0     7379     557806611     3939402666    64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+15     OUTGOING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK,PSH]        350 B     64    0     13291    3939402666    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~298 B
+16     INCOMING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK,PSH]        350 B     64    0     13291    3939402666    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~298 B
+17     OUTGOING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK]            52 B      64    0     7380     557806611     3939402964    64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+18     INCOMING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK]            52 B      64    0     7380     557806611     3939402964    64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+19     OUTGOING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK,FIN]        52 B      64    0     13292    3939402964    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+20     INCOMING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK,FIN]        52 B      64    0     13292    3939402964    557806611     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+21     OUTGOING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK,FIN]        52 B      64    0     7381     557806611     3939402965    64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+22     INCOMING   127.0.0.1:38144         127.0.0.1:80            TCP    [ACK,FIN]        52 B      64    0     7381     557806611     3939402965    64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+23     OUTGOING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK]            52 B      64    0     13293    3939402965    557806612     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
+24     INCOMING   127.0.0.1:80            127.0.0.1:38144         TCP    [ACK]            52 B      64    0     13293    3939402965    557806612     64       20   
+  │ Time: 2026-07-21 00:16:38.607  │  Frag: 0x4000  │  TCP-HdrLen: 32 B  │  IP-HdrLen: 20 B  │  Payload: ~0 B
 
 ════════════════════════════════════════════════════════════════════════════════
   Session Summary
-  Duration:      2s
-  Total Packets: 0
-  Incoming:      0
-  Outgoing:      0
-  Total Bytes:   0 B
+  Duration:      38s
+  Total Packets: 24
+  Incoming:      12
+  Outgoing:      12
+  Total Bytes:   2.3 KB
 ════════════════════════════════════════════════════════════════════════════════

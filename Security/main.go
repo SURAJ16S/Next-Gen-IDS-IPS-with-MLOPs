@@ -786,7 +786,7 @@ func runProxyMode(configPath string) {
 	fmt.Printf("  %s Loading configuration from %s...\n", statLabelStyle.Render("⚙"), configPath)
 	cfg, err := proxy.LoadConfig(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if strings.Contains(err.Error(), "no such file or directory") {
 			fmt.Printf("  %s Config file not found, creating default at %s\n", statLabelStyle.Render("ℹ"), configPath)
 			cfg = proxy.DefaultConfig()
 			if err := proxy.SaveConfig(cfg, configPath); err != nil {

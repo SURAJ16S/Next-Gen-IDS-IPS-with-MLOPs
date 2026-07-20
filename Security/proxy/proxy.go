@@ -7,9 +7,11 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -125,10 +127,56 @@ type ProxyEngine struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// Raw packet dump
+	DumpFile *os.File
+	dumpMu   sync.Mutex
+}
+
+// RawDump represents a single raw traffic dump record
+type RawDump struct {
+	Timestamp string `json:"timestamp"`
+	ConnID    string `json:"conn_id"`
+	Direction string `json:"direction"`
+	Protocol  string `json:"protocol"`
+	ClientIP  string `json:"client_ip"`
+	Port      uint16 `json:"port"`
+	DataStr   string `json:"data_string"`
+}
+
+// LogRawTraffic writes raw request bytes to the dump file
+func (p *ProxyEngine) LogRawTraffic(ctx *ConnContext, data []byte, fromClient bool) {
+	if p.DumpFile == nil {
+		return
+	}
+	
+	dir := "client_to_backend"
+	if !fromClient {
+		dir = "backend_to_client"
+	}
+
+	dump := RawDump{
+		Timestamp: time.Now().Format(time.RFC3339Nano),
+		ConnID:    ctx.ConnID,
+		Direction: dir,
+		Protocol:  ctx.DetectedProtocol,
+		ClientIP:  ctx.ClientIP.String(),
+		Port:      ctx.ListenPort,
+		DataStr:   string(data), // Simple string representation for JSON visibility
+	}
+	
+	b, err := json.Marshal(dump)
+	if err == nil {
+		b = append(b, '\n')
+		p.dumpMu.Lock()
+		p.DumpFile.Write(b)
+		p.dumpMu.Unlock()
+	}
 }
 
 // AnalyzerRouter dispatches connections to protocol-specific analyzers.
 type AnalyzerRouter struct {
+	engine         *ProxyEngine
 	bus            *detect.DetectionBus
 	httpAnalyzer   *detect.HTTPAnalyzer
 	sshAnalyzer    *detect.SSHAnalyzer
@@ -142,8 +190,9 @@ type AnalyzerRouter struct {
 }
 
 // NewAnalyzerRouter creates the full analysis pipeline.
-func NewAnalyzerRouter(bus *detect.DetectionBus, cfg *ProxyConfig) *AnalyzerRouter {
+func NewAnalyzerRouter(engine *ProxyEngine, bus *detect.DetectionBus, cfg *ProxyConfig) *AnalyzerRouter {
 	return &AnalyzerRouter{
+		engine:         engine,
 		bus:            bus,
 		httpAnalyzer:   detect.NewHTTPAnalyzer(bus),
 		sshAnalyzer:    detect.NewSSHAnalyzer(bus),
@@ -160,6 +209,11 @@ func NewAnalyzerRouter(bus *detect.DetectionBus, cfg *ProxyConfig) *AnalyzerRout
 
 // AnalyzeStream dispatches data to the appropriate analyzer based on detected protocol.
 func (ar *AnalyzerRouter) AnalyzeStream(ctx *ConnContext, data []byte, fromClient bool) {
+	// Log the raw traffic to proxy-output.json
+	if ar.engine != nil {
+		ar.engine.LogRawTraffic(ctx, data, fromClient)
+	}
+
 	// Behavioral tracking for every connection
 	if fromClient {
 		ar.behavioral.TrackConnection(ctx.ClientIP.String(), ctx.ListenPort)
@@ -202,15 +256,25 @@ func (ar *AnalyzerRouter) AnalyzeStream(ctx *ConnContext, data []byte, fromClien
 func NewProxyEngine(config *ProxyConfig, bus *detect.DetectionBus, stats *detect.StatsCollector) *ProxyEngine {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &ProxyEngine{
+	engine := &ProxyEngine{
 		config:        config,
 		bus:           bus,
 		stats:         stats,
 		protoDetector: detect.NewProtocolDetector(bus),
-		analyzers:     NewAnalyzerRouter(bus, config),
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+	engine.analyzers = NewAnalyzerRouter(engine, bus, config)
+
+	// Create or overwrite the raw traffic dump file
+	dumpFile, err := os.OpenFile("proxy-output.json", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err == nil {
+		engine.DumpFile = dumpFile
+	} else {
+		log.Printf("[proxy] ⚠ Failed to open proxy-output.json for raw dumps: %v", err)
+	}
+
+	return engine
 }
 
 // Start launches all configured listeners.
@@ -286,6 +350,11 @@ func (p *ProxyEngine) Stop() {
 	}
 
 	p.wg.Wait()
+	
+	if p.DumpFile != nil {
+		p.DumpFile.Close()
+	}
+	
 	log.Println("[proxy] All listeners stopped.")
 }
 
