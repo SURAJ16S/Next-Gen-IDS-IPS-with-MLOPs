@@ -301,6 +301,7 @@ func payloadSize(rec packetRecord) uint16 {
 type dashboard struct {
 	port        uint16
 	iface       string
+	service     ServiceInfo
 	startTime   time.Time
 	events      []packetRecord
 	mu          sync.Mutex
@@ -310,10 +311,11 @@ type dashboard struct {
 	totalBytes  atomic.Int64
 }
 
-func newDashboard(port uint16, iface string) *dashboard {
+func newDashboard(port uint16, iface string, svc ServiceInfo) *dashboard {
 	return &dashboard{
 		port:      port,
 		iface:     iface,
+		service:   svc,
 		startTime: time.Now(),
 		events:    make([]packetRecord, 0, maxEvents),
 	}
@@ -367,10 +369,16 @@ func (d *dashboard) render() {
 		pps = float64(total) / elapsed
 	}
 
+	// Build the port + service string
+	portLabel := fmt.Sprintf("%d", d.port)
+	svcBadge := d.service.StatusBadge()
+	svcDisplay := d.service.DisplayName()
+	portDisplay := fmt.Sprintf("%s  %s %s", portLabel, svcBadge, svcDisplay)
+
 	statusLine := fmt.Sprintf(
 		"  %s %s   %s %s   %s %s   %s %s",
 		statLabelStyle.Render("PORT:"),
-		statValueStyle.Render(fmt.Sprintf("%d", d.port)),
+		statValueStyle.Render(portDisplay),
 		statLabelStyle.Render("IFACE:"),
 		statValueStyle.Render(d.iface),
 		statLabelStyle.Render("UPTIME:"),
@@ -379,6 +387,36 @@ func (d *dashboard) render() {
 		ingressStyle.Render("● MONITORING"),
 	)
 	fmt.Println(statusLine)
+
+	// ── Service Detail line (only if active listener was found) ──
+	if d.service.ProcessName != "" {
+		svcProto := d.service.Proto
+		if svcProto == "" {
+			svcProto = "TCP/UDP"
+		}
+		svcUser := d.service.User
+		if svcUser == "" {
+			svcUser = "unknown"
+		}
+		svcLine := fmt.Sprintf(
+			"  %s %s  %s %s  %s %s",
+			statLabelStyle.Render("Process:"),
+			statValueStyle.Render(d.service.ProcessName),
+			statLabelStyle.Render("User:"),
+			statValueStyle.Render(svcUser),
+			statLabelStyle.Render("Proto:"),
+			statValueStyle.Render(svcProto),
+		)
+		fmt.Println(svcLine)
+		// Show truncated command line if available
+		if d.service.Command != "" {
+			cmd := d.service.Command
+			if len(cmd) > 80 {
+				cmd = cmd[:80] + "…"
+			}
+			fmt.Println(dimStyle.Render("  CMD: ") + dimStyle.Render(cmd))
+		}
+	}
 	fmt.Println()
 
 	// ── Stats Panel ──
@@ -514,6 +552,32 @@ func main() {
 		fmt.Println()
 	}
 
+	// ── Detect service running on the target port ──
+	fmt.Printf("  %s Detecting service on port %d...\n", statLabelStyle.Render("🔍"), targetPort)
+	svcInfo := detectService(targetPort)
+	// Print detection result to console before the dashboard launches
+	fmt.Printf("  %s Service detected: %s %s\n\n",
+		statLabelStyle.Render("ℹ"),
+		svcInfo.StatusBadge(),
+		statValueStyle.Render(svcInfo.DisplayName()),
+	)
+	if svcInfo.ProcessName != "" && svcInfo.PID > 0 {
+		fmt.Printf("  %s Process: %s   User: %s   Protocol: %s\n",
+			statLabelStyle.Render(" "),
+			statValueStyle.Render(svcInfo.ProcessName),
+			statValueStyle.Render(svcInfo.User),
+			statValueStyle.Render(svcInfo.Proto),
+		)
+		if svcInfo.Command != "" {
+			cmd := svcInfo.Command
+			if len(cmd) > 90 {
+				cmd = cmd[:90] + "…"
+			}
+			fmt.Printf("  %s CMD: %s\n", statLabelStyle.Render(" "), dimStyle.Render(cmd))
+		}
+		fmt.Println()
+	}
+
 	ifaceName := *ifaceFlag
 
 	// ── Validate interface ──
@@ -578,7 +642,7 @@ func main() {
 	defer rd.Close()
 
 	// ── Initialize dashboard ──
-	dash := newDashboard(targetPort, ifaceName)
+	dash := newDashboard(targetPort, ifaceName, svcInfo)
 
 	// ── Signal handler for graceful shutdown ──
 	sig := make(chan os.Signal, 1)
