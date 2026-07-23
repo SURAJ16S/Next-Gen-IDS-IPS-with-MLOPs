@@ -21,9 +21,9 @@ type BehavioralEngine struct {
 	bus *DetectionBus
 
 	// Thresholds
-	connPerMinThreshold  int
-	portScanThreshold    int
-	bruteForceThreshold  int
+	connPerMinThreshold int
+	portScanThreshold   int
+	bruteForceThreshold int
 
 	// Per-IP tracking
 	mu          sync.Mutex
@@ -138,7 +138,7 @@ func (b *BehavioralEngine) TrackConnection(srcIP string, dstPort uint16) {
 			Summary:   fmt.Sprintf("High connection rate: %d connections in 5 minutes from %s", recentCount, srcIP),
 			Details: map[string]any{
 				"connections_5min": recentCount,
-				"threshold":       b.connPerMinThreshold,
+				"threshold":        b.connPerMinThreshold,
 			},
 		})
 	}
@@ -253,9 +253,9 @@ func (b *BehavioralEngine) TrackDataVolume(srcIP string, bytesIn, bytesOut int64
 				SourceIP:  srcIP,
 				Summary:   fmt.Sprintf("Possible data exfiltration: %s received %.1f MB (ratio %.0f:1)", srcIP, float64(tracker.totalBytesOut)/(1024*1024), ratio),
 				Details: map[string]any{
-					"bytes_out":  tracker.totalBytesOut,
-					"bytes_in":   tracker.totalBytesIn,
-					"ratio":      ratio,
+					"bytes_out": tracker.totalBytesOut,
+					"bytes_in":  tracker.totalBytesIn,
+					"ratio":     ratio,
 				},
 			})
 		}

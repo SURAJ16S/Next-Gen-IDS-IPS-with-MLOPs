@@ -23,7 +23,7 @@ type SlidingWindowCounter struct {
 }
 
 type bucketChain struct {
-	entries  []bucket
+	entries   []bucket
 	lastPrune time.Time
 }
 

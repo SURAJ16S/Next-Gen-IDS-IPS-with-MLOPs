@@ -32,30 +32,30 @@ func NewSSHAnalyzer(bus *DetectionBus) *SSHAnalyzer {
 	return &SSHAnalyzer{
 		bus: bus,
 		weakKEX: map[string]bool{
-			"diffie-hellman-group1-sha1":  true,
-			"diffie-hellman-group14-sha1": true,
+			"diffie-hellman-group1-sha1":         true,
+			"diffie-hellman-group14-sha1":        true,
 			"diffie-hellman-group-exchange-sha1": true,
-			"ecdh-sha2-nistp256": false, // Acceptable but worth noting
+			"ecdh-sha2-nistp256":                 false, // Acceptable but worth noting
 		},
 		weakCiphers: map[string]bool{
-			"arcfour":         true,
-			"arcfour128":      true,
-			"arcfour256":      true,
-			"3des-cbc":        true,
-			"blowfish-cbc":    true,
-			"cast128-cbc":     true,
-			"aes128-cbc":      true, // CBC mode is weaker than CTR/GCM
-			"aes192-cbc":      true,
-			"aes256-cbc":      true,
+			"arcfour":                     true,
+			"arcfour128":                  true,
+			"arcfour256":                  true,
+			"3des-cbc":                    true,
+			"blowfish-cbc":                true,
+			"cast128-cbc":                 true,
+			"aes128-cbc":                  true, // CBC mode is weaker than CTR/GCM
+			"aes192-cbc":                  true,
+			"aes256-cbc":                  true,
 			"rijndael-cbc@lysator.liu.se": true,
-			"none":            true,
+			"none":                        true,
 		},
 		weakMACs: map[string]bool{
-			"hmac-md5":      true,
-			"hmac-md5-96":   true,
-			"hmac-sha1-96":  true,
+			"hmac-md5":       true,
+			"hmac-md5-96":    true,
+			"hmac-sha1-96":   true,
 			"hmac-ripemd160": true,
-			"none":          true,
+			"none":           true,
 		},
 	}
 }
@@ -126,16 +126,16 @@ func (a *SSHAnalyzer) analyzeVersionExchange(connID, srcIP string, srcPort, dstP
 	}
 
 	a.bus.EmitDetection(Detection{
-		ID:        "SSH-VER-001",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatProtocolDetect,
-		Protocol:  "SSH",
-		SourceIP:  srcIP,
+		ID:         "SSH-VER-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatProtocolDetect,
+		Protocol:   "SSH",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   fmt.Sprintf("SSH %s version: %s", direction, truncate(version, 100)),
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("SSH %s version: %s", direction, truncate(version, 100)),
+		ConnID:     connID,
 		Details: map[string]any{
 			"direction":        direction,
 			"protocol_version": protoVer,
@@ -155,16 +155,16 @@ func (a *SSHAnalyzer) fingerprintSSHSoftware(connID, srcIP string, srcPort, dstP
 		name     string
 		severity Severity
 	}{
-		"paramiko":     {"Paramiko (Python SSH library — often used by automated tools)", SevMedium},
-		"libssh":       {"libssh (C SSH library)", SevLow},
-		"putty":        {"PuTTY", SevInfo},
-		"openssh":      {"OpenSSH", SevInfo},
-		"dropbear":     {"Dropbear (embedded SSH)", SevInfo},
-		"ncrack":       {"Ncrack (brute-force tool)", SevHigh},
-		"medusa":       {"Medusa (brute-force tool)", SevHigh},
-		"go":           {"Go SSH library", SevLow},
-		"asyncssh":     {"AsyncSSH (Python async SSH)", SevMedium},
-		"twisted":      {"Twisted Conch (Python SSH)", SevMedium},
+		"paramiko": {"Paramiko (Python SSH library — often used by automated tools)", SevMedium},
+		"libssh":   {"libssh (C SSH library)", SevLow},
+		"putty":    {"PuTTY", SevInfo},
+		"openssh":  {"OpenSSH", SevInfo},
+		"dropbear": {"Dropbear (embedded SSH)", SevInfo},
+		"ncrack":   {"Ncrack (brute-force tool)", SevHigh},
+		"medusa":   {"Medusa (brute-force tool)", SevHigh},
+		"go":       {"Go SSH library", SevLow},
+		"asyncssh": {"AsyncSSH (Python async SSH)", SevMedium},
+		"twisted":  {"Twisted Conch (Python SSH)", SevMedium},
 	}
 
 	for keyword, info := range knownTools {
@@ -228,8 +228,8 @@ func (a *SSHAnalyzer) analyzeKEXInit(connID, srcIP string, srcPort, dstPort uint
 	}
 
 	kexAlgorithms := nameListStrings[0]
-	encAlgorithms := nameListStrings[2] // client-to-server encryption
-	macAlgorithms := nameListStrings[4] // client-to-server MAC
+	encAlgorithms := nameListStrings[2]  // client-to-server encryption
+	macAlgorithms := nameListStrings[4]  // client-to-server MAC
 	compAlgorithms := nameListStrings[6] // client-to-server compression if available
 	if len(nameListStrings) > 6 {
 		compAlgorithms = nameListStrings[6]
@@ -256,23 +256,23 @@ func (a *SSHAnalyzer) analyzeKEXInit(connID, srcIP string, srcPort, dstPort uint
 	hassh := fmt.Sprintf("%x", md5.Sum([]byte(hashInput)))
 
 	a.bus.EmitDetection(Detection{
-		ID:        "SSH-HASSH-001",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatProtocolDetect,
-		Protocol:  "SSH",
-		SourceIP:  srcIP,
+		ID:         "SSH-HASSH-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatProtocolDetect,
+		Protocol:   "SSH",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   fmt.Sprintf("SSH %s HASSH: %s", direction, hassh),
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("SSH %s HASSH: %s", direction, hassh),
+		ConnID:     connID,
 		Details: map[string]any{
-			"hassh":                hassh,
-			"direction":            direction,
-			"kex_algorithms":       kexAlgorithms,
+			"hassh":                 hassh,
+			"direction":             direction,
+			"kex_algorithms":        kexAlgorithms,
 			"encryption_algorithms": encAlgorithms,
-			"mac_algorithms":       macAlgorithms,
-			"compression":          compAlgorithms,
+			"mac_algorithms":        macAlgorithms,
+			"compression":           compAlgorithms,
 		},
 	})
 
@@ -306,9 +306,9 @@ func (a *SSHAnalyzer) checkWeakAlgorithms(connID, srcIP string, srcPort, dstPort
 			Summary:    fmt.Sprintf("Weak SSH %s algorithms offered: %s", algoType, strings.Join(weak, ", ")),
 			ConnID:     connID,
 			Details: map[string]any{
-				"algorithm_type": algoType,
+				"algorithm_type":  algoType,
 				"weak_algorithms": weak,
-				"full_list":      algoList,
+				"full_list":       algoList,
 			},
 		})
 	}
@@ -325,32 +325,32 @@ func (a *SSHAnalyzer) analyzeAuthRequest(connID, srcIP string, srcPort, dstPort 
 	}
 
 	a.bus.EmitDetection(Detection{
-		ID:        "SSH-AUTH-001",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatConnLifecycle,
-		Protocol:  "SSH",
-		SourceIP:  srcIP,
+		ID:         "SSH-AUTH-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatConnLifecycle,
+		Protocol:   "SSH",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   "SSH authentication attempt detected",
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    "SSH authentication attempt detected",
+		ConnID:     connID,
 	})
 }
 
 // analyzeAuthFailure tracks authentication failures for brute-force detection.
 func (a *SSHAnalyzer) analyzeAuthFailure(connID, srcIP string, srcPort, dstPort uint16, fromClient bool) {
 	a.bus.EmitDetection(Detection{
-		ID:        "SSH-AUTH-FAIL-001",
-		Timestamp: time.Now(),
-		Severity:  SevMedium,
-		Category:  CatBruteForce,
-		Protocol:  "SSH",
-		SourceIP:  srcIP,
+		ID:         "SSH-AUTH-FAIL-001",
+		Timestamp:  time.Now(),
+		Severity:   SevMedium,
+		Category:   CatBruteForce,
+		Protocol:   "SSH",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   "SSH authentication failure",
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    "SSH authentication failure",
+		ConnID:     connID,
 	})
 }
 
@@ -385,16 +385,16 @@ func (a *SSHAnalyzer) analyzeChannelOpen(connID, srcIP string, srcPort, dstPort 
 	}
 
 	a.bus.EmitDetection(Detection{
-		ID:        "SSH-CHAN-001",
-		Timestamp: time.Now(),
-		Severity:  sev,
-		Category:  category,
-		Protocol:  "SSH",
-		SourceIP:  srcIP,
+		ID:         "SSH-CHAN-001",
+		Timestamp:  time.Now(),
+		Severity:   sev,
+		Category:   category,
+		Protocol:   "SSH",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   fmt.Sprintf("SSH channel open: %s", channelType),
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("SSH channel open: %s", channelType),
+		ConnID:     connID,
 		Details: map[string]any{
 			"channel_type": channelType,
 			"direction":    map[bool]string{true: "client", false: "server"}[fromClient],

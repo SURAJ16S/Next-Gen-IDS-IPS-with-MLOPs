@@ -20,10 +20,10 @@ type Severity int
 
 const (
 	SevInfo     Severity = iota // Normal activity logged for audit trail
-	SevLow                     // Slightly unusual, worth noting
-	SevMedium                  // Suspicious activity requiring attention
-	SevHigh                    // Likely attack or policy violation
-	SevCritical                // Active exploitation attempt
+	SevLow                      // Slightly unusual, worth noting
+	SevMedium                   // Suspicious activity requiring attention
+	SevHigh                     // Likely attack or policy violation
+	SevCritical                 // Active exploitation attempt
 )
 
 // String returns a human-readable severity label.
@@ -103,24 +103,24 @@ const (
 	CatTLSExpired     = "tls-expired-cert"
 	CatTLSSelfSigned  = "tls-self-signed"
 
-	CatDNSTunnel      = "dns-tunnel"
-	CatDGA            = "dga"
-	CatDNSRebind      = "dns-rebinding"
-	CatZoneTransfer   = "zone-transfer"
-	CatNXDomainFlood  = "nxdomain-flood"
+	CatDNSTunnel     = "dns-tunnel"
+	CatDGA           = "dga"
+	CatDNSRebind     = "dns-rebinding"
+	CatZoneTransfer  = "zone-transfer"
+	CatNXDomainFlood = "nxdomain-flood"
 
-	CatSSHWeakAlgo    = "ssh-weak-algo"
-	CatSSHTunnel      = "ssh-tunnel"
+	CatSSHWeakAlgo = "ssh-weak-algo"
+	CatSSHTunnel   = "ssh-tunnel"
 
-	CatOpenRelay      = "open-relay"
-	CatSpam           = "spam"
-	CatPhishing       = "phishing"
+	CatOpenRelay = "open-relay"
+	CatSpam      = "spam"
+	CatPhishing  = "phishing"
 
-	CatFTPBounce      = "ftp-bounce"
-	CatAnonLogin      = "anonymous-login"
+	CatFTPBounce = "ftp-bounce"
+	CatAnonLogin = "anonymous-login"
 
-	CatDangerousCmd   = "dangerous-command"
-	CatUnauthAccess   = "unauthenticated-access"
+	CatDangerousCmd = "dangerous-command"
+	CatUnauthAccess = "unauthenticated-access"
 
 	CatProtocolDetect = "protocol-detect"
 	CatConnLifecycle  = "connection-lifecycle"
@@ -132,12 +132,12 @@ const (
 
 // Detection represents a single security finding or audit event.
 type Detection struct {
-	ID          string         `json:"id"`           // e.g. "HTTP-SQLI-001"
+	ID          string         `json:"id"` // e.g. "HTTP-SQLI-001"
 	Timestamp   time.Time      `json:"timestamp"`
 	Severity    Severity       `json:"severity"`
 	SeverityStr string         `json:"severity_str"` // Populated on emit
 	Category    string         `json:"category"`
-	Protocol    string         `json:"protocol"`     // "HTTP", "SSH", "DNS", etc.
+	Protocol    string         `json:"protocol"` // "HTTP", "SSH", "DNS", etc.
 	SourceIP    string         `json:"source_ip"`
 	SourcePort  uint16         `json:"source_port"`
 	DestPort    uint16         `json:"dest_port"`
