@@ -1,8 +1,8 @@
-# NGFW — eBPF Traffic Monitor
+# Next-Gen-IDS-IPS-with-MLOPs
 
-A Go-based desktop CLI application that operates in two modes: an **eBPF TC (Traffic Control) hook** monitor for real-time L3/L4 packet tracing, and a **Layer 7 Reverse Proxy** for Deep Packet Inspection (DPI). Together, these form the data-collection foundation for a **Next-Generation Firewall (NGFW)** powered by MLOps.
+A comprehensive Go-based **Next-Generation Intrusion Detection and Prevention System (IDS/IPS)** that leverages **eBPF TC (Traffic Control) hooks** for high-performance packet monitoring and a **Layer 7 Reverse Proxy Engine** for Deep Packet Inspection (DPI) and behavioral analysis. Together, these form the data-collection foundation for a **Next-Generation Firewall (NGFW)** powered by MLOps.
 
-## How It Works
+## Core Architecture
 
 The application features a dual-engine architecture:
 
@@ -37,6 +37,31 @@ The application features a dual-engine architecture:
 ### 2. Layer 7 Proxy & DPI Engine
 When run with `--proxy`, the engine intercepts incoming connections using standard Go network listeners (as configured in `proxy_config.yaml`). It proxies traffic to the real backend while passively copying the byte stream. The `detect/` package continuously analyzes the payloads (HTTP, TLS, etc.), extracts machine-learning features (like entropy and character ratios), and streams detections to `logs/detections.jsonl`.
 
+---
+
+## Features
+
+### Advanced Protocol Analyzers
+- **HTTP**: Detects SQLi, XSS, Path Traversal, Command Injection, SSRF, XXE, Log4Shell, HTTP Smuggling, and more.
+- **SSH**: Analyzes version exchanges, detects weak KEX/Ciphers/MACs, computes Hassh fingerprints, and flags tunneling.
+- **DNS**: Detects DNS tunneling, Domain Generation Algorithms (DGA), DNS rebinding, zone transfers, and NXDOMAIN floods.
+- **Database (MySQL, PostgreSQL, Redis, MongoDB)**: Tracks authentication, detects dangerous commands, and flags SQL injection in queries.
+- **SMTP & FTP**: Detects open relays, spam indicators, anonymous logins, FTP bounce attacks, and brute-force attempts.
+- **TLS**: Deep parsing of ClientHello, JA3 fingerprinting, and detection of weak cipher suites or expired/self-signed certificates.
+
+### Cross-Protocol Behavioral Engine
+- **Port Scanning & Brute-Force**: Sliding-window rate limiters to detect scanners and auth brute-forcing.
+- **C2 & Beaconing**: Analyzes connection intervals to detect Command & Control beaconing.
+- **Data Exfiltration**: Tracks outbound data volumes per IP.
+
+### Additional Features
+- **Protocol Fingerprinting (Magic Bytes)**: Identifies the true application protocol regardless of the port (e.g., catching SSH running on port 80).
+- **TLS Interception (MITM)**: On-the-fly certificate generation to inspect encrypted traffic.
+- **JSONL Structured Logging**: Automated rotation and structured logging for connections (`connections.jsonl`) and detections (`detections.jsonl`).
+- **Raw Traffic Dumping**: Captures raw request bytes to `proxy-output.json` for forensic analysis.
+
+---
+
 ## Prerequisites
 
 - **Linux** with kernel 6.6+ (for TCX support)
@@ -59,72 +84,74 @@ make deps
 make all
 ```
 
-## Usage
+---
 
-### Interactive mode (prompts for port)
-```bash
-sudo ./ngfw-monitor
-```
+## Execution Steps
 
-### eBPF Monitor Mode (Specific Port & Interface)
-```bash
-sudo ./ngfw-monitor --port 8080 --iface eth0
-```
+### 1. Reverse Proxy Mode (IDS/IPS Engine)
+Run the application in Layer 7 proxy mode to inspect traffic content, detect attacks (SQLi, brute-force, etc.), and generate JSONL logs based on the provided configuration (`proxy_config.yaml`).
 
-### Reverse Proxy Mode (Deep Packet Inspection)
-Run the application in Layer 7 proxy mode to inspect traffic content, detect attacks (SQLi, brute-force, etc.), and generate JSONL logs:
 ```bash
 sudo ./ngfw-monitor --proxy --config proxy_config.yaml
 ```
 
-### CLI flags
-```bash
-# Monitor port 8080 on loopback interface
-sudo ./ngfw-monitor --port 8080 --iface lo
+**Testing the Proxy with OWASP Juice Shop:**
+You can test the reverse proxy by running a vulnerable application like OWASP Juice Shop on a backend port (e.g., 13000) while the proxy listens on port 3000.
 
-# Monitor port 443 on eth0
-sudo ./ngfw-monitor --port 443 --iface eth0
+1. Start Juice Shop on the backend port:
+   ```bash
+   PORT=13000 npm start
+   ```
+2. Run the proxy with `proxy_config.yaml` (configured to map port 3000 -> 127.0.0.1:13000).
+   ```bash
+   sudo ./ngfw-monitor --proxy --config proxy_config.yaml
+   ```
+3. Test the connection through the proxy:
+   ```bash
+   curl -I http://127.0.0.1:3000
+   ```
+   *Any attacks (like SQL injection or XSS) sent to port 3000 will be detected by the HTTP Analyzer and logged.*
+
+### 2. Interactive Packet Monitor Mode (eBPF)
+Monitor traffic on a specific port in real-time via the kernel-level eBPF dashboard.
+
+```bash
+# Interactive mode (prompts for port)
+sudo ./ngfw-monitor
+
+# Or specify a port and interface directly
+sudo ./ngfw-monitor --port 8080 --iface eth0
 ```
 
-### Using Make
-```bash
-make run                  # Interactive mode
-make run-port PORT=8080   # Specify port
-make run-proxy            # Run reverse proxy with DPI engine
-```
-
-## Dashboard
-
-The terminal dashboard shows:
-- **Live packet table** — scrolling list of the last 50 captured packets
-- **Direction** — ⬇ INCOMING (green) / ⬆ OUTGOING (red)
-- **Source & Destination** — IP:Port pairs
-- **Protocol** — TCP or UDP
-- **Packet size** — in human-readable format
-- **Stats panel** — total packets, ingress/egress counts, bytes, packets/sec
-
-Press **Ctrl+C** to gracefully stop monitoring and detach eBPF programs.
+---
 
 ## Project Structure
 
 ```text
-NGFW/
+Security/
 ├── ebpf/
 │   └── monitor.c           # eBPF kernel program (TC hooks)
 ├── detect/                 # Deep Packet Inspection & ML feature extraction
-│   ├── behavioral.go       # Cross-connection pattern tracking
+│   ├── behavioral.go       # Cross-connection pattern tracking (Port Scans, C2, Brute-force)
+│   ├── detection.go        # Detection framework, severity levels, event bus
 │   ├── flow_logger.go      # eBPF flow aggregation logic
 │   ├── flow_tracker.go     # TCP state and flow timing
 │   ├── http_analyzer.go    # HTTP structural extraction & signatures
 │   ├── payload_stats.go    # Entropy and character ratio math
+│   ├── protocol_detect.go  # Magic-byte protocol identification
 │   ├── session_tracker.go  # IP/User-Agent session tracking
-│   ├── tcp_state.go        # TCP handshake state machine
-│   └── tls_inspect.go      # TLS ClientHello/Certificate inspection
+│   ├── stats.go            # General statistical helpers
+│   ├── tls_inspect.go      # TLS ClientHello/Certificate inspection
+│   └── logger.go           # JSONL structured logging helpers
 ├── proxy/                  # Reverse proxy engine
 │   ├── proxy.go            # Listener and connection handling
-│   └── sniffer.go          # Data interception and routing
+│   ├── listener.go         # TCP & UDP listeners
+│   ├── tls_intercept.go    # TLS MITM & certificate caching
+│   ├── config.go           # YAML configuration parsing
+│   └── forwarder.go        # Bidirectional data forwarders
 ├── logs/                   # Output directory for JSONL logs
 │   ├── detections.jsonl    # L7 alerts and proxy features
+│   ├── connections.jsonl   # Full lifecycle records of proxied connections
 │   └── flow_stats.jsonl    # eBPF aggregated flow statistics
 ├── gen.go                  # go:generate directive for bpf2go
 ├── bpf_bpfel.go            # Auto-generated Go bindings (little-endian)
@@ -138,12 +165,15 @@ NGFW/
 ├── go.sum                  # Go dependency checksums
 ├── Makefile                # Build automation
 ├── output.txt              # Packet log output (Monitor Mode)
+├── proxy-output.json       # Raw traffic data streams
 └── README.md               # This file
 ```
 
+---
+
 ## Data Collection & Telemetry Features (MLOps Ready)
 
-The NGFW monitor has been significantly upgraded to collect comprehensive telemetry suitable for training and inference with Machine Learning models. Below is the updated feature matrix.
+The NGFW monitor has been significantly upgraded to collect comprehensive telemetry suitable for training and inference with Machine Learning models. Below is the feature matrix.
 
 ### 1. eBPF Layer (Kernel Space)
 
@@ -174,6 +204,8 @@ The NGFW monitor has been significantly upgraded to collect comprehensive teleme
 | **Session** | Session ID, Request Count, Session Duration, Req/min, Unique URIs | ✅ Captured | Logical tracking emitted via `HTTP-SESSION-001` |
 | **TLS** | Version, Cipher Suite, SNI, ALPN, Cert metadata, Session Resumption | ✅ Captured | Extracted securely via `TLS-HELLO-001` and `TLS-CERT-001` |
 
+---
+
 ## Extending to a Full NGFW
 
 This monitor and proxy engine provide the detection foundation. To build a complete inline firewall:
@@ -182,6 +214,8 @@ This monitor and proxy engine provide the detection foundation. To build a compl
 2. **IP blocking (IPS Mode)**: Add a `blocked_ips` BPF map and return `TC_ACT_SHOT` to actively drop malicious packets.
 3. **ML Inference Engine**: Connect the `logs/detections.jsonl` stream into a live Isolation Forest / GBT inference server to dynamically detect zero-day attacks.
 4. **Central management**: Export events and ML verdicts as JSON via WebSocket to a central UI dashboard.
+
+---
 
 ## License
 
