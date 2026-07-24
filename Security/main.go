@@ -104,15 +104,16 @@ type packetRecord struct {
 	Timestamp time.Time
 
 	// IP Layer
-	SrcIP     string
-	DstIP     string
-	Protocol  string // "TCP" or "UDP"
-	Size      uint16 // Total IP packet size
-	TTL       uint8
-	TOS       uint8
-	IPID      uint16
-	IPHdrLen  uint8
-	FragOff   uint16
+	SrcIP      string
+	DstIP      string
+	Protocol   string // "TCP" or "UDP"
+	Size       uint16 // Total IP packet size
+	TTL        uint8
+	TOS        uint8
+	IPID       uint16
+	IPHdrLen   uint8
+	FragOffset uint16
+	MoreFrag   bool
 
 	// L4 Layer
 	SrcPort uint16
@@ -247,9 +248,10 @@ func (fl *fileLogger) logPacket(index int64, rec packetRecord) {
 
 	// Detailed block underneath
 	detail := fmt.Sprintf(
-		"  │ Time: %s  │  Frag: 0x%04x  │  TCP-HdrLen: %d B  │  IP-HdrLen: %d B  │  Payload: ~%d B\n",
+		"  │ Time: %s  │  FragOffset: %d  │  MF: %t  │  TCP-HdrLen: %d B  │  IP-HdrLen: %d B  │  Payload: ~%d B\n",
 		rec.Timestamp.Format("2006-01-02 15:04:05.000"),
-		rec.FragOff,
+		rec.FragOffset,
+		rec.MoreFrag,
 		rec.TCPHdrLen,
 		rec.IPHdrLen,
 		payloadSize(rec),
@@ -441,8 +443,8 @@ func (d *dashboard) render() {
 
 	// ── Packet Table ──
 	hdr := fmt.Sprintf(
-		"  %-11s  %-22s  %-22s  %-5s  %-15s  %-8s  %-4s  %-12s",
-		"DIRECTION", "SOURCE", "DESTINATION", "PROTO", "FLAGS", "SIZE", "TTL", "TIME",
+		"  %-11s  %-6s  %-3s  %-22s  %-22s  %-5s  %-15s  %-8s  %-4s  %-12s",
+		"DIRECTION", "FragOff", "MF", "SOURCE", "DESTINATION", "PROTO", "FLAGS", "SIZE", "TTL", "TIME",
 	)
 	fmt.Println(headerStyle.Render(hdr))
 	fmt.Println(dimStyle.Render("  " + strings.Repeat("─", 110)))
@@ -482,8 +484,8 @@ func (d *dashboard) render() {
 			ttlStr := fmt.Sprintf("%d", ev.TTL)
 
 			line := fmt.Sprintf(
-				"%-11s  %-22s  %-22s  %-5s  %-15s  %-8s  %-4s  %s",
-				dirStr, src, dst, protoStr, flagsStr, sizeStr, ttlStr, dimStyle.Render(timeStr),
+				"%-11s  %-6d  %-3t  %-22s  %-22s  %-5s  %-15s  %-8s  %-4s  %s",
+				dirStr, ev.FragOffset, ev.MoreFrag, src, dst, protoStr, flagsStr, sizeStr, ttlStr, dimStyle.Render(timeStr),
 			)
 			fmt.Println(line)
 		}
@@ -651,6 +653,32 @@ func main() {
 	}
 	defer rd.Close()
 
+	// ── Initialize flow tracker and logger ──
+	flowTracker := detect.NewFlowTracker(10000, 120*time.Second)
+	flowLogger, err := detect.NewFlowLogger("logs", 100)
+	if err != nil {
+		log.Fatalf("❌  Failed to create flow logger: %v", err)
+	}
+	defer flowLogger.Close()
+
+	// Drain completed flows to JSONL logger
+	go func() {
+		for rec := range flowTracker.CompletedFlows() {
+			flowLogger.LogFlow(rec)
+		}
+	}()
+
+	// Periodic sweep of idle flows
+	go func() {
+		sweepTicker := time.NewTicker(30 * time.Second)
+		defer sweepTicker.Stop()
+		for range sweepTicker.C {
+			flowTracker.Sweep()
+		}
+	}()
+
+	fmt.Printf("  %s Flow aggregation active → logs/flow_stats.jsonl\n", ingressStyle.Render("✓"))
+
 	// ── Initialize dashboard ──
 	dash := newDashboard(targetPort, ifaceName, svcInfo)
 
@@ -689,15 +717,16 @@ func main() {
 				Timestamp: time.Now(),
 
 				// IP Layer
-				SrcIP:    intToIP(event.SrcIp),
-				DstIP:    intToIP(event.DestIp),
-				Protocol: proto,
-				Size:     event.PktSize,
-				TTL:      event.Ttl,
-				TOS:      event.Tos,
-				IPID:     event.IpId,
-				IPHdrLen: event.IpHdrLen,
-				FragOff:  event.IpFragOff,
+				SrcIP:      intToIP(event.SrcIp),
+				DstIP:      intToIP(event.DestIp),
+				Protocol:   proto,
+				Size:       event.PktSize,
+				TTL:        event.Ttl,
+				TOS:        event.Tos,
+				IPID:       event.IpId,
+				IPHdrLen:   event.IpHdrLen,
+				FragOffset: event.IpFragOffset,
+				MoreFrag:   event.IpMf != 0,
 
 				// L4 Layer
 				SrcPort: event.SrcPort,
@@ -731,6 +760,19 @@ func main() {
 			dash.addEvent(rec)
 			// Log every packet to output.txt
 			flog.logPacket(dash.totalPkts.Load(), rec)
+
+			// Feed into flow aggregator
+			flowTracker.TrackPacket(detect.PacketEvent{
+				Timestamp: rec.Timestamp,
+				SrcIP:     rec.SrcIP,
+				DstIP:     rec.DstIP,
+				SrcPort:   rec.SrcPort,
+				DstPort:   rec.DstPort,
+				Protocol:  rec.Protocol,
+				Size:      rec.Size,
+				TCPFlags:  rec.FlagsRaw,
+				Direction: rec.Direction,
+			})
 			needsRefresh = true
 
 		case <-refreshTicker.C:
@@ -741,6 +783,9 @@ func main() {
 			}
 
 		case <-sig:
+			// Flush all remaining flows before shutdown
+			flowTracker.FlushAll()
+
 			// Write session summary to output.txt
 			total := dash.totalPkts.Load()
 			ingress := dash.ingressPkts.Load()
@@ -800,7 +845,7 @@ func runProxyMode(configPath string) {
 
 	// 2. Initialize telemetry & logging
 	stats := detect.NewStatsCollector()
-	
+
 	// Create detection bus and attach JSON logger
 	bus := detect.NewDetectionBus()
 	jsonLogger, err := detect.NewJSONLLogger(cfg.Logging.Dir, cfg.Logging.MaxFileSizeMB)

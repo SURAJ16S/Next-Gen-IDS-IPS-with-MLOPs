@@ -20,8 +20,8 @@ import (
 
 // DBAnalyzer inspects database protocol traffic.
 type DBAnalyzer struct {
-	bus         *DetectionBus
-	sqliRegex   []*regexp.Regexp
+	bus       *DetectionBus
+	sqliRegex []*regexp.Regexp
 }
 
 // NewDBAnalyzer creates a database analyzer.
@@ -82,16 +82,16 @@ func (a *DBAnalyzer) analyzeMySQL(connID, srcIP string, srcPort, dstPort uint16,
 			if verEnd > 0 && verEnd < 50 {
 				version := string(data[5 : 5+verEnd])
 				a.bus.EmitDetection(Detection{
-					ID:        "DB-MYSQL-GREET",
-					Timestamp: time.Now(),
-					Severity:  SevInfo,
-					Category:  CatProtocolDetect,
-					Protocol:  "MySQL",
-					SourceIP:  srcIP,
+					ID:         "DB-MYSQL-GREET",
+					Timestamp:  time.Now(),
+					Severity:   SevInfo,
+					Category:   CatProtocolDetect,
+					Protocol:   "MySQL",
+					SourceIP:   srcIP,
 					SourcePort: srcPort,
-					DestPort:  dstPort,
-					Summary:   fmt.Sprintf("MySQL server version: %s", version),
-					ConnID:    connID,
+					DestPort:   dstPort,
+					Summary:    fmt.Sprintf("MySQL server version: %s", version),
+					ConnID:     connID,
 					Details: map[string]any{
 						"version": version,
 					},
@@ -120,16 +120,16 @@ func (a *DBAnalyzer) analyzeMySQL(connID, srcIP string, srcPort, dstPort uint16,
 			}
 
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-MYSQL-ERR",
-				Timestamp: time.Now(),
-				Severity:  sev,
-				Category:  category,
-				Protocol:  "MySQL",
-				SourceIP:  srcIP,
+				ID:         "DB-MYSQL-ERR",
+				Timestamp:  time.Now(),
+				Severity:   sev,
+				Category:   category,
+				Protocol:   "MySQL",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("MySQL error %d: %s", errCode, truncate(errMsg, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("MySQL error %d: %s", errCode, truncate(errMsg, 100)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"error_code": errCode,
 					"message":    truncate(errMsg, 200),
@@ -153,16 +153,16 @@ func (a *DBAnalyzer) analyzeMySQL(connID, srcIP string, srcPort, dstPort uint16,
 		if len(data) > 5 {
 			db := string(data[5:])
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-MYSQL-INITDB",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "MySQL",
-				SourceIP:  srcIP,
+				ID:         "DB-MYSQL-INITDB",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "MySQL",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("MySQL USE database: %s", truncate(db, 50)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("MySQL USE database: %s", truncate(db, 50)),
+				ConnID:     connID,
 			})
 		}
 	}
@@ -191,16 +191,16 @@ func (a *DBAnalyzer) analyzePostgreSQL(connID, srcIP string, srcPort, dstPort ui
 		// Password message: 'p' + length + password
 		if data[0] == 'p' {
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-PG-AUTH",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "PostgreSQL",
-				SourceIP:  srcIP,
+				ID:         "DB-PG-AUTH",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "PostgreSQL",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "PostgreSQL authentication credentials sent",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "PostgreSQL authentication credentials sent",
+				ConnID:     connID,
 			})
 		}
 	} else {
@@ -213,33 +213,33 @@ func (a *DBAnalyzer) analyzePostgreSQL(connID, srcIP string, srcPort, dstPort ui
 				sev = SevMedium
 			}
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-PG-ERR",
-				Timestamp: time.Now(),
-				Severity:  sev,
-				Category:  CatConnLifecycle,
-				Protocol:  "PostgreSQL",
-				SourceIP:  srcIP,
+				ID:         "DB-PG-ERR",
+				Timestamp:  time.Now(),
+				Severity:   sev,
+				Category:   CatConnLifecycle,
+				Protocol:   "PostgreSQL",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("PostgreSQL error: %s", truncate(errFields["M"], 100)),
-				ConnID:    connID,
-				Details:   map[string]any{"fields": errFields},
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("PostgreSQL error: %s", truncate(errFields["M"], 100)),
+				ConnID:     connID,
+				Details:    map[string]any{"fields": errFields},
 			})
 		}
 
 		// Authentication request
 		if data[0] == 'R' && len(data) >= 9 {
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-PG-AUTHREQ",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "PostgreSQL",
-				SourceIP:  srcIP,
+				ID:         "DB-PG-AUTHREQ",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "PostgreSQL",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "PostgreSQL authentication request",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "PostgreSQL authentication request",
+				ConnID:     connID,
 			})
 		}
 	}
@@ -312,16 +312,16 @@ func (a *DBAnalyzer) analyzeRedis(connID, srcIP string, srcPort, dstPort uint16,
 			}
 
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-REDIS-DANGER",
-				Timestamp: time.Now(),
-				Severity:  sev,
-				Category:  CatDangerousCmd,
-				Protocol:  "Redis",
-				SourceIP:  srcIP,
+				ID:         "DB-REDIS-DANGER",
+				Timestamp:  time.Now(),
+				Severity:   sev,
+				Category:   CatDangerousCmd,
+				Protocol:   "Redis",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("Redis dangerous command: %s — %s", upperCmd, desc),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("Redis dangerous command: %s — %s", upperCmd, desc),
+				ConnID:     connID,
 				Details: map[string]any{
 					"command":     upperCmd,
 					"description": desc,
@@ -329,32 +329,32 @@ func (a *DBAnalyzer) analyzeRedis(connID, srcIP string, srcPort, dstPort uint16,
 			})
 		} else {
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-REDIS-CMD",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "Redis",
-				SourceIP:  srcIP,
+				ID:         "DB-REDIS-CMD",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "Redis",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("Redis command: %s", truncate(upperCmd, 50)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("Redis command: %s", truncate(upperCmd, 50)),
+				ConnID:     connID,
 			})
 		}
 
 		// AUTH command detection
 		if upperCmd == "AUTH" {
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-REDIS-AUTH",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "Redis",
-				SourceIP:  srcIP,
+				ID:         "DB-REDIS-AUTH",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "Redis",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "Redis AUTH attempt",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "Redis AUTH attempt",
+				ConnID:     connID,
 			})
 		}
 	} else {
@@ -365,16 +365,16 @@ func (a *DBAnalyzer) analyzeRedis(connID, srcIP string, srcPort, dstPort uint16,
 				sev = SevMedium
 			}
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-REDIS-ERR",
-				Timestamp: time.Now(),
-				Severity:  sev,
-				Category:  CatBruteForce,
-				Protocol:  "Redis",
-				SourceIP:  srcIP,
+				ID:         "DB-REDIS-ERR",
+				Timestamp:  time.Now(),
+				Severity:   sev,
+				Category:   CatBruteForce,
+				Protocol:   "Redis",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("Redis error: %s", truncate(strings.TrimSpace(s), 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("Redis error: %s", truncate(strings.TrimSpace(s), 100)),
+				ConnID:     connID,
 			})
 		}
 
@@ -417,16 +417,16 @@ func (a *DBAnalyzer) analyzeMongoDB(connID, srcIP string, srcPort, dstPort uint1
 	// opCode := binary.LittleEndian.Uint32(data[12:16])
 
 	a.bus.EmitDetection(Detection{
-		ID:        "DB-MONGO-MSG",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatConnLifecycle,
-		Protocol:  "MongoDB",
-		SourceIP:  srcIP,
+		ID:         "DB-MONGO-MSG",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatConnLifecycle,
+		Protocol:   "MongoDB",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   "MongoDB wire protocol message detected",
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    "MongoDB wire protocol message detected",
+		ConnID:     connID,
 		Details: map[string]any{
 			"msg_length":  len(data),
 			"from_client": fromClient,
@@ -444,16 +444,16 @@ func (a *DBAnalyzer) analyzeMongoDB(connID, srcIP string, srcPort, dstPort uint1
 	for _, cmd := range adminCommands {
 		if strings.Contains(s, cmd) {
 			a.bus.EmitDetection(Detection{
-				ID:        "DB-MONGO-ADMIN",
-				Timestamp: time.Now(),
-				Severity:  SevHigh,
-				Category:  CatDangerousCmd,
-				Protocol:  "MongoDB",
-				SourceIP:  srcIP,
+				ID:         "DB-MONGO-ADMIN",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatDangerousCmd,
+				Protocol:   "MongoDB",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("MongoDB admin command detected: %s", cmd),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("MongoDB admin command detected: %s", cmd),
+				ConnID:     connID,
 				Details: map[string]any{
 					"command": cmd,
 				},
@@ -475,16 +475,16 @@ func (a *DBAnalyzer) logQuery(connID, srcIP string, srcPort, dstPort uint16, pro
 	}
 
 	a.bus.EmitDetection(Detection{
-		ID:        "DB-QUERY-001",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatConnLifecycle,
-		Protocol:  protocol,
-		SourceIP:  srcIP,
+		ID:         "DB-QUERY-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatConnLifecycle,
+		Protocol:   protocol,
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   fmt.Sprintf("%s query: %s", protocol, truncate(query, 100)),
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("%s query: %s", protocol, truncate(query, 100)),
+		ConnID:     connID,
 		Details: map[string]any{
 			"query": truncate(query, 500),
 		},

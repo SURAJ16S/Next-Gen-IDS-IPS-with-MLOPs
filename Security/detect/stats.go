@@ -42,11 +42,11 @@ type StatsCollector struct {
 
 // PortStats tracks per-port statistics.
 type PortStats struct {
-	Connections   int64 `json:"connections"`
-	Detections    int64 `json:"detections"`
-	BytesIn       int64 `json:"bytes_in"`
-	BytesOut      int64 `json:"bytes_out"`
-	MaxSeverity   Severity `json:"max_severity"`
+	Connections int64    `json:"connections"`
+	Detections  int64    `json:"detections"`
+	BytesIn     int64    `json:"bytes_in"`
+	BytesOut    int64    `json:"bytes_out"`
+	MaxSeverity Severity `json:"max_severity"`
 }
 
 // TopTalkerEntry represents an IP with its detection count.

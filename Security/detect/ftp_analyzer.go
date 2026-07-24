@@ -64,32 +64,32 @@ func (a *FTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstPo
 			if strings.EqualFold(arg, "anonymous") || strings.EqualFold(arg, "ftp") {
 				sev = SevMedium
 				a.bus.EmitDetection(Detection{
-					ID:        "FTP-ANON-001",
-					Timestamp: time.Now(),
-					Severity:  sev,
-					Category:  CatAnonLogin,
-					Protocol:  "FTP",
-					SourceIP:  srcIP,
+					ID:         "FTP-ANON-001",
+					Timestamp:  time.Now(),
+					Severity:   sev,
+					Category:   CatAnonLogin,
+					Protocol:   "FTP",
+					SourceIP:   srcIP,
 					SourcePort: srcPort,
-					DestPort:  dstPort,
-					Summary:   fmt.Sprintf("FTP anonymous login attempt: USER %s", arg),
-					ConnID:    connID,
+					DestPort:   dstPort,
+					Summary:    fmt.Sprintf("FTP anonymous login attempt: USER %s", arg),
+					ConnID:     connID,
 					Details: map[string]any{
 						"username": arg,
 					},
 				})
 			} else {
 				a.bus.EmitDetection(Detection{
-					ID:        "FTP-USER-001",
-					Timestamp: time.Now(),
-					Severity:  sev,
-					Category:  CatConnLifecycle,
-					Protocol:  "FTP",
-					SourceIP:  srcIP,
+					ID:         "FTP-USER-001",
+					Timestamp:  time.Now(),
+					Severity:   sev,
+					Category:   CatConnLifecycle,
+					Protocol:   "FTP",
+					SourceIP:   srcIP,
 					SourcePort: srcPort,
-					DestPort:  dstPort,
-					Summary:   fmt.Sprintf("FTP login: USER %s", truncate(arg, 50)),
-					ConnID:    connID,
+					DestPort:   dstPort,
+					Summary:    fmt.Sprintf("FTP login: USER %s", truncate(arg, 50)),
+					ConnID:     connID,
 					Details: map[string]any{
 						"username": arg,
 					},
@@ -99,16 +99,16 @@ func (a *FTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstPo
 		case "PASS":
 			// Log that password was sent (don't log the actual password)
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-PASS-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-PASS-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "FTP PASS command sent (credentials in transit)",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "FTP PASS command sent (credentials in transit)",
+				ConnID:     connID,
 			})
 
 		case "PORT":
@@ -118,16 +118,16 @@ func (a *FTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstPo
 		case "RETR":
 			// File download
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-XFER-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-XFER-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("FTP download: RETR %s", truncate(arg, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("FTP download: RETR %s", truncate(arg, 100)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"direction": "download",
 					"filename":  arg,
@@ -137,16 +137,16 @@ func (a *FTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstPo
 		case "STOR":
 			// File upload
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-XFER-002",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-XFER-002",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("FTP upload: STOR %s", truncate(arg, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("FTP upload: STOR %s", truncate(arg, 100)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"direction": "upload",
 					"filename":  arg,
@@ -156,16 +156,16 @@ func (a *FTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstPo
 		case "DELE":
 			// File deletion
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-DEL-001",
-				Timestamp: time.Now(),
-				Severity:  SevMedium,
-				Category:  CatDangerousCmd,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-DEL-001",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   CatDangerousCmd,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("FTP file deletion: DELE %s", truncate(arg, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("FTP file deletion: DELE %s", truncate(arg, 100)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"filename": arg,
 				},
@@ -174,47 +174,47 @@ func (a *FTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstPo
 		case "RMD", "XRMD":
 			// Directory removal
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-RMD-001",
-				Timestamp: time.Now(),
-				Severity:  SevMedium,
-				Category:  CatDangerousCmd,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-RMD-001",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   CatDangerousCmd,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("FTP directory removal: %s %s", cmd, truncate(arg, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("FTP directory removal: %s %s", cmd, truncate(arg, 100)),
+				ConnID:     connID,
 			})
 
 		case "SITE":
 			// SITE commands can be dangerous
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-SITE-001",
-				Timestamp: time.Now(),
-				Severity:  SevMedium,
-				Category:  CatDangerousCmd,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-SITE-001",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   CatDangerousCmd,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("FTP SITE command: %s", truncate(arg, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("FTP SITE command: %s", truncate(arg, 100)),
+				ConnID:     connID,
 			})
 		}
 
 		// ── Path traversal in FTP commands ──
 		if strings.Contains(upper, "..") {
 			a.bus.EmitDetection(Detection{
-				ID:         "FTP-TRAV-001",
-				Timestamp:  time.Now(),
-				Severity:   SevHigh,
-				Category:   CatPathTraversal,
-				Protocol:   "FTP",
-				SourceIP:   srcIP,
-				SourcePort: srcPort,
-				DestPort:   dstPort,
-				Summary:    fmt.Sprintf("Path traversal in FTP command: %s", truncate(line, 100)),
-				ConnID:     connID,
+				ID:          "FTP-TRAV-001",
+				Timestamp:   time.Now(),
+				Severity:    SevHigh,
+				Category:    CatPathTraversal,
+				Protocol:    "FTP",
+				SourceIP:    srcIP,
+				SourcePort:  srcPort,
+				DestPort:    dstPort,
+				Summary:     fmt.Sprintf("Path traversal in FTP command: %s", truncate(line, 100)),
+				ConnID:      connID,
 				RawEvidence: truncate(line, 150),
 			})
 		}
@@ -234,46 +234,46 @@ func (a *FTPAnalyzer) analyzeServerResponses(connID, srcIP string, srcPort, dstP
 		case "220":
 			// Server greeting
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-GREET-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatProtocolDetect,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-GREET-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatProtocolDetect,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("FTP server: %s", truncate(line, 120)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("FTP server: %s", truncate(line, 120)),
+				ConnID:     connID,
 			})
 
 		case "530":
 			// Login failure
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-AUTH-FAIL",
-				Timestamp: time.Now(),
-				Severity:  SevMedium,
-				Category:  CatBruteForce,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-AUTH-FAIL",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   CatBruteForce,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "FTP authentication failure",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "FTP authentication failure",
+				ConnID:     connID,
 			})
 
 		case "230":
 			// Login successful
 			a.bus.EmitDetection(Detection{
-				ID:        "FTP-LOGIN-OK",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "FTP",
-				SourceIP:  srcIP,
+				ID:         "FTP-LOGIN-OK",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "FTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "FTP login successful",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "FTP login successful",
+				ConnID:     connID,
 			})
 		}
 	}
@@ -295,16 +295,16 @@ func (a *FTPAnalyzer) detectBounceAttack(connID, srcIP string, srcPort, dstPort 
 
 	if parsedIP != nil && clientIP != nil && !parsedIP.Equal(clientIP) {
 		a.bus.EmitDetection(Detection{
-			ID:        "FTP-BOUNCE-001",
-			Timestamp: time.Now(),
-			Severity:  SevHigh,
-			Category:  CatFTPBounce,
-			Protocol:  "FTP",
-			SourceIP:  srcIP,
+			ID:         "FTP-BOUNCE-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatFTPBounce,
+			Protocol:   "FTP",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("FTP bounce attack: PORT pointing to %s (client is %s)", portIP, srcIP),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("FTP bounce attack: PORT pointing to %s (client is %s)", portIP, srcIP),
+			ConnID:     connID,
 			Details: map[string]any{
 				"port_ip":   portIP,
 				"client_ip": srcIP,

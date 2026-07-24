@@ -22,15 +22,15 @@ import (
 
 // JSONLLogger implements DetectionSubscriber and writes events to JSONL files.
 type JSONLLogger struct {
-	logDir            string
-	detectionFile     *os.File
-	connectionFile    *os.File
-	mu                sync.Mutex
-	maxFileSize       int64 // Max size in bytes before rotation
-	detectionBytes    int64
-	connectionBytes   int64
-	detectionCount    atomic.Int64
-	connectionCount   atomic.Int64
+	logDir          string
+	detectionFile   *os.File
+	connectionFile  *os.File
+	mu              sync.Mutex
+	maxFileSize     int64 // Max size in bytes before rotation
+	detectionBytes  int64
+	connectionBytes int64
+	detectionCount  atomic.Int64
+	connectionCount atomic.Int64
 }
 
 // NewJSONLLogger creates a logger that writes to the given directory.

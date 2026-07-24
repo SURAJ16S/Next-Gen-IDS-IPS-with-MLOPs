@@ -57,16 +57,16 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 		if strings.HasPrefix(upper, "EHLO ") || strings.HasPrefix(upper, "HELO ") {
 			heloDomain = strings.TrimSpace(line[5:])
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-HELO-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-HELO-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("SMTP HELO/EHLO: %s", truncate(heloDomain, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("SMTP HELO/EHLO: %s", truncate(heloDomain, 100)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"helo_domain": heloDomain,
 				},
@@ -77,16 +77,16 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 		if strings.HasPrefix(upper, "MAIL FROM:") {
 			mailFrom = extractEmailAddress(line[10:])
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-FROM-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-FROM-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("SMTP MAIL FROM: %s", truncate(mailFrom, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("SMTP MAIL FROM: %s", truncate(mailFrom, 100)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"sender": mailFrom,
 				},
@@ -98,16 +98,16 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 				if senderDomain != "" && !strings.EqualFold(senderDomain, heloDomain) &&
 					!strings.HasSuffix(strings.ToLower(heloDomain), "."+strings.ToLower(senderDomain)) {
 					a.bus.EmitDetection(Detection{
-						ID:        "SMTP-PHISH-001",
-						Timestamp: time.Now(),
-						Severity:  SevHigh,
-						Category:  CatPhishing,
-						Protocol:  "SMTP",
-						SourceIP:  srcIP,
+						ID:         "SMTP-PHISH-001",
+						Timestamp:  time.Now(),
+						Severity:   SevHigh,
+						Category:   CatPhishing,
+						Protocol:   "SMTP",
+						SourceIP:   srcIP,
 						SourcePort: srcPort,
-						DestPort:  dstPort,
-						Summary:   fmt.Sprintf("HELO/sender domain mismatch: HELO=%s, FROM=%s", heloDomain, senderDomain),
-						ConnID:    connID,
+						DestPort:   dstPort,
+						Summary:    fmt.Sprintf("HELO/sender domain mismatch: HELO=%s, FROM=%s", heloDomain, senderDomain),
+						ConnID:     connID,
 						Details: map[string]any{
 							"helo_domain":   heloDomain,
 							"sender_domain": senderDomain,
@@ -123,16 +123,16 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 			rcptCount++
 			recipient := extractEmailAddress(line[8:])
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-RCPT-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-RCPT-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("SMTP RCPT TO: %s", truncate(recipient, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("SMTP RCPT TO: %s", truncate(recipient, 100)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"recipient":  recipient,
 					"rcpt_count": rcptCount,
@@ -147,16 +147,16 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 				authMethod = authMethod[:idx]
 			}
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-AUTH-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-AUTH-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("SMTP AUTH attempt: %s", strings.ToUpper(authMethod)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("SMTP AUTH attempt: %s", strings.ToUpper(authMethod)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"auth_method": authMethod,
 				},
@@ -166,16 +166,16 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 		// ── STARTTLS ──
 		if strings.HasPrefix(upper, "STARTTLS") {
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-TLS-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatConnLifecycle,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-TLS-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "SMTP STARTTLS upgrade requested",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "SMTP STARTTLS upgrade requested",
+				ConnID:     connID,
 			})
 		}
 	}
@@ -183,16 +183,16 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 	// ── Spam indicator: excessive recipients ──
 	if rcptCount > 10 {
 		a.bus.EmitDetection(Detection{
-			ID:        "SMTP-SPAM-001",
-			Timestamp: time.Now(),
-			Severity:  SevHigh,
-			Category:  CatSpam,
-			Protocol:  "SMTP",
-			SourceIP:  srcIP,
+			ID:         "SMTP-SPAM-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatSpam,
+			Protocol:   "SMTP",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("Excessive RCPT TO count: %d recipients (spam indicator)", rcptCount),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("Excessive RCPT TO count: %d recipients (spam indicator)", rcptCount),
+			ConnID:     connID,
 			Details: map[string]any{
 				"recipient_count": rcptCount,
 			},
@@ -214,63 +214,63 @@ func (a *SMTPAnalyzer) analyzeServerResponses(connID, srcIP string, srcPort, dst
 		case code == "220":
 			// Server greeting — emit for fingerprinting
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-GREET-001",
-				Timestamp: time.Now(),
-				Severity:  SevInfo,
-				Category:  CatProtocolDetect,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-GREET-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatProtocolDetect,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("SMTP server greeting: %s", truncate(line, 120)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("SMTP server greeting: %s", truncate(line, 120)),
+				ConnID:     connID,
 			})
 
 		case code == "535" || code == "503":
 			// Auth failure
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-AUTH-FAIL",
-				Timestamp: time.Now(),
-				Severity:  SevMedium,
-				Category:  CatBruteForce,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-AUTH-FAIL",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   CatBruteForce,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("SMTP auth failure: %s", truncate(line, 100)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("SMTP auth failure: %s", truncate(line, 100)),
+				ConnID:     connID,
 			})
 
 		case code == "550":
 			// Relay denied — this is good, means server isn't an open relay
 			if strings.Contains(strings.ToUpper(line), "RELAY") {
 				a.bus.EmitDetection(Detection{
-					ID:        "SMTP-RELAY-001",
-					Timestamp: time.Now(),
-					Severity:  SevMedium,
-					Category:  CatOpenRelay,
-					Protocol:  "SMTP",
-					SourceIP:  srcIP,
+					ID:         "SMTP-RELAY-001",
+					Timestamp:  time.Now(),
+					Severity:   SevMedium,
+					Category:   CatOpenRelay,
+					Protocol:   "SMTP",
+					SourceIP:   srcIP,
 					SourcePort: srcPort,
-					DestPort:  dstPort,
-					Summary:   "SMTP relay attempt detected (denied by server)",
-					ConnID:    connID,
+					DestPort:   dstPort,
+					Summary:    "SMTP relay attempt detected (denied by server)",
+					ConnID:     connID,
 				})
 			}
 
 		case code == "250" && strings.Contains(strings.ToUpper(line), "RELAY"):
 			// Open relay!
 			a.bus.EmitDetection(Detection{
-				ID:        "SMTP-OPENRELAY",
-				Timestamp: time.Now(),
-				Severity:  SevCritical,
-				Category:  CatOpenRelay,
-				Protocol:  "SMTP",
-				SourceIP:  srcIP,
+				ID:         "SMTP-OPENRELAY",
+				Timestamp:  time.Now(),
+				Severity:   SevCritical,
+				Category:   CatOpenRelay,
+				Protocol:   "SMTP",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   "SMTP OPEN RELAY detected — server accepted relay request",
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    "SMTP OPEN RELAY detected — server accepted relay request",
+				ConnID:     connID,
 			})
 		}
 	}

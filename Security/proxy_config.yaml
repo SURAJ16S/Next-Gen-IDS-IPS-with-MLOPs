@@ -10,7 +10,7 @@ listeners:
       service: https
       enabled: true
     - listen_port: 8080
-      backend_addr: 127.0.0.1:18080
+      backend_addr: 127.0.0.1:3000
       transport: tcp
       service: http
       enabled: true

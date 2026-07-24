@@ -154,16 +154,16 @@ func (a *DNSAnalyzer) parseDNS(connID, srcIP string, srcPort, dstPort uint16, da
 	// ── Emit query/response metadata ──
 	if fromClient && !isResponse {
 		a.bus.EmitDetection(Detection{
-			ID:        "DNS-QUERY-001",
-			Timestamp: time.Now(),
-			Severity:  SevInfo,
-			Category:  CatConnLifecycle,
-			Protocol:  "DNS",
-			SourceIP:  srcIP,
+			ID:         "DNS-QUERY-001",
+			Timestamp:  time.Now(),
+			Severity:   SevInfo,
+			Category:   CatConnLifecycle,
+			Protocol:   "DNS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("DNS query: %s %s", dnsTypeString(qtype), qname),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("DNS query: %s %s", dnsTypeString(qtype), qname),
+			ConnID:     connID,
 			Details: map[string]any{
 				"transaction_id": txID,
 				"qname":          qname,
@@ -178,16 +178,16 @@ func (a *DNSAnalyzer) parseDNS(connID, srcIP string, srcPort, dstPort uint16, da
 	if isResponse {
 		rcodeStr := dnsRcodeString(rcode)
 		a.bus.EmitDetection(Detection{
-			ID:        "DNS-RESP-001",
-			Timestamp: time.Now(),
-			Severity:  SevInfo,
-			Category:  CatConnLifecycle,
-			Protocol:  "DNS",
-			SourceIP:  srcIP,
+			ID:         "DNS-RESP-001",
+			Timestamp:  time.Now(),
+			Severity:   SevInfo,
+			Category:   CatConnLifecycle,
+			Protocol:   "DNS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("DNS response: %s %s → %s (answers: %d)", dnsTypeString(qtype), qname, rcodeStr, anCount),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("DNS response: %s %s → %s (answers: %d)", dnsTypeString(qtype), qname, rcodeStr, anCount),
+			ConnID:     connID,
 			Details: map[string]any{
 				"transaction_id": txID,
 				"qname":          qname,
@@ -200,16 +200,16 @@ func (a *DNSAnalyzer) parseDNS(connID, srcIP string, srcPort, dstPort uint16, da
 		// ── NXDOMAIN tracking ──
 		if rcode == 3 { // NXDOMAIN
 			a.bus.EmitDetection(Detection{
-				ID:        "DNS-NXDOMAIN-001",
-				Timestamp: time.Now(),
-				Severity:  SevLow,
-				Category:  CatNXDomainFlood,
-				Protocol:  "DNS",
-				SourceIP:  srcIP,
+				ID:         "DNS-NXDOMAIN-001",
+				Timestamp:  time.Now(),
+				Severity:   SevLow,
+				Category:   CatNXDomainFlood,
+				Protocol:   "DNS",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("NXDOMAIN for: %s", qname),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("NXDOMAIN for: %s", qname),
+				ConnID:     connID,
 				Details: map[string]any{
 					"qname": qname,
 				},
@@ -223,16 +223,16 @@ func (a *DNSAnalyzer) parseDNS(connID, srcIP string, srcPort, dstPort uint16, da
 	// ── Zone Transfer detection ──
 	if qtype == dnsTypeAXFR || qtype == dnsTypeIXFR {
 		a.bus.EmitDetection(Detection{
-			ID:        "DNS-AXFR-001",
-			Timestamp: time.Now(),
-			Severity:  SevHigh,
-			Category:  CatZoneTransfer,
-			Protocol:  "DNS",
-			SourceIP:  srcIP,
+			ID:         "DNS-AXFR-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatZoneTransfer,
+			Protocol:   "DNS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("DNS zone transfer attempt (%s) for: %s", dnsTypeString(qtype), qname),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("DNS zone transfer attempt (%s) for: %s", dnsTypeString(qtype), qname),
+			ConnID:     connID,
 			Details: map[string]any{
 				"qname": qname,
 				"qtype": dnsTypeString(qtype),
@@ -243,32 +243,32 @@ func (a *DNSAnalyzer) parseDNS(connID, srcIP string, srcPort, dstPort uint16, da
 	// ── ANY query (potential amplification) ──
 	if qtype == dnsTypeANY {
 		a.bus.EmitDetection(Detection{
-			ID:        "DNS-AMP-001",
-			Timestamp: time.Now(),
-			Severity:  SevMedium,
-			Category:  CatDDoS,
-			Protocol:  "DNS",
-			SourceIP:  srcIP,
+			ID:         "DNS-AMP-001",
+			Timestamp:  time.Now(),
+			Severity:   SevMedium,
+			Category:   CatDDoS,
+			Protocol:   "DNS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("DNS ANY query (amplification risk): %s", qname),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("DNS ANY query (amplification risk): %s", qname),
+			ConnID:     connID,
 		})
 	}
 
 	// ── NULL record type (tunneling indicator) ──
 	if qtype == dnsTypeNULL {
 		a.bus.EmitDetection(Detection{
-			ID:        "DNS-NULL-001",
-			Timestamp: time.Now(),
-			Severity:  SevHigh,
-			Category:  CatDNSTunnel,
-			Protocol:  "DNS",
-			SourceIP:  srcIP,
+			ID:         "DNS-NULL-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatDNSTunnel,
+			Protocol:   "DNS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("DNS NULL record query (tunneling indicator): %s", qname),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("DNS NULL record query (tunneling indicator): %s", qname),
+			ConnID:     connID,
 		})
 	}
 
@@ -293,16 +293,16 @@ func (a *DNSAnalyzer) detectTunneling(connID, srcIP string, srcPort, dstPort uin
 		// ── Long subdomain label (>30 chars) ──
 		if len(label) > 30 {
 			a.bus.EmitDetection(Detection{
-				ID:        "DNS-TUN-001",
-				Timestamp: time.Now(),
-				Severity:  SevHigh,
-				Category:  CatDNSTunnel,
-				Protocol:  "DNS",
-				SourceIP:  srcIP,
+				ID:         "DNS-TUN-001",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatDNSTunnel,
+				Protocol:   "DNS",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("Long subdomain label (%d chars) — possible DNS tunneling", len(label)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("Long subdomain label (%d chars) — possible DNS tunneling", len(label)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"label":        truncate(label, 80),
 					"label_length": len(label),
@@ -315,16 +315,16 @@ func (a *DNSAnalyzer) detectTunneling(connID, srcIP string, srcPort, dstPort uin
 		entropy := shannonEntropy(label)
 		if len(label) > 15 && entropy > 3.5 {
 			a.bus.EmitDetection(Detection{
-				ID:        "DNS-TUN-002",
-				Timestamp: time.Now(),
-				Severity:  SevHigh,
-				Category:  CatDNSTunnel,
-				Protocol:  "DNS",
-				SourceIP:  srcIP,
+				ID:         "DNS-TUN-002",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatDNSTunnel,
+				Protocol:   "DNS",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("High-entropy subdomain (%.2f bits) — possible DNS tunneling", entropy),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("High-entropy subdomain (%.2f bits) — possible DNS tunneling", entropy),
+				ConnID:     connID,
 				Details: map[string]any{
 					"label":   truncate(label, 80),
 					"entropy": entropy,
@@ -339,16 +339,16 @@ func (a *DNSAnalyzer) detectTunneling(connID, srcIP string, srcPort, dstPort uin
 		// Total QNAME length check
 		if len(qname) > 60 {
 			a.bus.EmitDetection(Detection{
-				ID:        "DNS-TUN-003",
-				Timestamp: time.Now(),
-				Severity:  SevMedium,
-				Category:  CatDNSTunnel,
-				Protocol:  "DNS",
-				SourceIP:  srcIP,
+				ID:         "DNS-TUN-003",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   CatDNSTunnel,
+				Protocol:   "DNS",
+				SourceIP:   srcIP,
 				SourcePort: srcPort,
-				DestPort:  dstPort,
-				Summary:   fmt.Sprintf("Long TXT query (%d chars) — possible DNS tunneling", len(qname)),
-				ConnID:    connID,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("Long TXT query (%d chars) — possible DNS tunneling", len(qname)),
+				ConnID:     connID,
 				Details: map[string]any{
 					"qname":  truncate(qname, 200),
 					"length": len(qname),
@@ -404,16 +404,16 @@ func (a *DNSAnalyzer) detectDGA(connID, srcIP string, srcPort, dstPort uint16, q
 
 	if dgaScore >= 0.6 {
 		a.bus.EmitDetection(Detection{
-			ID:        "DNS-DGA-001",
-			Timestamp: time.Now(),
-			Severity:  SevHigh,
-			Category:  CatDGA,
-			Protocol:  "DNS",
-			SourceIP:  srcIP,
+			ID:         "DNS-DGA-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatDGA,
+			Protocol:   "DNS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("Possible DGA domain detected (score: %.1f): %s", dgaScore, truncate(qname, 100)),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("Possible DGA domain detected (score: %.1f): %s", dgaScore, truncate(qname, 100)),
+			ConnID:     connID,
 			Details: map[string]any{
 				"domain":       qname,
 				"sld":          sld,
@@ -453,16 +453,16 @@ func (a *DNSAnalyzer) checkDNSRebinding(connID, srcIP string, srcPort, dstPort u
 			// Check for private IP ranges
 			if isPrivateIP(ip) {
 				a.bus.EmitDetection(Detection{
-					ID:        "DNS-REBIND-001",
-					Timestamp: time.Now(),
-					Severity:  SevHigh,
-					Category:  CatDNSRebind,
-					Protocol:  "DNS",
-					SourceIP:  srcIP,
+					ID:         "DNS-REBIND-001",
+					Timestamp:  time.Now(),
+					Severity:   SevHigh,
+					Category:   CatDNSRebind,
+					Protocol:   "DNS",
+					SourceIP:   srcIP,
 					SourcePort: srcPort,
-					DestPort:  dstPort,
-					Summary:   fmt.Sprintf("DNS rebinding: %s resolves to private IP %s", qname, ip),
-					ConnID:    connID,
+					DestPort:   dstPort,
+					Summary:    fmt.Sprintf("DNS rebinding: %s resolves to private IP %s", qname, ip),
+					ConnID:     connID,
 					Details: map[string]any{
 						"domain":     qname,
 						"private_ip": ip,

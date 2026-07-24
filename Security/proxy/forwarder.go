@@ -21,9 +21,9 @@ import (
 // Forwarder handles bidirectional data transfer between client and backend
 // while feeding data through protocol analyzers.
 type Forwarder struct {
-	connCtx     *ConnContext
-	analyzers   *AnalyzerRouter
-	maxInspect  int  // Max bytes to send to analyzers per direction
+	connCtx    *ConnContext
+	analyzers  *AnalyzerRouter
+	maxInspect int // Max bytes to send to analyzers per direction
 }
 
 // NewForwarder creates a forwarder for a connection.

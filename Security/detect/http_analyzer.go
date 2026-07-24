@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,8 +22,11 @@ import (
 
 // HTTPAnalyzer performs deep inspection of HTTP traffic.
 type HTTPAnalyzer struct {
-	bus      *DetectionBus
-	patterns []attackPattern
+	bus            *DetectionBus
+	patterns       []attackPattern
+	mu             sync.Mutex
+	reqTimes       map[string]time.Time
+	sessionTracker *SessionTracker
 }
 
 type attackPattern struct {
@@ -34,7 +39,11 @@ type attackPattern struct {
 
 // NewHTTPAnalyzer creates an HTTP analyzer with all attack signatures compiled.
 func NewHTTPAnalyzer(bus *DetectionBus) *HTTPAnalyzer {
-	a := &HTTPAnalyzer{bus: bus}
+	a := &HTTPAnalyzer{
+		bus:            bus,
+		reqTimes:       make(map[string]time.Time),
+		sessionTracker: NewSessionTracker(bus),
+	}
 	a.compilePatterns()
 	return a
 }
@@ -140,6 +149,10 @@ func (a *HTTPAnalyzer) Analyze(connID, srcIP string, srcPort, dstPort uint16, da
 
 // analyzeRequest performs deep inspection of an HTTP request.
 func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uint16, s string, raw []byte) {
+	a.mu.Lock()
+	a.reqTimes[connID] = time.Now()
+	a.mu.Unlock()
+
 	// Parse request line
 	lines := strings.SplitN(s, "\r\n", -1)
 	if len(lines) == 0 {
@@ -181,18 +194,53 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 		body = strings.Join(lines[headerEnd+1:], "\r\n")
 	}
 
+	// ── Compute request feature metadata ──
+	uriLen := len(uri)
+	queryParams := 0
+	queryString := ""
+	if qIdx := strings.Index(uri, "?"); qIdx >= 0 {
+		queryString = uri[qIdx+1:]
+		if queryString != "" {
+			queryParams = len(strings.Split(queryString, "&"))
+		}
+	}
+	headerCount := len(headers)
+	headerSize := 0
+	duplicateHeaders := 0
+	headerKeySeen := make(map[string]bool)
+	for i := 1; i < len(lines); i++ {
+		if lines[i] == "" {
+			break
+		}
+		headerSize += len(lines[i])
+		if idx := strings.Index(lines[i], ": "); idx > 0 {
+			key := strings.ToLower(lines[i][:idx])
+			if headerKeySeen[key] {
+				duplicateHeaders++
+			}
+			headerKeySeen[key] = true
+		}
+	}
+	contentLength := 0
+	if cl := headers["content-length"]; cl != "" {
+		contentLength, _ = strconv.Atoi(cl)
+	}
+	jwtPresent := strings.Contains(headers["authorization"], "Bearer ") ||
+		strings.Contains(headers["cookie"], "eyJ")
+	authPresent := headers["authorization"] != ""
+
 	// ── Emit request metadata detection (INFO level) ──
 	a.bus.EmitDetection(Detection{
-		ID:        "HTTP-REQ-001",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatConnLifecycle,
-		Protocol:  "HTTP",
-		SourceIP:  srcIP,
+		ID:         "HTTP-REQ-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatConnLifecycle,
+		Protocol:   "HTTP",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   fmt.Sprintf("%s %s %s", method, truncate(uri, 100), httpVer),
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("%s %s %s", method, truncate(uri, 100), httpVer),
+		ConnID:     connID,
 		Details: map[string]any{
 			"method":       method,
 			"uri":          uri,
@@ -202,6 +250,77 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 			"content_type": headers["content-type"],
 			"referer":      headers["referer"],
 			"cookie_count": countCookies(headers["cookie"]),
+		},
+	})
+
+	// ── Session Tracking ──
+	a.sessionTracker.TrackRequest(srcIP, headers["user-agent"], uri)
+
+	// ── Emit ML feature vector for this request (HTTP-FEAT-001) ──
+	uriStats := ComputePayloadStats(uri)
+	bodyStats := ComputePayloadStats(body)
+	uaStats := ComputePayloadStats(headers["user-agent"])
+
+	a.bus.EmitDetection(Detection{
+		ID:         "HTTP-FEAT-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   "ml-features",
+		Protocol:   "HTTP",
+		SourceIP:   srcIP,
+		SourcePort: srcPort,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("Request features: %s %s", method, truncate(uri, 60)),
+		ConnID:     connID,
+		Details: map[string]any{
+			// ── Request Metadata ──
+			"method":            method,
+			"uri_length":        uriLen,
+			"query_param_count": queryParams,
+			"content_length":    contentLength,
+			"header_count":      headerCount,
+			"header_size":       headerSize,
+			"duplicate_headers": duplicateHeaders,
+			"cookie_count":      countCookies(headers["cookie"]),
+			"jwt_present":       jwtPresent,
+			"auth_present":      authPresent,
+			"has_referer":       headers["referer"] != "",
+			"has_origin":        headers["origin"] != "",
+			"accept":            truncate(headers["accept"], 100),
+			"accept_encoding":   headers["accept-encoding"],
+			"accept_language":   truncate(headers["accept-language"], 50),
+
+			// ── URI Statistical Features ──
+			"uri_entropy":            uriStats.Entropy,
+			"uri_digit_ratio":        uriStats.DigitRatio,
+			"uri_upper_ratio":        uriStats.UpperRatio,
+			"uri_special_char_ratio": uriStats.SpecialCharRatio,
+			"uri_sql_keyword_count":  uriStats.SQLKeywordCount,
+			"uri_xss_pattern_count":  uriStats.XSSPatternCount,
+			"uri_path_trav_count":    uriStats.PathTraversalCount,
+			"uri_cmd_inject_count":   uriStats.CmdInjectionCount,
+			"uri_hex_count":          uriStats.HexCount,
+			"uri_base64_count":       uriStats.Base64Count,
+
+			// ── Body Statistical Features ──
+			"body_length":              bodyStats.Length,
+			"body_entropy":             bodyStats.Entropy,
+			"body_digit_ratio":         bodyStats.DigitRatio,
+			"body_special_char_ratio":  bodyStats.SpecialCharRatio,
+			"body_non_printable_ratio": bodyStats.NonPrintableRatio,
+			"body_sql_keyword_count":   bodyStats.SQLKeywordCount,
+			"body_xss_pattern_count":   bodyStats.XSSPatternCount,
+			"body_html_tag_count":      bodyStats.HTMLTagCount,
+			"body_js_pattern_count":    bodyStats.JSPatternCount,
+			"body_base64_count":        bodyStats.Base64Count,
+			"body_hex_count":           bodyStats.HexCount,
+			"body_token_count":         bodyStats.TokenCount,
+			"body_avg_token_length":    bodyStats.AvgTokenLength,
+			"body_max_token_length":    bodyStats.MaxTokenLength,
+
+			// ── User-Agent Features ──
+			"ua_length":  uaStats.Length,
+			"ua_entropy": uaStats.Entropy,
 		},
 	})
 
@@ -290,16 +409,16 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 	// ── WebSocket upgrade detection ──
 	if strings.EqualFold(headers["upgrade"], "websocket") {
 		a.bus.EmitDetection(Detection{
-			ID:        "HTTP-WS-001",
-			Timestamp: time.Now(),
-			Severity:  SevInfo,
-			Category:  CatConnLifecycle,
-			Protocol:  "HTTP",
-			SourceIP:  srcIP,
+			ID:         "HTTP-WS-001",
+			Timestamp:  time.Now(),
+			Severity:   SevInfo,
+			Category:   CatConnLifecycle,
+			Protocol:   "HTTP",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   "WebSocket upgrade request detected",
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    "WebSocket upgrade request detected",
+			ConnID:     connID,
 			Details: map[string]any{
 				"ws_key":      headers["sec-websocket-key"],
 				"ws_version":  headers["sec-websocket-version"],
@@ -311,6 +430,18 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 
 // analyzeResponse inspects HTTP response for information leakage and security headers.
 func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort uint16, s string, raw []byte) {
+	a.mu.Lock()
+	reqTime, ok := a.reqTimes[connID]
+	if ok {
+		delete(a.reqTimes, connID)
+	}
+	a.mu.Unlock()
+
+	responseTimeMs := float64(0)
+	if ok {
+		responseTimeMs = float64(time.Since(reqTime).Milliseconds())
+	}
+
 	lines := strings.SplitN(s, "\r\n", -1)
 	if len(lines) == 0 {
 		return
@@ -326,6 +457,7 @@ func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort ui
 	// Parse response headers
 	headers := make(map[string]string)
 	headerEnd := 0
+	respHeaderCount := 0
 	for i := 1; i < len(lines); i++ {
 		if lines[i] == "" {
 			headerEnd = i
@@ -334,6 +466,7 @@ func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort ui
 		if idx := strings.Index(lines[i], ": "); idx > 0 {
 			key := strings.ToLower(lines[i][:idx])
 			headers[key] = lines[i][idx+2:]
+			respHeaderCount++
 		}
 	}
 
@@ -345,16 +478,16 @@ func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort ui
 	// ── Server header fingerprinting ──
 	if server := headers["server"]; server != "" {
 		a.bus.EmitDetection(Detection{
-			ID:        "HTTP-RESP-001",
-			Timestamp: time.Now(),
-			Severity:  SevInfo,
-			Category:  CatInfoLeakage,
-			Protocol:  "HTTP",
-			SourceIP:  srcIP,
+			ID:         "HTTP-RESP-001",
+			Timestamp:  time.Now(),
+			Severity:   SevInfo,
+			Category:   CatInfoLeakage,
+			Protocol:   "HTTP",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("Server: %s", truncate(server, 100)),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("Server: %s", truncate(server, 100)),
+			ConnID:     connID,
 			Details: map[string]any{
 				"server":      server,
 				"status_code": statusCode,
@@ -368,7 +501,7 @@ func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort ui
 		"x-frame-options":           "X-Frame-Options",
 		"x-content-type-options":    "X-Content-Type-Options",
 		"strict-transport-security": "Strict-Transport-Security (HSTS)",
-		"x-xss-protection":         "X-XSS-Protection",
+		"x-xss-protection":          "X-XSS-Protection",
 		"referrer-policy":           "Referrer-Policy",
 	}
 
@@ -381,22 +514,59 @@ func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort ui
 
 	if len(missing) > 0 && statusCode >= 200 && statusCode < 400 {
 		a.bus.EmitDetection(Detection{
-			ID:        "HTTP-HDR-001",
-			Timestamp: time.Now(),
-			Severity:  SevLow,
-			Category:  CatMissingHeaders,
-			Protocol:  "HTTP",
-			SourceIP:  srcIP,
+			ID:         "HTTP-HDR-001",
+			Timestamp:  time.Now(),
+			Severity:   SevLow,
+			Category:   CatMissingHeaders,
+			Protocol:   "HTTP",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("Missing %d security headers", len(missing)),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("Missing %d security headers", len(missing)),
+			ConnID:     connID,
 			Details: map[string]any{
 				"missing_headers": missing,
 				"status_code":     statusCode,
 			},
 		})
 	}
+
+	// ── Emit ML response feature vector (HTTP-FEAT-002) ──
+	respContentLength := 0
+	if cl := headers["content-length"]; cl != "" {
+		respContentLength, _ = strconv.Atoi(cl)
+	}
+	hasCompression := headers["content-encoding"] != ""
+	cacheControl := headers["cache-control"]
+	respBodyStats := ComputePayloadStats(body)
+
+	a.bus.EmitDetection(Detection{
+		ID:         "HTTP-FEAT-002",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   "ml-features",
+		Protocol:   "HTTP",
+		SourceIP:   srcIP,
+		SourcePort: srcPort,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("Response features: status=%d size=%d", statusCode, respContentLength),
+		ConnID:     connID,
+		Details: map[string]any{
+			"status_code":                statusCode,
+			"response_size":              respContentLength,
+			"response_time_ms":           responseTimeMs,
+			"resp_header_count":          respHeaderCount,
+			"has_compression":            hasCompression,
+			"content_type":               headers["content-type"],
+			"cache_control":              cacheControl,
+			"server":                     headers["server"],
+			"missing_security_headers":   len(missing),
+			"resp_body_entropy":          respBodyStats.Entropy,
+			"resp_body_length":           respBodyStats.Length,
+			"resp_body_html_tag_count":   respBodyStats.HTMLTagCount,
+			"resp_body_js_pattern_count": respBodyStats.JSPatternCount,
+		},
+	})
 
 	// ── Information leakage in response body ──
 	if body != "" {
