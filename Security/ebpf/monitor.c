@@ -28,7 +28,8 @@ struct packet_event {
     __u8  tos;          // Type of Service / DSCP + ECN
     __u8  ip_hdr_len;   // IP header length in bytes
     __u16 ip_id;        // IP identification field
-    __u16 ip_frag_off;  // Fragment offset + flags
+    __u16 ip_frag_offset; // Fragment offset (13 bits)
+    __u8  ip_mf;        // More Fragments flag (1 bit)
 
     // ── L4 (TCP/UDP) ──
     __u16 src_port;
@@ -159,7 +160,9 @@ static __always_inline int process_packet(struct __sk_buff *skb, __u8 direction)
     event->tos         = ip.tos;
     event->ip_hdr_len  = (__u8)ip_hdr_len;
     event->ip_id       = bpf_ntohs(ip.id);
-    event->ip_frag_off = bpf_ntohs(ip.frag_off);
+    __u16 frag_field   = bpf_ntohs(ip.frag_off);
+    event->ip_frag_offset = frag_field & 0x1FFF;
+    event->ip_mf       = (frag_field & 0x2000) != 0;
 
     // L4 layer
     event->src_port    = src_port;

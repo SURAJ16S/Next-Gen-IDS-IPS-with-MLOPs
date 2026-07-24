@@ -102,16 +102,16 @@ func (tl *TCPListener) handleConnection(ctx context.Context, clientConn net.Conn
 
 	// Emit connection-start detection (INFO level for audit)
 	tl.engine.bus.EmitDetection(detect.Detection{
-		ID:        "CONN-START-001",
-		Timestamp: connCtx.StartTime,
-		Severity:  detect.SevInfo,
-		Category:  detect.CatConnLifecycle,
-		Protocol:  connCtx.ExpectedService,
-		SourceIP:  connCtx.ClientIP.String(),
+		ID:         "CONN-START-001",
+		Timestamp:  connCtx.StartTime,
+		Severity:   detect.SevInfo,
+		Category:   detect.CatConnLifecycle,
+		Protocol:   connCtx.ExpectedService,
+		SourceIP:   connCtx.ClientIP.String(),
 		SourcePort: connCtx.ClientPort,
-		DestPort:  connCtx.ListenPort,
-		Summary:   fmt.Sprintf("New connection to :%d (%s)", connCtx.ListenPort, connCtx.ExpectedService),
-		ConnID:    connCtx.ConnID,
+		DestPort:   connCtx.ListenPort,
+		Summary:    fmt.Sprintf("New connection to :%d (%s)", connCtx.ListenPort, connCtx.ExpectedService),
+		ConnID:     connCtx.ConnID,
 	})
 
 	// Read initial bytes for protocol detection (peek without consuming)
@@ -141,16 +141,16 @@ func (tl *TCPListener) handleConnection(ctx context.Context, clientConn net.Conn
 	if err != nil {
 		connCtx.CloseReason = "backend_unreachable"
 		tl.engine.bus.EmitDetection(detect.Detection{
-			ID:        "CONN-BACKEND-ERR",
-			Timestamp: time.Now(),
-			Severity:  detect.SevLow,
-			Category:  detect.CatConnLifecycle,
-			Protocol:  connCtx.ExpectedService,
-			SourceIP:  connCtx.ClientIP.String(),
+			ID:         "CONN-BACKEND-ERR",
+			Timestamp:  time.Now(),
+			Severity:   detect.SevLow,
+			Category:   detect.CatConnLifecycle,
+			Protocol:   connCtx.ExpectedService,
+			SourceIP:   connCtx.ClientIP.String(),
 			SourcePort: connCtx.ClientPort,
-			DestPort:  connCtx.ListenPort,
-			Summary:   fmt.Sprintf("Backend unreachable: %s", tl.config.BackendAddr),
-			ConnID:    connCtx.ConnID,
+			DestPort:   connCtx.ListenPort,
+			Summary:    fmt.Sprintf("Backend unreachable: %s", tl.config.BackendAddr),
+			ConnID:     connCtx.ConnID,
 		})
 		tl.emitClose(connCtx)
 		return
@@ -204,10 +204,10 @@ func (tl *TCPListener) ActiveConnections() int64 {
 
 // udpSession tracks a single client's UDP "session" (source addr → backend mapping).
 type udpSession struct {
-	clientAddr *net.UDPAddr
+	clientAddr  *net.UDPAddr
 	backendConn *net.UDPConn
-	lastActive time.Time
-	mu         sync.Mutex
+	lastActive  time.Time
+	mu          sync.Mutex
 }
 
 // UDPListener handles incoming UDP datagrams on a single port.

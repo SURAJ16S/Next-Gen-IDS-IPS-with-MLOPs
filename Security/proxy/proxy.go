@@ -111,9 +111,9 @@ func (c *ConnContext) ToConnectionRecord() detect.ConnectionRecord {
 
 // ProxyEngine manages the full reverse proxy lifecycle.
 type ProxyEngine struct {
-	config  *ProxyConfig
-	bus     *detect.DetectionBus
-	stats   *detect.StatsCollector
+	config *ProxyConfig
+	bus    *detect.DetectionBus
+	stats  *detect.StatsCollector
 
 	// Active listeners
 	tcpListeners []*TCPListener
@@ -149,7 +149,7 @@ func (p *ProxyEngine) LogRawTraffic(ctx *ConnContext, data []byte, fromClient bo
 	if p.DumpFile == nil {
 		return
 	}
-	
+
 	dir := "client_to_backend"
 	if !fromClient {
 		dir = "backend_to_client"
@@ -164,7 +164,7 @@ func (p *ProxyEngine) LogRawTraffic(ctx *ConnContext, data []byte, fromClient bo
 		Port:      ctx.ListenPort,
 		DataStr:   string(data), // Simple string representation for JSON visibility
 	}
-	
+
 	b, err := json.Marshal(dump)
 	if err == nil {
 		b = append(b, '\n')
@@ -176,33 +176,33 @@ func (p *ProxyEngine) LogRawTraffic(ctx *ConnContext, data []byte, fromClient bo
 
 // AnalyzerRouter dispatches connections to protocol-specific analyzers.
 type AnalyzerRouter struct {
-	engine         *ProxyEngine
-	bus            *detect.DetectionBus
-	httpAnalyzer   *detect.HTTPAnalyzer
-	sshAnalyzer    *detect.SSHAnalyzer
-	dnsAnalyzer    *detect.DNSAnalyzer
-	smtpAnalyzer   *detect.SMTPAnalyzer
-	ftpAnalyzer    *detect.FTPAnalyzer
-	dbAnalyzer     *detect.DBAnalyzer
+	engine          *ProxyEngine
+	bus             *detect.DetectionBus
+	httpAnalyzer    *detect.HTTPAnalyzer
+	sshAnalyzer     *detect.SSHAnalyzer
+	dnsAnalyzer     *detect.DNSAnalyzer
+	smtpAnalyzer    *detect.SMTPAnalyzer
+	ftpAnalyzer     *detect.FTPAnalyzer
+	dbAnalyzer      *detect.DBAnalyzer
 	genericAnalyzer *detect.GenericAnalyzer
-	tlsInspector   *detect.TLSInspector
-	behavioral     *detect.BehavioralEngine
+	tlsInspector    *detect.TLSInspector
+	behavioral      *detect.BehavioralEngine
 }
 
 // NewAnalyzerRouter creates the full analysis pipeline.
 func NewAnalyzerRouter(engine *ProxyEngine, bus *detect.DetectionBus, cfg *ProxyConfig) *AnalyzerRouter {
 	return &AnalyzerRouter{
-		engine:         engine,
-		bus:            bus,
-		httpAnalyzer:   detect.NewHTTPAnalyzer(bus),
-		sshAnalyzer:    detect.NewSSHAnalyzer(bus),
-		dnsAnalyzer:    detect.NewDNSAnalyzer(bus),
-		smtpAnalyzer:   detect.NewSMTPAnalyzer(bus),
-		ftpAnalyzer:    detect.NewFTPAnalyzer(bus),
-		dbAnalyzer:     detect.NewDBAnalyzer(bus),
+		engine:          engine,
+		bus:             bus,
+		httpAnalyzer:    detect.NewHTTPAnalyzer(bus),
+		sshAnalyzer:     detect.NewSSHAnalyzer(bus),
+		dnsAnalyzer:     detect.NewDNSAnalyzer(bus),
+		smtpAnalyzer:    detect.NewSMTPAnalyzer(bus),
+		ftpAnalyzer:     detect.NewFTPAnalyzer(bus),
+		dbAnalyzer:      detect.NewDBAnalyzer(bus),
 		genericAnalyzer: detect.NewGenericAnalyzer(bus),
-		tlsInspector:   detect.NewTLSInspector(bus),
-		behavioral:     detect.NewBehavioralEngine(bus, cfg.Detection.RateLimit.ConnectionsPerMinute,
+		tlsInspector:    detect.NewTLSInspector(bus),
+		behavioral: detect.NewBehavioralEngine(bus, cfg.Detection.RateLimit.ConnectionsPerMinute,
 			cfg.Detection.RateLimit.PortScanThreshold, cfg.Detection.RateLimit.BruteForceThreshold),
 	}
 }
@@ -350,11 +350,11 @@ func (p *ProxyEngine) Stop() {
 	}
 
 	p.wg.Wait()
-	
+
 	if p.DumpFile != nil {
 		p.DumpFile.Close()
 	}
-	
+
 	log.Println("[proxy] All listeners stopped.")
 }
 

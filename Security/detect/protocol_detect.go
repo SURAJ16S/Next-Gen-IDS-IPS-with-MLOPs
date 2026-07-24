@@ -785,8 +785,8 @@ func (pd *ProtocolDetector) detectSIP(data []byte) ProtocolFingerprint {
 func (pd *ProtocolDetector) detectDHCP(data []byte) ProtocolFingerprint {
 	// DHCP/BOOTP: minimum 240 bytes, magic cookie at offset 236-239 = 0x63825363
 	if len(data) >= 240 {
-		op := data[0]     // 1=Request, 2=Reply
-		htype := data[1]  // Hardware type (1=Ethernet)
+		op := data[0]    // 1=Request, 2=Reply
+		htype := data[1] // Hardware type (1=Ethernet)
 
 		if (op == 1 || op == 2) && htype == 1 {
 			// Check magic cookie

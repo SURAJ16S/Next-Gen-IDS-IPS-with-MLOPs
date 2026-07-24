@@ -18,10 +18,10 @@ import (
 
 // ProxyConfig is the top-level proxy configuration.
 type ProxyConfig struct {
-	Listeners  []ListenerConfig  `yaml:"listeners"`
-	TLS        TLSConfig         `yaml:"tls"`
-	Logging    LoggingConfig     `yaml:"logging"`
-	Detection  DetectionConfig   `yaml:"detection"`
+	Listeners []ListenerConfig `yaml:"listeners"`
+	TLS       TLSConfig        `yaml:"tls"`
+	Logging   LoggingConfig    `yaml:"logging"`
+	Detection DetectionConfig  `yaml:"detection"`
 }
 
 // ListenerConfig defines how a single port is proxied.
@@ -35,10 +35,10 @@ type ListenerConfig struct {
 
 // TLSConfig holds TLS interception settings.
 type TLSConfig struct {
-	Enabled     bool   `yaml:"enabled"`
-	CACertFile  string `yaml:"ca_cert_file"`
-	CAKeyFile   string `yaml:"ca_key_file"`
-	CertCacheSize int  `yaml:"cert_cache_size"`
+	Enabled       bool   `yaml:"enabled"`
+	CACertFile    string `yaml:"ca_cert_file"`
+	CAKeyFile     string `yaml:"ca_key_file"`
+	CertCacheSize int    `yaml:"cert_cache_size"`
 }
 
 // LoggingConfig holds logging settings.
@@ -49,16 +49,16 @@ type LoggingConfig struct {
 
 // DetectionConfig holds detection engine settings.
 type DetectionConfig struct {
-	RateLimit          RateLimitConfig `yaml:"rate_limit"`
-	MaxPayloadInspect  int             `yaml:"max_payload_inspect_bytes"` // Max bytes to inspect per stream
+	RateLimit         RateLimitConfig `yaml:"rate_limit"`
+	MaxPayloadInspect int             `yaml:"max_payload_inspect_bytes"` // Max bytes to inspect per stream
 }
 
 // RateLimitConfig holds rate-limiting thresholds.
 type RateLimitConfig struct {
 	ConnectionsPerMinute int `yaml:"connections_per_minute"`
 	ConnectionsPerSecond int `yaml:"connections_per_second"`
-	PortScanThreshold    int `yaml:"port_scan_threshold"`    // Unique ports in 60s
-	BruteForceThreshold  int `yaml:"brute_force_threshold"`  // Auth failures in 60s
+	PortScanThreshold    int `yaml:"port_scan_threshold"`   // Unique ports in 60s
+	BruteForceThreshold  int `yaml:"brute_force_threshold"` // Auth failures in 60s
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

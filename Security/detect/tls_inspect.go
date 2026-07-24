@@ -7,6 +7,7 @@ package detect
 
 import (
 	"crypto/md5"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -67,12 +68,29 @@ func (t *TLSInspector) Analyze(connID, srcIP string, srcPort, dstPort uint16, da
 		return
 	}
 
-	handshakeType := data[5]
+	// Iterate through handshake messages in this record
+	offset := 5
+	for offset+4 <= len(data) {
+		handshakeType := data[offset]
+		handshakeLen := int(data[offset+1])<<16 | int(data[offset+2])<<8 | int(data[offset+3])
 
-	if fromClient && handshakeType == 0x01 { // ClientHello
-		t.parseClientHello(connID, srcIP, srcPort, dstPort, data[5:], recordVersion)
-	} else if !fromClient && handshakeType == 0x02 { // ServerHello
-		t.parseServerHello(connID, srcIP, srcPort, dstPort, data[5:], recordVersion)
+		if offset+4+handshakeLen > len(data) {
+			break
+		}
+
+		msgData := data[offset : offset+4+handshakeLen]
+
+		if fromClient && handshakeType == 0x01 { // ClientHello
+			t.parseClientHello(connID, srcIP, srcPort, dstPort, msgData, recordVersion)
+		} else if !fromClient {
+			if handshakeType == 0x02 { // ServerHello
+				t.parseServerHello(connID, srcIP, srcPort, dstPort, msgData, recordVersion)
+			} else if handshakeType == 0x0B { // Certificate
+				t.parseCertificate(connID, srcIP, srcPort, dstPort, msgData)
+			}
+		}
+
+		offset += 4 + handshakeLen
 	}
 }
 
@@ -146,6 +164,7 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 	var ellipticCurves []uint16
 	var ecPointFormats []uint8
 	var supportedVersions []uint16
+	hasPSK := false
 
 	if offset+2 <= len(data) {
 		extTotalLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
@@ -181,6 +200,8 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 				}
 			case 0x002B: // supported_versions
 				supportedVersions = extractSupportedVersions(extData)
+			case 0x0029: // pre_shared_key
+				hasPSK = true
 			}
 
 			offset += extLen
@@ -224,44 +245,47 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 		}
 	}
 
+	sessionResumption := (sessionIDLen > 0) || hasPSK
+
 	// ── Emit ClientHello detection ──
 	t.bus.EmitDetection(Detection{
-		ID:        "TLS-HELLO-001",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatProtocolDetect,
-		Protocol:  "TLS",
-		SourceIP:  srcIP,
+		ID:         "TLS-HELLO-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatProtocolDetect,
+		Protocol:   "TLS",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   fmt.Sprintf("TLS ClientHello: %s, SNI=%s, JA3=%s", actualVersion, sni, ja3Hash),
-		ConnID:    connID,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("TLS ClientHello: %s, SNI=%s, JA3=%s", actualVersion, sni, ja3Hash),
+		ConnID:     connID,
 		Details: map[string]any{
-			"ja3_hash":           ja3Hash,
-			"ja3_string":        truncate(ja3String, 500),
-			"tls_version":       actualVersion,
-			"record_version":    tlsVersionString(recordVersion),
-			"sni":               sni,
-			"alpn":              alpn,
-			"cipher_suite_count": len(cipherSuites),
-			"extension_count":   len(extensions),
-			"supported_versions": supportedVersions,
+			"ja3_hash":                   ja3Hash,
+			"ja3_string":                 truncate(ja3String, 500),
+			"tls_version":                actualVersion,
+			"record_version":             tlsVersionString(recordVersion),
+			"sni":                        sni,
+			"alpn":                       alpn,
+			"cipher_suite_count":         len(cipherSuites),
+			"extension_count":            len(extensions),
+			"supported_versions":         supportedVersions,
+			"session_resumption_attempt": sessionResumption,
 		},
 	})
 
 	// ── Weak cipher detection ──
 	if len(weakFound) > 0 {
 		t.bus.EmitDetection(Detection{
-			ID:        "TLS-WEAK-001",
-			Timestamp: time.Now(),
-			Severity:  SevHigh,
-			Category:  CatTLSWeakCipher,
-			Protocol:  "TLS",
-			SourceIP:  srcIP,
+			ID:         "TLS-WEAK-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatTLSWeakCipher,
+			Protocol:   "TLS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("Weak TLS cipher suites offered: %s", strings.Join(weakFound, ", ")),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("Weak TLS cipher suites offered: %s", strings.Join(weakFound, ", ")),
+			ConnID:     connID,
 			Details: map[string]any{
 				"weak_ciphers": weakFound,
 			},
@@ -271,16 +295,16 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 	// ── TLS downgrade detection ──
 	if clientVersion <= 0x0301 && len(supportedVersions) == 0 {
 		t.bus.EmitDetection(Detection{
-			ID:        "TLS-DOWNGRADE",
-			Timestamp: time.Now(),
-			Severity:  SevHigh,
-			Category:  CatTLSDowngrade,
-			Protocol:  "TLS",
-			SourceIP:  srcIP,
+			ID:         "TLS-DOWNGRADE",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatTLSDowngrade,
+			Protocol:   "TLS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("TLS downgrade: client only supports %s", tlsVersionString(clientVersion)),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("TLS downgrade: client only supports %s", tlsVersionString(clientVersion)),
+			ConnID:     connID,
 		})
 	}
 }
@@ -313,15 +337,15 @@ func (t *TLSInspector) parseServerHello(connID, srcIP string, srcPort, dstPort u
 	ja3sHash := fmt.Sprintf("%x", md5.Sum([]byte(ja3sString)))
 
 	t.bus.EmitDetection(Detection{
-		ID:        "TLS-SHELLO-001",
-		Timestamp: time.Now(),
-		Severity:  SevInfo,
-		Category:  CatProtocolDetect,
-		Protocol:  "TLS",
-		SourceIP:  srcIP,
+		ID:         "TLS-SHELLO-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatProtocolDetect,
+		Protocol:   "TLS",
+		SourceIP:   srcIP,
 		SourcePort: srcPort,
-		DestPort:  dstPort,
-		Summary:   fmt.Sprintf("TLS ServerHello: %s, Cipher=0x%04X, JA3S=%s",
+		DestPort:   dstPort,
+		Summary: fmt.Sprintf("TLS ServerHello: %s, Cipher=0x%04X, JA3S=%s",
 			tlsVersionString(serverVersion), selectedCipher, ja3sHash),
 		ConnID: connID,
 		Details: map[string]any{
@@ -334,16 +358,16 @@ func (t *TLSInspector) parseServerHello(connID, srcIP string, srcPort, dstPort u
 	// Check if selected cipher is weak
 	if name, isWeak := t.weakCiphers[selectedCipher]; isWeak {
 		t.bus.EmitDetection(Detection{
-			ID:        "TLS-WEAK-SEL",
-			Timestamp: time.Now(),
-			Severity:  SevCritical,
-			Category:  CatTLSWeakCipher,
-			Protocol:  "TLS",
-			SourceIP:  srcIP,
+			ID:         "TLS-WEAK-SEL",
+			Timestamp:  time.Now(),
+			Severity:   SevCritical,
+			Category:   CatTLSWeakCipher,
+			Protocol:   "TLS",
+			SourceIP:   srcIP,
 			SourcePort: srcPort,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("Server selected weak cipher: %s", name),
-			ConnID:    connID,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("Server selected weak cipher: %s", name),
+			ConnID:     connID,
 		})
 	}
 }
@@ -451,4 +475,63 @@ func filterGREASE16(strs []string, vals []uint16) []string {
 func filterGREASEStr(strs []string) []string {
 	// For EC curves, already converted to string; just return as-is
 	return strs
+}
+
+// parseCertificate extracts data from a TLS Certificate message.
+func (t *TLSInspector) parseCertificate(connID, srcIP string, srcPort, dstPort uint16, data []byte) {
+	if len(data) < 7 {
+		return
+	}
+
+	offset := 4 // Skip type(1) + handshake_length(3)
+
+	// Certificate list length
+	if offset+3 > len(data) {
+		return
+	}
+	certsLen := int(data[offset])<<16 | int(data[offset+1])<<8 | int(data[offset+2])
+	offset += 3
+
+	if offset+certsLen > len(data) {
+		return
+	}
+
+	// Parse the first certificate in the chain
+	if offset+3 > len(data) {
+		return
+	}
+	certLen := int(data[offset])<<16 | int(data[offset+1])<<8 | int(data[offset+2])
+	offset += 3
+
+	if offset+certLen > len(data) {
+		return
+	}
+
+	certData := data[offset : offset+certLen]
+
+	cert, err := x509.ParseCertificate(certData)
+	if err != nil {
+		return
+	}
+
+	t.bus.EmitDetection(Detection{
+		ID:         "TLS-CERT-001",
+		Timestamp:  time.Now(),
+		Severity:   SevInfo,
+		Category:   CatProtocolDetect,
+		Protocol:   "TLS",
+		SourceIP:   srcIP,
+		SourcePort: srcPort,
+		DestPort:   dstPort,
+		Summary:    fmt.Sprintf("TLS Certificate: Issuer=%s, Subject=%s", cert.Issuer.CommonName, cert.Subject.CommonName),
+		ConnID:     connID,
+		Details: map[string]any{
+			"issuer":     cert.Issuer.String(),
+			"subject":    cert.Subject.String(),
+			"not_before": cert.NotBefore,
+			"not_after":  cert.NotAfter,
+			"dns_names":  cert.DNSNames,
+			"ip_addrs":   cert.IPAddresses,
+		},
+	})
 }

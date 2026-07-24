@@ -14,27 +14,28 @@ import (
 )
 
 type bpfPacketEvent struct {
-	_         structs.HostLayout
-	SrcIp     uint32
-	DestIp    uint32
-	PktSize   uint16
-	Protocol  uint8
-	Ttl       uint8
-	Tos       uint8
-	IpHdrLen  uint8
-	IpId      uint16
-	IpFragOff uint16
-	SrcPort   uint16
-	DestPort  uint16
-	_         [2]byte
-	TcpSeq    uint32
-	TcpAck    uint32
-	TcpFlags  uint8
-	TcpHdrLen uint8
-	TcpWindow uint16
-	Direction uint8
-	Pad       [3]uint8
-	Timestamp uint64
+	_            structs.HostLayout
+	SrcIp        uint32
+	DestIp       uint32
+	PktSize      uint16
+	Protocol     uint8
+	Ttl          uint8
+	Tos          uint8
+	IpHdrLen     uint8
+	IpId         uint16
+	IpFragOffset uint16
+	IpMf         uint8
+	_            [1]byte
+	SrcPort      uint16
+	DestPort     uint16
+	TcpSeq       uint32
+	TcpAck       uint32
+	TcpFlags     uint8
+	TcpHdrLen    uint8
+	TcpWindow    uint16
+	Direction    uint8
+	Pad          [3]uint8
+	Timestamp    uint64
 }
 
 // Names of all BPF objects in the ELF.
