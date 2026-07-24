@@ -95,6 +95,7 @@ func DefaultConfig() *ProxyConfig {
 		Listeners: []ListenerConfig{
 			// ── Web ──
 			{ListenPort: 80, BackendAddr: "127.0.0.1:8080", Transport: "tcp", Service: "http", Enabled: true},
+			{ListenPort: 3000, BackendAddr: "127.0.0.1:13000", Transport: "tcp", Service: "http", Enabled: true},
 			{ListenPort: 443, BackendAddr: "127.0.0.1:8443", Transport: "tcp+tls", Service: "https", Enabled: true},
 			{ListenPort: 8080, BackendAddr: "127.0.0.1:18080", Transport: "tcp", Service: "http", Enabled: true},
 			{ListenPort: 8443, BackendAddr: "127.0.0.1:18443", Transport: "tcp+tls", Service: "https", Enabled: true},
