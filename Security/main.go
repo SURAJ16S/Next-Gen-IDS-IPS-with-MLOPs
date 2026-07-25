@@ -314,15 +314,17 @@ type dashboard struct {
 	ingressPkts atomic.Int64
 	egressPkts  atomic.Int64
 	totalBytes  atomic.Int64
+	proxyStats  *detect.StatsCollector
 }
 
-func newDashboard(port uint16, iface string, svc ServiceInfo) *dashboard {
+func newDashboard(port uint16, iface string, svc ServiceInfo, pStats *detect.StatsCollector) *dashboard {
 	return &dashboard{
-		port:      port,
-		iface:     iface,
-		service:   svc,
-		startTime: time.Now(),
-		events:    make([]packetRecord, 0, maxEvents),
+		port:       port,
+		iface:      iface,
+		service:    svc,
+		startTime:  time.Now(),
+		events:     make([]packetRecord, 0, maxEvents),
+		proxyStats: pStats,
 	}
 }
 
@@ -424,6 +426,27 @@ func (d *dashboard) render() {
 	}
 	fmt.Println()
 
+	// ── Proxy Status ──
+	if d.proxyStats != nil {
+		active := d.proxyStats.ActiveConnections()
+		totalConns := d.proxyStats.TotalConnections()
+		dets := d.proxyStats.TotalDetections()
+		sevs := d.proxyStats.SeverityCounts()
+		crit := sevs["CRITICAL"]
+		high := sevs["HIGH"]
+		proxyContent := fmt.Sprintf(
+			"  %s %s    %s %s    %s %s",
+			statLabelStyle.Render("Proxy Conns:"),
+			statValueStyle.Render(fmt.Sprintf("%d", active)),
+			statLabelStyle.Render("Total Conns:"),
+			statValueStyle.Render(fmt.Sprintf("%d", totalConns)),
+			statLabelStyle.Render("Detections:"),
+			egressStyle.Render(fmt.Sprintf("%d (Crit: %d, High: %d)", dets, crit, high)),
+		)
+		fmt.Println(borderStyle.Render(proxyContent))
+		fmt.Println()
+	}
+
 	// ── Stats Panel ──
 	statsContent := fmt.Sprintf(
 		"  %s %s    %s %s    %s %s    %s %s    %s %s",
@@ -508,15 +531,26 @@ func main() {
 	configFlag := flag.String("config", "proxy_config.yaml", "Path to proxy configuration file")
 	flag.Parse()
 
+	var proxyEngine *proxy.ProxyEngine
+	var proxyStats *detect.StatsCollector
+
 	if *proxyFlag {
-		runProxyMode(*configFlag)
-		return
+		engine, stats, err := initProxyEngine(*configFlag)
+		if err != nil {
+			log.Fatalf("❌ Proxy Initialization Error: %v", err)
+		}
+		proxyEngine = engine
+		proxyStats = stats
 	}
 
 	var targetPort uint16
 
 	if *portFlag > 0 && *portFlag <= 65535 {
 		targetPort = uint16(*portFlag)
+	} else if proxyEngine != nil {
+		// Standalone Proxy Mode (No eBPF UI)
+		runStandaloneProxy(proxyStats)
+		return
 	} else {
 		// Interactive prompt
 		clearScreen()
@@ -680,7 +714,7 @@ func main() {
 	fmt.Printf("  %s Flow aggregation active → logs/flow_stats.jsonl\n", ingressStyle.Render("✓"))
 
 	// ── Initialize dashboard ──
-	dash := newDashboard(targetPort, ifaceName, svcInfo)
+	dash := newDashboard(targetPort, ifaceName, svcInfo, proxyStats)
 
 	// ── Signal handler for graceful shutdown ──
 	sig := make(chan os.Signal, 1)
@@ -818,7 +852,38 @@ func main() {
 // Proxy Mode Entry Point
 // ──────────────────────────────────────────────────────────────────────────────
 
-func runProxyMode(configPath string) {
+func initProxyEngine(configPath string) (*proxy.ProxyEngine, *detect.StatsCollector, error) {
+	cfg, err := proxy.LoadConfig(configPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such file or directory") {
+			cfg = proxy.DefaultConfig()
+			if err := proxy.SaveConfig(cfg, configPath); err != nil {
+				return nil, nil, fmt.Errorf("failed to create default config: %w", err)
+			}
+		} else {
+			return nil, nil, fmt.Errorf("failed to load configuration: %w", err)
+		}
+	}
+
+	stats := detect.NewStatsCollector()
+	bus := detect.NewDetectionBus()
+
+	jsonLogger, err := detect.NewJSONLLogger(cfg.Logging.Dir, cfg.Logging.MaxFileSizeMB)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize JSONL logger: %w", err)
+	}
+	bus.Subscribe(jsonLogger)
+	bus.Subscribe(stats)
+
+	engine := proxy.NewProxyEngine(cfg, bus, stats)
+	if err := engine.Start(); err != nil {
+		return nil, nil, fmt.Errorf("failed to start proxy engine: %w", err)
+	}
+
+	return engine, stats, nil
+}
+
+func runStandaloneProxy(stats *detect.StatsCollector) {
 	clearScreen()
 	fmt.Println(bannerStyle.Render(`
   ╔══════════════════════════════════════════════════════════════════╗
@@ -827,47 +892,6 @@ func runProxyMode(configPath string) {
   ╚══════════════════════════════════════════════════════════════════╝`))
 	fmt.Println()
 
-	// 1. Load config
-	fmt.Printf("  %s Loading configuration from %s...\n", statLabelStyle.Render("⚙"), configPath)
-	cfg, err := proxy.LoadConfig(configPath)
-	if err != nil {
-		if strings.Contains(err.Error(), "no such file or directory") {
-			fmt.Printf("  %s Config file not found, creating default at %s\n", statLabelStyle.Render("ℹ"), configPath)
-			cfg = proxy.DefaultConfig()
-			if err := proxy.SaveConfig(cfg, configPath); err != nil {
-				log.Fatalf("❌ Failed to create default config: %v", err)
-			}
-		} else {
-			log.Fatalf("❌ Failed to load configuration: %v", err)
-		}
-	}
-	fmt.Printf("  %s Loaded %d enabled listeners\n\n", ingressStyle.Render("✓"), len(cfg.EnabledListeners()))
-
-	// 2. Initialize telemetry & logging
-	stats := detect.NewStatsCollector()
-
-	// Create detection bus and attach JSON logger
-	bus := detect.NewDetectionBus()
-	jsonLogger, err := detect.NewJSONLLogger(cfg.Logging.Dir, cfg.Logging.MaxFileSizeMB)
-	if err != nil {
-		log.Fatalf("❌ Failed to initialize JSONL logger: %v", err)
-	}
-	defer jsonLogger.Close()
-	bus.Subscribe(jsonLogger)
-
-	// Attach stats collector to bus
-	bus.Subscribe(stats)
-
-	// 3. Initialize Proxy Engine
-	engine := proxy.NewProxyEngine(cfg, bus, stats)
-
-	// 4. Start Engine
-	if err := engine.Start(); err != nil {
-		log.Fatalf("❌ Failed to start proxy engine: %v", err)
-	}
-	defer engine.Stop()
-
-	// 5. Signal handling & dashboard update
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
@@ -880,7 +904,6 @@ func runProxyMode(configPath string) {
 			fmt.Println("\n  " + ingressStyle.Render("✓") + " Shutting down reverse proxy gracefully...")
 			return
 		case <-ticker.C:
-			// Print brief status update
 			active := stats.ActiveConnections()
 			total := stats.TotalConnections()
 			dets := stats.TotalDetections()

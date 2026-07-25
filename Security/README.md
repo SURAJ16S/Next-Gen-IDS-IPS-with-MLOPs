@@ -2,9 +2,15 @@
 
 A comprehensive Go-based **Next-Generation Intrusion Detection and Prevention System (IDS/IPS)** that leverages **eBPF TC (Traffic Control) hooks** for high-performance packet monitoring and a **Layer 7 Reverse Proxy Engine** for Deep Packet Inspection (DPI) and behavioral analysis. Together, these form the data-collection foundation for a **Next-Generation Firewall (NGFW)** powered by MLOps.
 
+## What's New (Latest Updates)
+
+- **Simultaneous eBPF & Proxy Execution:** The system now successfully bridges kernel-space eBPF and user-space Reverse Proxy engines within a single binary, running both concurrently to capture L4 flows and L7 payloads simultaneously.
+- **Unified Terminal Dashboard:** The terminal UI has been fully decoupled from the proxy engine, combining raw eBPF metrics and Proxy security detections into a single, beautiful, flicker-free dashboard.
+- **Robust Connection Tracking:** Implemented immediate deterministic cleanup and fallback garbage collection to prevent memory leaks during anomalous Layer 7 attacks or dropped connections.
+
 ## Core Architecture
 
-The application features a dual-engine architecture:
+The application features a dual-engine architecture that now runs **simultaneously** within a single binary, providing a unified view of both Layer 4 and Layer 7 traffic without any terminal flickering:
 
 ### 1. eBPF Packet Monitor Engine
 ```text
@@ -32,10 +38,10 @@ The application features a dual-engine architecture:
 
 1. **eBPF C code** (`ebpf/monitor.c`) runs inside the Linux kernel, attached to TC ingress and egress hooks.
 2. Packets matching the user's target port are captured and pushed to a **ring buffer**.
-3. **Go application** (`main.go`) reads events from the ring buffer, groups them into bidirectional flows, and displays them in a rich terminal dashboard.
+3. **Go application** (`main.go`) reads events from the ring buffer, groups them into bidirectional flows, and seamlessly renders them alongside proxy Layer 7 metrics in a unified, flicker-free terminal dashboard.
 
 ### 2. Layer 7 Proxy & DPI Engine
-When run with `--proxy`, the engine intercepts incoming connections using standard Go network listeners (as configured in `proxy_config.yaml`). It proxies traffic to the real backend while passively copying the byte stream. The `detect/` package continuously analyzes the payloads (HTTP, TLS, etc.), extracts machine-learning features (like entropy and character ratios), and streams detections to `logs/detections.jsonl`.
+When run with `--proxy`, the engine intercepts incoming connections using standard Go network listeners (as configured in `proxy_config.yaml`). It proxies traffic to the real backend while passively copying the byte stream. The `detect/` package continuously analyzes the payloads (HTTP, TLS, etc.) for malicious signatures. It features **robust connection state tracking** (immediate cleanup on connection close with fallback background garbage collection) to prevent memory leaks during anomalous traffic spikes. It extracts machine-learning features and streams detections to `logs/detections.jsonl`.
 
 ---
 
@@ -88,15 +94,22 @@ make all
 
 ## Execution Steps
 
-### 1. Reverse Proxy Mode (IDS/IPS Engine)
+### 1. Simultaneous eBPF & Proxy Mode (Recommended)
+Run both the Layer 4 eBPF packet monitor and the Layer 7 reverse proxy simultaneously to get full stack visibility in a single unified dashboard.
+
+```bash
+sudo ./ngfw-monitor --proxy --iface eth0 --port 8080
+```
+
+### 2. Reverse Proxy Mode Only (IDS/IPS Engine)
 Run the application in Layer 7 proxy mode to inspect traffic content, detect attacks (SQLi, brute-force, etc.), and generate JSONL logs based on the provided configuration (`proxy_config.yaml`).
 
 ```bash
-sudo ./ngfw-monitor --proxy --config proxy_config.yaml
+sudo ./ngfw-monitor --proxy
 ```
 
 **Testing the Proxy with OWASP Juice Shop:**
-You can test the reverse proxy by running a vulnerable application like OWASP Juice Shop on a backend port (e.g., 13000) while the proxy listens on port 3000.
+You can test the reverse proxy by running a vulnerable application like OWASP Juice Shop on a backend port (e.g., 3000) while the proxy listens on port 8080.
 
 1. Start Juice Shop on the backend port:
    ```bash
@@ -164,8 +177,6 @@ Security/
 ├── go.mod                  # Go module definition
 ├── go.sum                  # Go dependency checksums
 ├── Makefile                # Build automation
-├── output.txt              # Packet log output (Monitor Mode)
-├── proxy-output.json       # Raw traffic data streams
 └── README.md               # This file
 ```
 

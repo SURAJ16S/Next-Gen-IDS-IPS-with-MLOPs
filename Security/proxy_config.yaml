@@ -8,7 +8,7 @@ listeners:
       backend_addr: 127.0.0.1:13000
       transport: tcp
       service: http
-      enabled: true
+      enabled: false
     - listen_port: 443
       backend_addr: 127.0.0.1:8443
       transport: tcp+tls

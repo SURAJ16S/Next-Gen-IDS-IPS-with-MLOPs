@@ -7,6 +7,7 @@
 package detect
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -37,15 +38,49 @@ type attackPattern struct {
 	regex    *regexp.Regexp
 }
 
+const RequestTimeout = 5 * time.Minute
+
 // NewHTTPAnalyzer creates an HTTP analyzer with all attack signatures compiled.
-func NewHTTPAnalyzer(bus *DetectionBus) *HTTPAnalyzer {
+func NewHTTPAnalyzer(ctx context.Context, bus *DetectionBus) *HTTPAnalyzer {
 	a := &HTTPAnalyzer{
 		bus:            bus,
 		reqTimes:       make(map[string]time.Time),
 		sessionTracker: NewSessionTracker(bus),
 	}
 	a.compilePatterns()
+	bus.Subscribe(a)
+	go a.cleanupStaleReqTimes(ctx)
 	return a
+}
+
+func (a *HTTPAnalyzer) cleanupStaleReqTimes(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.mu.Lock()
+			now := time.Now()
+			for connID, t := range a.reqTimes {
+				if now.Sub(t) > RequestTimeout {
+					delete(a.reqTimes, connID)
+				}
+			}
+			a.mu.Unlock()
+		}
+	}
+}
+
+// ── DetectionSubscriber Implementation ──
+
+func (a *HTTPAnalyzer) OnDetection(d Detection) {}
+
+func (a *HTTPAnalyzer) OnConnectionClose(c ConnectionRecord) {
+	a.mu.Lock()
+	delete(a.reqTimes, c.ConnID)
+	a.mu.Unlock()
 }
 
 // compilePatterns builds the regex-based attack signature database.
@@ -149,9 +184,6 @@ func (a *HTTPAnalyzer) Analyze(connID, srcIP string, srcPort, dstPort uint16, da
 
 // analyzeRequest performs deep inspection of an HTTP request.
 func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uint16, s string, raw []byte) {
-	a.mu.Lock()
-	a.reqTimes[connID] = time.Now()
-	a.mu.Unlock()
 
 	// Parse request line
 	lines := strings.SplitN(s, "\r\n", -1)
@@ -171,6 +203,30 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 	if len(parts) >= 3 {
 		httpVer = parts[2]
 	}
+
+	if strings.TrimSpace(method) == "" || strings.TrimSpace(uri) == "" {
+		if len(strings.TrimSpace(s)) == 0 {
+			// Pure whitespace/newlines. Likely a keep-alive or health probe.
+			return
+		}
+		a.bus.EmitDetection(Detection{
+			ID:         "HTTP-ERR-002",
+			Timestamp:  time.Now(),
+			Severity:   SevLow,
+			Category:   "malformed-http",
+			Protocol:   "HTTP",
+			SourceIP:   srcIP,
+			SourcePort: srcPort,
+			DestPort:   dstPort,
+			Summary:    "Malformed HTTP request",
+			ConnID:     connID,
+		})
+		return
+	}
+
+	a.mu.Lock()
+	a.reqTimes[connID] = time.Now()
+	a.mu.Unlock()
 
 	// Parse headers
 	headers := make(map[string]string)
@@ -452,6 +508,24 @@ func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort ui
 	statusCode := 0
 	if len(statusLine) >= 12 {
 		fmt.Sscanf(statusLine[9:12], "%d", &statusCode)
+	}
+
+	if statusCode == 0 {
+		if ok {
+			a.bus.EmitDetection(Detection{
+				ID:         "HTTP-ERR-001",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   "backend-error",
+				Protocol:   "HTTP",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary:    "Connection closed by server without HTTP response",
+				ConnID:     connID,
+			})
+		}
+		return
 	}
 
 	// Parse response headers

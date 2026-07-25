@@ -1,0 +1,14 @@
+# Logs
+*.log
+logs/*.jsonl
+*.txt
+*.json
+
+# Binaries
+ngfw-monitor
+ngfw_proxy
+*.o
+
+# IDEs
+.idea/
+.vscode/
