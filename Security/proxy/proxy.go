@@ -194,7 +194,7 @@ func NewAnalyzerRouter(engine *ProxyEngine, bus *detect.DetectionBus, cfg *Proxy
 	return &AnalyzerRouter{
 		engine:          engine,
 		bus:             bus,
-		httpAnalyzer:    detect.NewHTTPAnalyzer(bus),
+		httpAnalyzer:    detect.NewHTTPAnalyzer(engine.ctx, bus),
 		sshAnalyzer:     detect.NewSSHAnalyzer(bus),
 		dnsAnalyzer:     detect.NewDNSAnalyzer(bus),
 		smtpAnalyzer:    detect.NewSMTPAnalyzer(bus),
