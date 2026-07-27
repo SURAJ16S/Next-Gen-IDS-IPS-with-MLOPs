@@ -15,13 +15,13 @@ The application features a dual-engine architecture that now runs **simultaneous
 ### 1. eBPF Packet Monitor Engine
 ```text
 ┌──────────────────────────────────────────────────┐
-│                  Linux Kernel                     │
-│                                                   │
+│                  Linux Kernel                    │
+│                                                  │
 │  ┌─────────┐    TC Ingress    ┌──────────────┐   │
-│  │ Network  │───────────────▶│  eBPF Program  │   │
-│  │Interface │    TC Egress    │  (monitor.c)   │   │
-│  │ (eth0)  │◀───────────────│               │   │
-│  └─────────┘                 └──────┬───────┘   │
+│  │ Network  │───────────────▶│  eBPF Program │   │
+│  │Interface │    TC Egress    │  (monitor.c) │   │
+│  │ (eth0)  │◀───────────────│                │   │
+│  └─────────┘                 └──────┬───────┘     │
 │                                      │            │
 │                              Ring Buffer          │
 │                                      │            │
