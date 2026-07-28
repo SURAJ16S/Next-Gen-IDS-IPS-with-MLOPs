@@ -267,7 +267,7 @@ function Register() {
   };
 
   // ── Field helper: render label + input + error ─────────────────────────────
-  const Field = ({ name, label, type = 'text', placeholder, icon: Icon, children }) => {
+  const renderField = ({ name, label, type = 'text', placeholder, icon: Icon, children }) => {
     const err   = touched[name] ? errors[name] : '';
     const valid = touched[name] && !errors[name] && form[name];
     return (
@@ -333,24 +333,24 @@ function Register() {
 
           {/* ── Names (R1–R6) ──────────────────────────────────────────── */}
           <div className="auth-row">
-            <Field name="firstName" label="First Name" placeholder="John" icon={User} />
-            <Field name="lastName"  label="Last Name"  placeholder="Doe"  icon={User} />
+            {renderField({ name: "firstName", label: "First Name", placeholder: "John", icon: User })}
+            {renderField({ name: "lastName",  label: "Last Name",  placeholder: "Doe",  icon: User })}
           </div>
 
           {/* ── Username (R7–R13) ──────────────────────────────────────── */}
-          <Field name="username" label="Username" placeholder="johndoe99" icon={AtSign} />
+          {renderField({ name: "username", label: "Username", placeholder: "johndoe99", icon: AtSign })}
           <p className="field-hint">
             <Info size={11} /> 3–30 chars · letters, numbers, _ or - · must start with a letter
           </p>
 
           {/* ── DOB + Mobile (R14–R20) ──────────────────────────────────── */}
           <div className="auth-row">
-            <Field name="dob" label="Date of Birth" type="date" icon={Calendar} />
-            <Field name="mobile" label="Mobile Number" placeholder="+919876543210" icon={Phone} />
+            {renderField({ name: "dob", label: "Date of Birth", type: "date", icon: Calendar })}
+            {renderField({ name: "mobile", label: "Mobile Number", placeholder: "+919876543210", icon: Phone })}
           </div>
 
           {/* ── Email (R21–R22) ─────────────────────────────────────────── */}
-          <Field name="email" label="Email Address" type="email" placeholder="you@example.com" icon={Mail} />
+          {renderField({ name: "email", label: "Email Address", type: "email", placeholder: "you@example.com", icon: Mail })}
 
           {/* ── Password (R23–R32) ──────────────────────────────────────── */}
           {(() => {

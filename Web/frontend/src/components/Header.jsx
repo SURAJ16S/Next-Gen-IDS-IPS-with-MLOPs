@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Bell, LogOut, User } from 'lucide-react';
+import { Search, Bell, LogOut, User, Settings } from 'lucide-react';
 import { getThreats } from '../services/api';
 
 function Header() {
@@ -186,6 +186,24 @@ function Header() {
               <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12.5px', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border-subtle)' }}>
                 <User size={14} />
                 {user.email || 'user@idps.com'}
+              </div>
+              <div
+                onClick={() => { setShowProfile(false); navigate('/settings'); }}
+                style={{
+                  padding: '10px 14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontSize: '12.5px',
+                  color: 'var(--text-primary)',
+                  cursor: 'pointer',
+                  borderBottom: '1px solid var(--border-subtle)'
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-hover)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              >
+                <Settings size={14} />
+                Settings
               </div>
               <div
                 onClick={handleLogout}
