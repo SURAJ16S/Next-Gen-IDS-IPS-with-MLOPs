@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
+import { AlertCircle, CheckCircle, Info } from 'lucide-react';
 import { verifyOtp, forgotPassword } from '../services/api';
 import './Auth.css';
 
@@ -11,8 +12,9 @@ function VerifyOtp() {
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [info, setInfo] = useState('');
   const [loading, setLoading] = useState(false);
-  const [secondsLeft, setSecondsLeft] = useState(300); // 5 min
+  const [secondsLeft, setSecondsLeft] = useState(300); // 5 minutes
   const inputRefs = useRef([]);
 
   useEffect(() => {
@@ -42,13 +44,28 @@ function VerifyOtp() {
     }
   };
 
+  const handlePaste = (e) => {
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    if (pasted.length === 6) {
+      const newOtp = pasted.split('');
+      setOtp(newOtp);
+      inputRefs.current[5]?.focus();
+    }
+    e.preventDefault();
+  };
+
   const handleResend = async () => {
     setError('');
     setSuccess('');
+    setInfo('');
     try {
-      await forgotPassword({ email });
+      const res = await forgotPassword({ email });
       setSecondsLeft(300);
-      setSuccess('OTP resent successfully');
+      if (res.data.otp) {
+        setInfo(`OTP resent! (Dev mode) New OTP: ${res.data.otp}`);
+      } else {
+        setSuccess('OTP resent successfully');
+      }
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to resend OTP');
     }
@@ -59,13 +76,16 @@ function VerifyOtp() {
     setError('');
     const otpValue = otp.join('');
     if (otpValue.length !== 6) {
-      setError('Enter complete 6-digit OTP');
+      setError('Please enter the complete 6-digit OTP');
       return;
     }
     setLoading(true);
     try {
       const res = await verifyOtp({ email, otp: otpValue });
-      navigate('/reset-password', { state: { email, resetToken: res.data.resetToken } });
+      setSuccess('OTP verified! Redirecting...');
+      setTimeout(() => {
+        navigate('/reset-password', { state: { email, resetToken: res.data.resetToken } });
+      }, 1000);
     } catch (err) {
       setError(err.response?.data?.message || 'Invalid or expired OTP');
     } finally {
@@ -77,15 +97,32 @@ function VerifyOtp() {
   const seconds = secondsLeft % 60;
 
   return (
-    <div className="auth-wrapper">
+    <div className="auth-bg">
       <div className="auth-card">
         <div className="auth-brand">
+          <div className="auth-shield">🔑</div>
           <h1>Verify OTP</h1>
-          <p>Enter the 6-digit code sent to {email}</p>
+          <p>Enter the 6-digit code sent to<br /><strong style={{ color: 'var(--accent-blue)' }}>{email}</strong></p>
         </div>
 
-        {error && <div className="auth-error">{error}</div>}
-        {success && <div className="auth-success">{success}</div>}
+        {error && (
+          <div className="auth-error">
+            <AlertCircle size={14} />
+            {error}
+          </div>
+        )}
+        {success && (
+          <div className="auth-success">
+            <CheckCircle size={14} />
+            {success}
+          </div>
+        )}
+        {info && (
+          <div className="auth-info">
+            <Info size={14} />
+            {info}
+          </div>
+        )}
 
         <form className="auth-form" onSubmit={handleSubmit}>
           <div className="otp-inputs">
@@ -97,21 +134,35 @@ function VerifyOtp() {
                 inputMode="numeric"
                 maxLength={1}
                 value={digit}
+                placeholder="·"
                 onChange={(e) => handleChange(i, e.target.value)}
                 onKeyDown={(e) => handleKeyDown(i, e)}
+                onPaste={i === 0 ? handlePaste : undefined}
+                id={`otp-digit-${i}`}
               />
             ))}
           </div>
 
           <div className="otp-timer">
             {secondsLeft > 0 ? (
-              <>OTP expires in {minutes}:{seconds.toString().padStart(2, '0')}</>
+              <>
+                Expires in&nbsp;
+                <span className="otp-timer-countdown">
+                  {minutes}:{seconds.toString().padStart(2, '0')}
+                </span>
+              </>
             ) : (
-              <span style={{ color: '#dc2626' }}>OTP expired</span>
+              <span className="otp-timer-expired">OTP expired</span>
             )}
           </div>
 
-          <button className="auth-btn" type="submit" disabled={loading || secondsLeft === 0}>
+          <button
+            className="auth-btn"
+            id="otp-submit"
+            type="submit"
+            disabled={loading || secondsLeft === 0}
+          >
+            {loading && <span className="auth-btn-spinner" />}
             {loading ? 'Verifying...' : 'Verify OTP'}
           </button>
         </form>
@@ -119,12 +170,14 @@ function VerifyOtp() {
         <div className="auth-links">
           {secondsLeft === 0 && (
             <>
-              <a href="#" onClick={(e) => { e.preventDefault(); handleResend(); }}>Resend OTP</a>
+              <a href="#" id="resend-otp" onClick={(e) => { e.preventDefault(); handleResend(); }}>
+                Resend OTP
+              </a>
               <br />
               <br />
             </>
           )}
-          <Link to="/login">Back to Login</Link>
+          <Link to="/login" id="back-to-login-otp">← Back to Sign In</Link>
         </div>
       </div>
     </div>

@@ -3,6 +3,7 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const http = require('http');
 const path = require('path');
+const helmet = require('helmet');
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
@@ -14,14 +15,37 @@ connectDB();
 
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+// ─── Security Headers (Helmet) ────────────────────────────────────────────────
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // handled by frontend if needed
+    crossOriginEmbedderPolicy: false,
+  })
+);
+
+// ─── CORS ────────────────────────────────────────────────────────────────────
+app.use(
+  cors({
+    origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  })
+);
+
+// ─── Body Parsing (capped at 10kb to prevent payload DoS) ────────────────────
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+
+// ─── Request Logger ───────────────────────────────────────────────────────────
 app.use(requestLogger);
 
+// ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.send('IDPS Backend API Running');
+  res.json({ status: 'ok', message: 'IDPS Backend API Running', timestamp: new Date() });
 });
 
+// ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/dashboard', require('./routes/dashboard.routes'));
 app.use('/api/threats', require('./routes/threat.routes'));
@@ -30,11 +54,25 @@ app.use('/api/logs', require('./routes/logs.routes'));
 app.use('/api/analytics', require('./routes/analytics.routes'));
 app.use('/api/devops', require('./routes/devops.routes'));
 
+// ─── 404 Handler ─────────────────────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ message: `Route ${req.originalUrl} not found` });
+});
+
+// ─── Global Error Handler ─────────────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('UNHANDLED ERROR:', err);
+  res.status(err.status || 500).json({ message: err.message || 'Internal Server Error' });
+});
+
+// ─── Server ───────────────────────────────────────────────────────────────────
 const server = http.createServer(app);
 initSocket(server);
 
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`\n🚀 Server running on port ${PORT}`);
+  console.log(`🔒 Helmet security headers: enabled`);
+  console.log(`📡 Environment: ${process.env.NODE_ENV}`);
 });
