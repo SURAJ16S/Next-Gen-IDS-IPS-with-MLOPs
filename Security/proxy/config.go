@@ -261,3 +261,43 @@ func SaveConfig(cfg *ProxyConfig, path string) error {
 	}
 	return os.WriteFile(path, data, 0644)
 }
+
+// HasListener returns true if the config already has an enabled TCP listener on the given port.
+func (c *ProxyConfig) HasListener(port uint16) bool {
+	for _, l := range c.Listeners {
+		if l.ListenPort == port && l.Transport == "tcp" && l.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// AddOrUpdateListener adds a new TCP listener for the given listen port forwarding to
+// backendPort on localhost, or enables an existing disabled listener for that port.
+// If a matching enabled listener already exists it is left unchanged.
+func (c *ProxyConfig) AddOrUpdateListener(listenPort, backendPort uint16, service string) {
+	// Check for an existing entry (enabled or disabled) with matching port + transport
+	for i, l := range c.Listeners {
+		if l.ListenPort == listenPort && l.Transport == "tcp" {
+			// Re-enable and update backend if the entry was disabled
+			c.Listeners[i].Enabled = true
+			c.Listeners[i].BackendAddr = fmt.Sprintf("127.0.0.1:%d", backendPort)
+			if service != "" {
+				c.Listeners[i].Service = service
+			}
+			return
+		}
+	}
+
+	// No existing entry — append a new one
+	if service == "" {
+		service = "http" // generic default service label
+	}
+	c.Listeners = append(c.Listeners, ListenerConfig{
+		ListenPort:  listenPort,
+		BackendAddr: fmt.Sprintf("127.0.0.1:%d", backendPort),
+		Transport:   "tcp",
+		Service:     service,
+		Enabled:     true,
+	})
+}

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"flag"
@@ -14,7 +15,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,7 +37,7 @@ import (
 // Constants & Styles
 // ──────────────────────────────────────────────────────────────────────────────
 
-const maxEvents = 50 // Number of events to keep in the scrolling dashboard
+const maxEvents = 15 // Number of events to keep in the scrolling dashboard
 
 // Color palette
 var (
@@ -188,6 +191,436 @@ func formatBytes(b int64) string {
 		return fmt.Sprintf("%.1f KB", float64(b)/float64(1<<10))
 	default:
 		return fmt.Sprintf("%d B", b)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Interactive CLI Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// globalScanner is a shared bufio.Scanner that reads from stdin line-by-line.
+// Using a single scanner avoids buffering conflicts between multiple reads.
+var globalScanner = bufio.NewScanner(os.Stdin)
+
+// readLine reads a single trimmed line from stdin via the global scanner.
+func readLine() string {
+	if globalScanner.Scan() {
+		return strings.TrimSpace(globalScanner.Text())
+	}
+	return ""
+}
+
+// promptMenuChoice displays the main menu and returns a valid choice (1–4).
+// It re-prompts indefinitely until the user enters a valid option.
+func promptMenuChoice() int {
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF1744")).Bold(true)
+	optionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00E5FF")).Bold(true)
+	highlightStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00E676")).Bold(true)
+
+	for {
+		clearScreen()
+		fmt.Println(bannerStyle.Render(`
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║      ███╗   ██╗ ██████╗ ███████╗██╗    ██╗                     ║
+  ║      ████╗  ██║██╔════╝ ██╔════╝██║    ██║                     ║
+  ║      ██╔██╗ ██║██║  ███╗█████╗  ██║ █╗ ██║                     ║
+  ║      ██║╚██╗██║██║   ██║██╔══╝  ██║███╗██║                     ║
+  ║      ██║ ╚████║╚██████╔╝██║     ╚███╔███╔╝                     ║
+  ║      ╚═╝  ╚═══╝ ╚═════╝ ╚═╝      ╚══╝╚══╝                     ║
+  ║     Next-Generation Firewall — Interactive CLI v1.2            ║
+  ╚══════════════════════════════════════════════════════════════════╝`))
+		fmt.Println()
+		fmt.Println(statLabelStyle.Render("  Select an operating mode:"))
+		fmt.Println()
+		fmt.Println("  " + optionStyle.Render("[1]") + "  " + statValueStyle.Render("eBPF Traffic Monitor") +
+			" — kernel-level packet inspection via TC hooks")
+		fmt.Println("  " + optionStyle.Render("[2]") + "  " + statValueStyle.Render("Reverse Proxy") +
+			"          — application-layer DPI detection engine")
+		fmt.Println("  " + optionStyle.Render("[3]") + "  " + statValueStyle.Render("Integrated Mode") +
+			"        — eBPF monitor + proxy detection combined")
+		fmt.Println("  " + optionStyle.Render("[4]") + "  " + statValueStyle.Render("Port Management") +
+			"        — check if a port is in use and free it")
+		fmt.Println("  " + highlightStyle.Render("[5]") + "  " + statValueStyle.Render("Exit"))
+		fmt.Println()
+		fmt.Print(statLabelStyle.Render("  Enter choice [1-5]: "))
+
+		input := readLine()
+		choice, err := strconv.Atoi(input)
+		if err != nil || choice < 1 || choice > 5 {
+			fmt.Println()
+			fmt.Println(errorStyle.Render("  ✗ Invalid choice '" + input + "'. Please enter a number between 1 and 5."))
+			fmt.Println(statLabelStyle.Render("  Press Enter to try again..."))
+			readLine()
+			continue
+		}
+		return choice
+	}
+}
+
+// promptInterface lists available network interfaces and asks the user to
+// select one by name or by list index. Re-prompts on invalid input.
+func promptInterface() string {
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF1744")).Bold(true)
+	indexStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E040FB")).Bold(true)
+
+	for {
+		fmt.Println()
+		fmt.Println(statLabelStyle.Render("  Available network interfaces:"))
+		fmt.Println()
+
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			log.Fatalf("❌  Failed to list network interfaces: %v", err)
+		}
+
+		// Build a list of valid interface names for index-based lookup
+		validIfaces := make([]string, 0, len(ifaces))
+		for _, ifc := range ifaces {
+			addrs, _ := ifc.Addrs()
+			addrStrs := make([]string, 0, len(addrs))
+			for _, a := range addrs {
+				addrStrs = append(addrStrs, a.String())
+			}
+			addrInfo := ""
+			if len(addrStrs) > 0 {
+				addrInfo = " (" + strings.Join(addrStrs, ", ") + ")"
+			}
+			idx := len(validIfaces) + 1
+			if ifc.Flags&net.FlagUp != 0 {
+				fmt.Printf("    %s %s %s%s\n",
+					indexStyle.Render(fmt.Sprintf("[%d]", idx)),
+					ingressStyle.Render("●"),
+					statValueStyle.Render(ifc.Name),
+					dimStyle.Render(addrInfo))
+			} else {
+				fmt.Printf("    %s %s %s%s\n",
+					indexStyle.Render(fmt.Sprintf("[%d]", idx)),
+					dimStyle.Render("○"),
+					dimStyle.Render(ifc.Name),
+					dimStyle.Render(addrInfo+" [DOWN]"))
+			}
+			validIfaces = append(validIfaces, ifc.Name)
+		}
+
+		fmt.Println()
+		fmt.Print(statLabelStyle.Render("  Enter interface name or number: "))
+		input := readLine()
+
+		if input == "" {
+			fmt.Println(errorStyle.Render("  ✗ Input cannot be empty. Please try again."))
+			continue
+		}
+
+		// Check if user entered a number (index)
+		if idx, err := strconv.Atoi(input); err == nil {
+			if idx >= 1 && idx <= len(validIfaces) {
+				selected := validIfaces[idx-1]
+				fmt.Println(ingressStyle.Render("  ✓ Selected interface: ") + statValueStyle.Render(selected))
+				return selected
+			}
+			fmt.Println(errorStyle.Render(fmt.Sprintf("  ✗ Index %d is out of range (1–%d). Please try again.", idx, len(validIfaces))))
+			continue
+		}
+
+		// Check if user entered a valid interface name
+		if _, err := net.InterfaceByName(input); err == nil {
+			fmt.Println(ingressStyle.Render("  ✓ Selected interface: ") + statValueStyle.Render(input))
+			return input
+		}
+
+		fmt.Println(errorStyle.Render("  ✗ Interface '" + input + "' not found. Please enter a valid name or number."))
+	}
+}
+
+// promptPort prompts the user to enter a port number (1–65535) and
+// re-prompts until a valid value is given.
+func promptPort(label string) uint16 {
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF1744")).Bold(true)
+
+	for {
+		fmt.Println()
+		fmt.Print(statLabelStyle.Render("  " + label + " [1-65535]: "))
+		input := readLine()
+
+		if input == "" {
+			fmt.Println(errorStyle.Render("  ✗ Input cannot be empty. Please try again."))
+			continue
+		}
+
+		port, err := strconv.Atoi(input)
+		if err != nil {
+			fmt.Println(errorStyle.Render("  ✗ '" + input + "' is not a valid number. Please enter an integer."))
+			continue
+		}
+		if port < 1 || port > 65535 {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("  ✗ Port %d is out of range. Must be between 1 and 65535.", port)))
+			continue
+		}
+
+		fmt.Println(ingressStyle.Render(fmt.Sprintf("  ✓ Port set to: %d", port)))
+		return uint16(port)
+	}
+}
+
+// findFreePort finds a free port starting from base, incrementing until one is
+// available. This is used to auto-select a proxy listen port so it never
+// conflicts with the user's real service.
+func findFreePort(base uint16) uint16 {
+	for port := base; port <= 65534; port++ {
+		// Browsers block port 10080 (Amanda) to prevent NAT slipstreaming, 
+		// and most ports under 1024. Skip them so we don't break web access.
+		if port == 10080 || (port < 1024 && port != 80 && port != 443) {
+			continue
+		}
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			ln.Close()
+			return port
+		}
+	}
+	// Fallback: try from 49152 (IANA dynamic range)
+	for port := uint16(49152); port <= 65534; port++ {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			ln.Close()
+			return port
+		}
+	}
+	return 0
+}
+
+// promptAppPort asks the user for their backend service port.
+// Auto-calculates a free proxy listen port (backend + 10000) and returns both.
+func promptAppPort() (backendPort, proxyPort uint16) {
+	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00E5FF"))
+	tipStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFEA00"))
+
+	fmt.Println()
+	fmt.Println(infoStyle.Render("  \u250c\u2500 What port is your app/service running on?"))
+	fmt.Println(infoStyle.Render("  \u2502  This is the port YOU started your server on."))
+	fmt.Println(tipStyle.Render("  \u2502  Examples:"))
+	fmt.Println(tipStyle.Render("  \u2502    python3 -m http.server 8080  \u2192  enter 8080"))
+	fmt.Println(tipStyle.Render("  \u2502    node server.js (port 5000)   \u2192  enter 5000"))
+	fmt.Println(tipStyle.Render("  \u2502    npm run dev  (port 3000)     \u2192  enter 3000"))
+	fmt.Println(infoStyle.Render("  \u2514\u2500 The monitor will NOT touch that port."))
+
+	backendPort = promptPort("Your app's port")
+
+	// Auto-calculate a free proxy listen port
+	candidate := backendPort + 10000
+	if candidate > 65534 {
+		candidate = backendPort - 1000
+	}
+	proxyPort = findFreePort(candidate)
+
+	if proxyPort != 0 {
+		fmt.Println()
+		fmt.Println(infoStyle.Render(fmt.Sprintf(
+			"  \u2713 Proxy will be assigned port :%d (auto-selected, won't conflict with your app)",
+			proxyPort)))
+	}
+
+	return backendPort, proxyPort
+}
+
+
+
+// managePort prompts for a port, checks if it's in use, and offers to kill it.
+func managePort() {
+	clearScreen()
+	fmt.Println(bannerStyle.Render("\n  ── Port Management ──\n"))
+	
+	port := promptPort("Enter port to check/manage")
+	fmt.Println()
+
+	// Try to listen on the port to see if it's free
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err == nil {
+		ln.Close()
+		successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00E676")).Bold(true)
+		fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ Port %d is currently FREE (not in use).", port)))
+		return
+	}
+
+	// Port is in use
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF1744")).Bold(true)
+	fmt.Println(errorStyle.Render(fmt.Sprintf("  ✗ Port %d is IN USE.", port)))
+	
+	// Show what is using it if possible using ss
+	cmd := exec.Command("ss", "-lptn", fmt.Sprintf("sport = :%d", port))
+	out, _ := cmd.CombinedOutput()
+	if len(out) > 0 {
+		fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#757575")).Render("\n" + string(out)))
+	}
+
+	fmt.Print(statLabelStyle.Render("  Do you want to FORCE CLOSE the port by killing the process? (y/N): "))
+	ans := readLine()
+	if strings.ToLower(ans) == "y" || strings.ToLower(ans) == "yes" {
+		killCmd := exec.Command("fuser", "-k", fmt.Sprintf("%d/tcp", port))
+		if killErr := killCmd.Run(); killErr != nil {
+			fmt.Println(errorStyle.Render("  ✗ Failed to kill process. Are you running as root (sudo)?"))
+		} else {
+			successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00E676")).Bold(true)
+			fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ Process killed. Port %d should now be free.", port)))
+		}
+	} else {
+		fmt.Println(statLabelStyle.Render("  Skipped."))
+	}
+}
+
+// initProxyEngineWithPort loads (or creates) the proxy config, injects the
+// user-specified listen/backend port pair into it, saves the updated config
+// back to disk, then initialises and starts the proxy engine.
+// This ensures that any custom port always works regardless of what was
+// previously in proxy_config.yaml.
+func initProxyEngineWithPort(configPath string, listenPort, backendPort uint16, service string) (*proxy.ProxyEngine, *detect.StatsCollector, error) {
+	// Load existing config, or fall back to the built-in default
+	cfg, err := proxy.LoadConfig(configPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such file or directory") {
+			cfg = proxy.DefaultConfig()
+
+		} else {
+			return nil, nil, fmt.Errorf("failed to load configuration: %w", err)
+		}
+	}
+
+	// Inject the user-supplied listener (add or update in place)
+	cfg.AddOrUpdateListener(listenPort, backendPort, service)
+
+	// Persist the updated config so it survives restarts
+	if saveErr := proxy.SaveConfig(cfg, configPath); saveErr != nil {
+		// Non-fatal: warn but continue — the engine will still start with the
+		// in-memory config even if the file write fails.
+		fmt.Printf("  %s Warning: could not save updated config to %s: %v\n",
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#FFEA00")).Bold(true).Render("⚠"),
+			configPath, saveErr)
+	} else {
+		fmt.Printf("  %s Config saved: :%d → 127.0.0.1:%d [%s] added to %s\n",
+			ingressStyle.Render("✓"),
+			listenPort, backendPort, service, configPath)
+	}
+
+	stats := detect.NewStatsCollector()
+	bus := detect.NewDetectionBus()
+
+	jsonLogger, err := detect.NewJSONLLogger(cfg.Logging.Dir, cfg.Logging.MaxFileSizeMB)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize JSONL logger: %w", err)
+	}
+	bus.Subscribe(jsonLogger)
+	bus.Subscribe(stats)
+
+	engine := proxy.NewProxyEngine(cfg, bus, stats)
+	if err := engine.Start(); err != nil {
+		return nil, nil, fmt.Errorf("failed to start proxy engine: %w", err)
+	}
+
+	return engine, stats, nil
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Interactive Menu Orchestrator
+// ──────────────────────────────────────────────────────────────────────────────
+
+// runInteractiveMenu drives the top-level menu loop and dispatches to the
+// appropriate mode based on user selection.
+func runInteractiveMenu() {
+	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF1744")).Bold(true)
+	successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00E676")).Bold(true)
+	highlightStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00E5FF")).Bold(true)
+
+	for {
+		choice := promptMenuChoice()
+
+		switch choice {
+
+		case 1: // eBPF Monitor only
+			clearScreen()
+			fmt.Println(bannerStyle.Render("\n  ── eBPF Traffic Monitor Setup ──\n"))
+			ifaceName := promptInterface()
+			backendPort := promptPort("Your backend service port")
+			fmt.Println()
+			fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ Attaching eBPF hooks to %s on port %d...", ifaceName, backendPort)))
+			fmt.Println(dimStyle.Render(fmt.Sprintf("  ● Your app is still accessible at http://localhost:%d", backendPort)))
+			fmt.Println()
+			runEBPFMonitor(backendPort, ifaceName, nil)
+
+		case 2: // Proxy only
+			clearScreen()
+			fmt.Println(bannerStyle.Render("\n  ── Reverse Proxy Setup ──\n"))
+			backendPort, proxyPort := promptAppPort()
+			if proxyPort == 0 {
+				fmt.Println(errorStyle.Render("  ✗ Could not find a free port. Please free up some ports."))
+				fmt.Println(statLabelStyle.Render("  Press Enter to return to menu..."))
+				readLine()
+				continue
+			}
+			svcInfo := detectService(backendPort)
+			service := svcInfo.DisplayName()
+			if service == "" || service == "unknown" {
+				service = "http"
+			}
+			fmt.Println()
+			fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ Auto-selected proxy port: %d", proxyPort)))
+			fmt.Println(highlightStyle.Render(fmt.Sprintf("  ● Open in browser: http://localhost:%d", proxyPort)))
+			fmt.Println(dimStyle.Render(fmt.Sprintf("  ● Flow: browser → :%d (proxy) → :%d (your app)", proxyPort, backendPort)))
+			fmt.Println()
+			_, stats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service)
+			if err != nil {
+				fmt.Println(errorStyle.Render("  ✗ Proxy initialization failed: " + err.Error()))
+				fmt.Println(statLabelStyle.Render("  Press Enter to return to menu..."))
+				readLine()
+				continue
+			}
+			runStandaloneProxy(stats)
+
+		case 3: // Integrated — eBPF + Proxy, both on same proxy listen port
+			clearScreen()
+			fmt.Println(bannerStyle.Render("\n  ── Integrated Mode Setup (eBPF + Proxy) ──\n"))
+			ifaceName := promptInterface()
+			backendPort, proxyPort := promptAppPort()
+			if proxyPort == 0 {
+				fmt.Println(errorStyle.Render("  ✗ Could not find a free port. Please free up some ports."))
+				fmt.Println(statLabelStyle.Render("  Press Enter to return to menu..."))
+				readLine()
+				continue
+			}
+			svcInfo := detectService(backendPort)
+			service := svcInfo.DisplayName()
+			if service == "" || service == "unknown" {
+				service = "http"
+			}
+			fmt.Println()
+			fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ eBPF hooks on %s — watching proxy port :%d", ifaceName, proxyPort)))
+			fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ Proxy :%d → your app on :%d", proxyPort, backendPort)))
+			fmt.Println(highlightStyle.Render(fmt.Sprintf("  ● Open in browser: http://localhost:%d", proxyPort)))
+			fmt.Println(dimStyle.Render(fmt.Sprintf("  ● Flow: browser → :%d (eBPF+Proxy) → :%d (your app)", proxyPort, backendPort)))
+			fmt.Println()
+			_, proxyStats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service)
+			if err != nil {
+				fmt.Println(errorStyle.Render("  ✗ Proxy initialization failed: " + err.Error()))
+				fmt.Println(statLabelStyle.Render("  Press Enter to return to menu..."))
+				readLine()
+				continue
+			}
+			// eBPF monitors the proxy listen port — same port clients connect to
+			runEBPFMonitor(proxyPort, ifaceName, proxyStats)
+
+		case 4: // Port Management
+			managePort()
+
+		case 5: // Exit
+			fmt.Println()
+			fmt.Println(ingressStyle.Render("  ✓ Exiting NGFW Monitor. Goodbye!"))
+			fmt.Println()
+			os.Exit(0)
+		}
+
+		// After a run completes, return to the main menu
+		fmt.Println()
+		fmt.Println(statLabelStyle.Render("  Session ended. Press Enter to return to the menu..."))
+		readLine()
 	}
 }
 
@@ -523,85 +956,12 @@ func (d *dashboard) render() {
 // Main
 // ──────────────────────────────────────────────────────────────────────────────
 
-func main() {
-	// ── Parse CLI flags ──
-	portFlag := flag.Int("port", 0, "Port number to monitor (required in monitor mode)")
-	ifaceFlag := flag.String("iface", "eth0", "Network interface to attach eBPF programs to")
-	proxyFlag := flag.Bool("proxy", false, "Run in reverse proxy mode with detection engine")
-	configFlag := flag.String("config", "proxy_config.yaml", "Path to proxy configuration file")
-	flag.Parse()
-
-	var proxyEngine *proxy.ProxyEngine
-	var proxyStats *detect.StatsCollector
-
-	if *proxyFlag {
-		engine, stats, err := initProxyEngine(*configFlag)
-		if err != nil {
-			log.Fatalf("❌ Proxy Initialization Error: %v", err)
-		}
-		proxyEngine = engine
-		proxyStats = stats
-	}
-
-	var targetPort uint16
-
-	if *portFlag > 0 && *portFlag <= 65535 {
-		targetPort = uint16(*portFlag)
-	} else if proxyEngine != nil {
-		// Standalone Proxy Mode (No eBPF UI)
-		runStandaloneProxy(proxyStats)
-		return
-	} else {
-		// Interactive prompt
-		clearScreen()
-		fmt.Println(bannerStyle.Render(`
-  ╔══════════════════════════════════════════════════════════════════╗
-  ║              NGFW — eBPF Traffic Monitor                       ║
-  ║              Next-Generation Firewall Foundation               ║
-  ╚══════════════════════════════════════════════════════════════════╝`))
-		fmt.Println()
-
-		// List interfaces
-		ifaces, err := net.Interfaces()
-		if err == nil {
-			fmt.Println(statLabelStyle.Render("  Available network interfaces:"))
-			for _, ifc := range ifaces {
-				addrs, _ := ifc.Addrs()
-				addrStrs := make([]string, 0, len(addrs))
-				for _, a := range addrs {
-					addrStrs = append(addrStrs, a.String())
-				}
-				addrInfo := ""
-				if len(addrStrs) > 0 {
-					addrInfo = " (" + strings.Join(addrStrs, ", ") + ")"
-				}
-				if ifc.Flags&net.FlagUp != 0 {
-					fmt.Printf("    %s %s%s\n",
-						ingressStyle.Render("●"),
-						statValueStyle.Render(ifc.Name),
-						dimStyle.Render(addrInfo))
-				} else {
-					fmt.Printf("    %s %s%s\n",
-						dimStyle.Render("○"),
-						dimStyle.Render(ifc.Name),
-						dimStyle.Render(addrInfo+" [DOWN]"))
-				}
-			}
-			fmt.Println()
-		}
-
-		fmt.Print(statLabelStyle.Render("  Enter the port number to monitor: "))
-		_, err = fmt.Scanf("%d", &targetPort)
-		if err != nil || targetPort == 0 {
-			log.Fatalf("❌  Invalid port number. Please provide a value between 1 and 65535.")
-		}
-		fmt.Println()
-	}
-
+// runEBPFMonitor starts the eBPF traffic monitoring session on the given port
+// and interface, optionally integrated with a running proxy detection engine.
+func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.StatsCollector) {
 	// ── Detect service running on the target port ──
-	fmt.Printf("  %s Detecting service on port %d...\n", statLabelStyle.Render("🔍"), targetPort)
+	fmt.Printf("\n  %s Detecting service on port %d...\n", statLabelStyle.Render("🔍"), targetPort)
 	svcInfo := detectService(targetPort)
-	// Print detection result to console before the dashboard launches
 	fmt.Printf("  %s Service detected: %s %s\n\n",
 		statLabelStyle.Render("ℹ"),
 		svcInfo.StatusBadge(),
@@ -623,8 +983,6 @@ func main() {
 		}
 		fmt.Println()
 	}
-
-	ifaceName := *ifaceFlag
 
 	// ── Validate interface ──
 	iface, err := net.InterfaceByName(ifaceName)
@@ -845,6 +1203,53 @@ func main() {
 			fmt.Println()
 			return
 		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Main Entry Point
+// ──────────────────────────────────────────────────────────────────────────────
+
+func main() {
+	// ── Parse CLI flags for non-interactive (scripted/automated) usage ──
+	portFlag := flag.Int("port", 0, "Port number to monitor (required in monitor mode)")
+	ifaceFlag := flag.String("iface", "", "Network interface to attach eBPF programs to")
+	proxyFlag := flag.Bool("proxy", false, "Run in reverse proxy mode with detection engine")
+	configFlag := flag.String("config", "proxy_config.yaml", "Path to proxy configuration file")
+	flag.Parse()
+
+	// Detect if any meaningful flags were provided; if not, use the interactive menu.
+	flagsProvided := *portFlag > 0 || *proxyFlag || *ifaceFlag != ""
+
+	if !flagsProvided {
+		// No flags → launch full interactive menu
+		runInteractiveMenu()
+		return
+	}
+
+	// ── Non-interactive (flag-driven) mode ──
+	var proxyStats *detect.StatsCollector
+
+	if *proxyFlag {
+		_, stats, err := initProxyEngine(*configFlag)
+		if err != nil {
+			log.Fatalf("❌ Proxy Initialization Error: %v", err)
+		}
+		proxyStats = stats
+	}
+
+	if *portFlag > 0 && *portFlag <= 65535 {
+		// eBPF monitor (with optional proxy if --proxy flag was set)
+		ifaceName := *ifaceFlag
+		if ifaceName == "" {
+			ifaceName = "eth0" // sensible default when using flags
+		}
+		runEBPFMonitor(uint16(*portFlag), ifaceName, proxyStats)
+	} else if *proxyFlag {
+		// Proxy-only (no port flag)
+		runStandaloneProxy(proxyStats)
+	} else {
+		log.Fatalf("❌  No valid mode selected. Use --port to monitor a port, --proxy for proxy mode, or run without flags for the interactive menu.")
 	}
 }
 
