@@ -4,13 +4,14 @@ A comprehensive Go-based **Next-Generation Intrusion Detection and Prevention Sy
 
 ## What's New (Latest Updates)
 
-- **Simultaneous eBPF & Proxy Execution:** The system now successfully bridges kernel-space eBPF and user-space Reverse Proxy engines within a single binary, running both concurrently to capture L4 flows and L7 payloads simultaneously.
-- **Unified Terminal Dashboard:** The terminal UI has been fully decoupled from the proxy engine, combining raw eBPF metrics and Proxy security detections into a single, beautiful, flicker-free dashboard.
-- **Robust Connection Tracking:** Implemented immediate deterministic cleanup and fallback garbage collection to prevent memory leaks during anomalous Layer 7 attacks or dropped connections.
+- **Interactive 2-Question Wizard:** The CLI has been completely revamped. You no longer need to pass complex flags or map proxy ports manually. Just answer two simple questions (Interface and App Port), and the system auto-calculates a safe, non-conflicting proxy port that avoids browser restrictions.
+- **Integrated Port Management:** A built-in utility (`Option 4`) allows you to instantly detect and kill rogue processes holding your application ports (resolving `Address already in use` errors).
+- **Simultaneous eBPF & Proxy Execution:** The system bridges kernel-space eBPF and user-space Reverse Proxy engines within a single binary, capturing L4 flows and L7 payloads simultaneously.
+- **Flicker-Free Unified Dashboard:** Combines raw eBPF metrics and Proxy security detections into a beautiful, static dashboard that updates seamlessly in place without scrolling.
 
 ## Core Architecture
 
-The application features a dual-engine architecture that now runs **simultaneously** within a single binary, providing a unified view of both Layer 4 and Layer 7 traffic without any terminal flickering:
+The application features a dual-engine architecture running **simultaneously** within a single binary:
 
 ### 1. eBPF Packet Monitor Engine
 ```text
@@ -20,7 +21,7 @@ The application features a dual-engine architecture that now runs **simultaneous
 │  ┌─────────┐    TC Ingress    ┌──────────────┐   │
 │  │ Network  │───────────────▶│  eBPF Program │   │
 │  │Interface │    TC Egress    │  (monitor.c) │   │
-│  │ (eth0)  │◀───────────────│                │   │
+│  │ (eth0/lo)│◀───────────────│                │   │
 │  └─────────┘                 └──────┬───────┘     │
 │                                      │            │
 │                              Ring Buffer          │
@@ -30,18 +31,81 @@ The application features a dual-engine architecture that now runs **simultaneous
 │                                      ▼            │
 │                              ┌──────────────┐    │
 │                              │  Go App       │    │
-│                              │  (main.go)    │    │
 │                              │  Dashboard    │    │
 │                              └──────────────┘    │
 └──────────────────────────────────────────────────┘
 ```
 
 1. **eBPF C code** (`ebpf/monitor.c`) runs inside the Linux kernel, attached to TC ingress and egress hooks.
-2. Packets matching the user's target port are captured and pushed to a **ring buffer**.
-3. **Go application** (`main.go`) reads events from the ring buffer, groups them into bidirectional flows, and seamlessly renders them alongside proxy Layer 7 metrics in a unified, flicker-free terminal dashboard.
+2. Packets matching the target proxy port are captured and pushed to a **ring buffer**.
+3. The **Go application** (`main.go`) reads events, groups them into bidirectional flows, and seamlessly renders them alongside proxy Layer 7 metrics.
 
 ### 2. Layer 7 Proxy & DPI Engine
-When run with `--proxy`, the engine intercepts incoming connections using standard Go network listeners (as configured in `proxy_config.yaml`). It proxies traffic to the real backend while passively copying the byte stream. The `detect/` package continuously analyzes the payloads (HTTP, TLS, etc.) for malicious signatures. It features **robust connection state tracking** (immediate cleanup on connection close with fallback background garbage collection) to prevent memory leaks during anomalous traffic spikes. It extracts machine-learning features and streams detections to `logs/detections.jsonl`.
+The proxy engine intercepts incoming connections using standard Go network listeners. It acts as an invisible middleman, analyzing payloads (HTTP, TLS, etc.) for malicious signatures before seamlessly forwarding traffic to your actual backend application. It features **robust connection state tracking** to prevent memory leaks during attacks and extracts machine-learning features to `logs/detections.jsonl`.
+
+---
+
+## Prerequisites
+
+- **Linux** with kernel 6.6+ (for TCX support)
+- **Go** 1.23+
+- **Clang/LLVM** (for compiling eBPF C code)
+- **libbpf-dev** and **linux-headers**
+
+```bash
+sudo apt update
+sudo apt install -y golang clang llvm libbpf-dev linux-headers-$(uname -r)
+```
+
+## Build Instructions
+
+```bash
+# Compile eBPF + build Go binary
+make all
+```
+
+---
+
+## Execution & Usage
+
+The application features an incredibly simple interactive CLI.
+
+```bash
+sudo ./ngfw-monitor
+```
+
+### Main Menu
+
+```text
+  [1]  eBPF Traffic Monitor — kernel-level packet inspection via TC hooks
+  [2]  Reverse Proxy          — application-layer DPI detection engine
+  [3]  Integrated Mode        — eBPF monitor + proxy detection combined
+  [4]  Port Management        — check if a port is in use and free it
+  [5]  Exit
+```
+
+### Option 3: Integrated Mode (Recommended)
+This runs both the Layer 4 eBPF packet monitor and the Layer 7 reverse proxy simultaneously to get full stack visibility.
+
+**How to test locally (using a Python server):**
+1. **Terminal 1:** Start your backend app on port 80.
+   ```bash
+   python3 -m http.server 80
+   ```
+2. **Terminal 2:** Start the firewall (`sudo ./ngfw-monitor`).
+   - Select Option `3` (Integrated Mode).
+   - **CRITICAL:** When asked for the interface, select `lo` (loopback) if you plan to test using `localhost`.
+   - Enter your app's port (`80`).
+   - *The firewall will automatically create a safe proxy port (e.g., 10081) and begin monitoring.*
+3. **Terminal 3 / Browser:** Send traffic to the **Proxy Port**.
+   ```bash
+   curl http://localhost:10081
+   ```
+   *The dashboard will instantly light up with packet captures and HTTP detection telemetry.*
+
+### Option 4: Port Management
+If you ever encounter an `OSError: [Errno 98] Address already in use` error when starting your backend application, use this tool.
+Simply enter the port number (e.g., `80`), and the tool will show you exactly what process is blocking it and give you a 1-click option to force-kill it safely.
 
 ---
 
@@ -61,159 +125,29 @@ When run with `--proxy`, the engine intercepts incoming connections using standa
 - **Data Exfiltration**: Tracks outbound data volumes per IP.
 
 ### Additional Features
-- **Protocol Fingerprinting (Magic Bytes)**: Identifies the true application protocol regardless of the port (e.g., catching SSH running on port 80).
+- **Smart Port Mapping**: Auto-calculates proxy ports and automatically avoids restricted browser ports (e.g., avoiding 10080 to prevent NAT slipstreaming blocks in Firefox/Chrome).
+- **Protocol Fingerprinting (Magic Bytes)**: Identifies the true application protocol regardless of the port.
 - **TLS Interception (MITM)**: On-the-fly certificate generation to inspect encrypted traffic.
 - **JSONL Structured Logging**: Automated rotation and structured logging for connections (`connections.jsonl`) and detections (`detections.jsonl`).
 - **Raw Traffic Dumping**: Captures raw request bytes to `proxy-output.json` for forensic analysis.
 
 ---
 
-## Prerequisites
-
-- **Linux** with kernel 6.6+ (for TCX support)
-- **Go** 1.23+
-- **Clang/LLVM** (for compiling eBPF C code)
-- **libbpf-dev** and **linux-headers**
-
-```bash
-sudo apt update
-sudo apt install -y golang clang llvm libbpf-dev linux-headers-$(uname -r)
-```
-
-## Build
-
-```bash
-# Install Go dependencies
-make deps
-
-# Compile eBPF + build Go binary
-make all
-```
-
----
-
-## Execution Steps
-
-### 1. Simultaneous eBPF & Proxy Mode (Recommended)
-Run both the Layer 4 eBPF packet monitor and the Layer 7 reverse proxy simultaneously to get full stack visibility in a single unified dashboard.
-
-```bash
-sudo ./ngfw-monitor --proxy --iface eth0 --port 8080
-```
-
-### 2. Reverse Proxy Mode Only (IDS/IPS Engine)
-Run the application in Layer 7 proxy mode to inspect traffic content, detect attacks (SQLi, brute-force, etc.), and generate JSONL logs based on the provided configuration (`proxy_config.yaml`).
-
-```bash
-sudo ./ngfw-monitor --proxy
-```
-
-**Testing the Proxy with OWASP Juice Shop:**
-You can test the reverse proxy by running a vulnerable application like OWASP Juice Shop on a backend port (e.g., 3000) while the proxy listens on port 8080.
-
-1. Start Juice Shop on the backend port:
-   ```bash
-   PORT=13000 npm start
-   ```
-2. Run the proxy with `proxy_config.yaml` (configured to map port 3000 -> 127.0.0.1:13000).
-   ```bash
-   sudo ./ngfw-monitor --proxy --config proxy_config.yaml
-   ```
-3. Test the connection through the proxy:
-   ```bash
-   curl -I http://127.0.0.1:3000
-   ```
-   *Any attacks (like SQL injection or XSS) sent to port 3000 will be detected by the HTTP Analyzer and logged.*
-
-### 2. Interactive Packet Monitor Mode (eBPF)
-Monitor traffic on a specific port in real-time via the kernel-level eBPF dashboard.
-
-```bash
-# Interactive mode (prompts for port)
-sudo ./ngfw-monitor
-
-# Or specify a port and interface directly
-sudo ./ngfw-monitor --port 8080 --iface eth0
-```
-
----
-
-## Project Structure
-
-```text
-Security/
-├── ebpf/
-│   └── monitor.c           # eBPF kernel program (TC hooks)
-├── detect/                 # Deep Packet Inspection & ML feature extraction
-│   ├── behavioral.go       # Cross-connection pattern tracking (Port Scans, C2, Brute-force)
-│   ├── detection.go        # Detection framework, severity levels, event bus
-│   ├── flow_logger.go      # eBPF flow aggregation logic
-│   ├── flow_tracker.go     # TCP state and flow timing
-│   ├── http_analyzer.go    # HTTP structural extraction & signatures
-│   ├── payload_stats.go    # Entropy and character ratio math
-│   ├── protocol_detect.go  # Magic-byte protocol identification
-│   ├── session_tracker.go  # IP/User-Agent session tracking
-│   ├── stats.go            # General statistical helpers
-│   ├── tls_inspect.go      # TLS ClientHello/Certificate inspection
-│   └── logger.go           # JSONL structured logging helpers
-├── proxy/                  # Reverse proxy engine
-│   ├── proxy.go            # Listener and connection handling
-│   ├── listener.go         # TCP & UDP listeners
-│   ├── tls_intercept.go    # TLS MITM & certificate caching
-│   ├── config.go           # YAML configuration parsing
-│   └── forwarder.go        # Bidirectional data forwarders
-├── logs/                   # Output directory for JSONL logs
-│   ├── detections.jsonl    # L7 alerts and proxy features
-│   ├── connections.jsonl   # Full lifecycle records of proxied connections
-│   └── flow_stats.jsonl    # eBPF aggregated flow statistics
-├── gen.go                  # go:generate directive for bpf2go
-├── bpf_bpfel.go            # Auto-generated Go bindings (little-endian)
-├── bpf_bpfel.o             # Compiled eBPF bytecode
-├── bpf_bpfeb.go            # Auto-generated Go bindings (big-endian)
-├── bpf_bpfeb.o             # Compiled eBPF bytecode
-├── main.go                 # Go application with terminal dashboard
-├── service_detector.go     # Protocol and Service Detection
-├── proxy_config.yaml       # Configuration for reverse proxy listeners
-├── go.mod                  # Go module definition
-├── go.sum                  # Go dependency checksums
-├── Makefile                # Build automation
-└── README.md               # This file
-```
-
----
-
 ## Data Collection & Telemetry Features (MLOps Ready)
 
-The NGFW monitor has been significantly upgraded to collect comprehensive telemetry suitable for training and inference with Machine Learning models. Below is the feature matrix.
+The NGFW monitor has been significantly upgraded to collect comprehensive telemetry suitable for training and inference with Machine Learning models.
 
 ### 1. eBPF Layer (Kernel Space)
-
-| Group | Feature | Status | Evidence in your log |
-|---|---|---|---|
-| **Connection Info** | Source/Dest IP, Source/Dest Port, Protocol, Direction | ✅ Captured | `SOURCE`, `DESTINATION`, `PROTO`, `DIRECTION` columns |
-| **Packet Info** | Packet Size, TCP Flags, TTL, TOS, Window Size, Seq/Ack Num | ✅ Captured | `SIZE`, `FLAGS`, `TTL`, `TOS`, `WINDOW`, `SEQ`, `ACK` |
-| | Header Size, Payload Size | ✅ Captured | `TCP-HdrLen`, `IP-HdrLen`, `Payload: ~N B` |
-| | Fragment Information | ✅ Captured (Full) | `FragOffset: X`, `MF: true/false` now tracked properly |
-| | IP-ID (bonus) | ✅ Captured | `IP-ID` column |
-| **Connection Statistics**| Start/End/Duration, Packet Count, In/Out Packets, In/Out Bytes, Avg/Max/Min Packet Size | ✅ Captured | Bidirectional aggregated flow output in `logs/flow_stats.jsonl` |
-| **TCP Statistics** | SYN/ACK/FIN/RST/PSH/URG counts | ✅ Captured | Aggregated into `flow_stats.jsonl` |
-| **Timing** | Packets/sec, Inter-arrival Time, Burst Size, Idle Time | ✅ Captured | Forward/Backward IAT (Mean/Std/Max/Min) in `flow_stats.jsonl` |
-| **Socket** | PID, Process Name, UID, Interface, Socket State | ❌ Not captured | No socket-layer instrumentation currently — only TC-layer packet capture |
+- **Connection Info**: Source/Dest IP, Port, Protocol, Direction.
+- **Packet Info**: Packet Size, TCP Flags, TTL, TOS, Window Size, Seq/Ack Num, Fragment Information.
+- **Connection Statistics**: Bidirectional aggregated flow output in `logs/flow_stats.jsonl` (Duration, Avg/Max/Min Packet Size).
+- **Timing**: Forward/Backward IAT (Mean/Std/Max/Min), Packets/sec.
 
 ### 2. Reverse Proxy (JSON Logs)
-
-| Group | Feature | Status | Evidence |
-|---|---|---|---|
-| **Request** | Method, URI, Host, HTTP Version, Content-Type, Referer | ✅ Captured | `HTTP-REQ-001` details |
-| | URI Length, Query Params, Query Count, Content-Length | ✅ Captured | Exported in `HTTP-FEAT-001` JSON |
-| **Headers** | Cookie Count | ✅ Captured | `"cookie_count"` |
-| | Header Count/Size, JWT Present, Authorization Present, Duplicate Headers, Accept, Origin, Missing-User-Agent | ✅ Captured | Computed and exported in `HTTP-FEAT-001` |
-| **Payload** | Entropy, digit/upper/lower/special/whitespace ratios, token stats | ✅ Captured | Exported in `HTTP-FEAT-001` (Crucial for GBT zero-day detection) |
-| **Pattern Statistics** | SQL/XSS/Path-Traversal/Cmd-Injection counts | ✅ Captured | Exported as discrete binary counts in `HTTP-FEAT-001` |
-| **Response** | Status Code | ✅ Captured | `HTTP-RESP-001` |
-| | Response Size, Response Time, Header Count, Compression, Cache-Control | ✅ Captured | Mapped to `HTTP-FEAT-002`, including stateful `response_time_ms` |
-| **Session** | Session ID, Request Count, Session Duration, Req/min, Unique URIs | ✅ Captured | Logical tracking emitted via `HTTP-SESSION-001` |
-| **TLS** | Version, Cipher Suite, SNI, ALPN, Cert metadata, Session Resumption | ✅ Captured | Extracted securely via `TLS-HELLO-001` and `TLS-CERT-001` |
+- **HTTP Features**: Extracted URI Length, Query Params, Header Count/Size, Entropy, Character ratios (exported in `HTTP-FEAT-001`).
+- **TLS**: Extracted SNI, ALPN, Cipher Suites, JA3 hashes (`TLS-HELLO-001`).
+- **Pattern Statistics**: SQL/XSS/Path-Traversal counts exported as discrete binary values.
+- **Session Tracking**: Request counts, session duration, unique URIs tracked logically (`HTTP-SESSION-001`).
 
 ---
 
