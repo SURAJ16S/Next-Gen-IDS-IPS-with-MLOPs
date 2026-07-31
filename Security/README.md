@@ -1,6 +1,6 @@
-# Next-Gen-IDS-IPS-with-MLOPs
+# NGFW - Intelligent multi protocol intrusion detection and prevention system using the ML Ops
 
-A comprehensive Go-based **Next-Generation Intrusion Detection and Prevention System (IDS/IPS)** that leverages **eBPF TC (Traffic Control) hooks** for high-performance packet monitoring and a **Layer 7 Reverse Proxy Engine** for Deep Packet Inspection (DPI) and behavioral analysis. Together, these form the data-collection foundation for a **Next-Generation Firewall (NGFW)** powered by MLOps.
+A comprehensive Go-based **Intelligent multi protocol intrusion detection and prevention system using the ML Ops (NGFW)** that leverages **eBPF TC (Traffic Control) hooks** for high-performance packet monitoring and a **Layer 7 Reverse Proxy Engine** for Deep Packet Inspection (DPI) and behavioral analysis.
 
 ## What's New (Latest Updates)
 

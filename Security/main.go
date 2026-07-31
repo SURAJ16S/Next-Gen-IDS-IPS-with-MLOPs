@@ -227,8 +227,8 @@ func promptMenuChoice() int {
   ║      ██║╚██╗██║██║   ██║██╔══╝  ██║███╗██║                     ║
   ║      ██║ ╚████║╚██████╔╝██║     ╚███╔███╔╝                     ║
   ║      ╚═╝  ╚═══╝ ╚═════╝ ╚═╝      ╚══╝╚══╝                     ║
-  ║     Next-Generation Firewall — Interactive CLI v1.2            ║
-  ╚══════════════════════════════════════════════════════════════════╝`))
+  ║ Intelligent multi protocol intrusion detection and prevention system using the ML Ops ║
+  ╚═════════════════════════════════════════════════════════════════════════════════════╝`))
 		fmt.Println()
 		fmt.Println(statLabelStyle.Render("  Select an operating mode:"))
 		fmt.Println()
@@ -240,15 +240,17 @@ func promptMenuChoice() int {
 			"        — eBPF monitor + proxy detection combined")
 		fmt.Println("  " + optionStyle.Render("[4]") + "  " + statValueStyle.Render("Port Management") +
 			"        — check if a port is in use and free it")
-		fmt.Println("  " + highlightStyle.Render("[5]") + "  " + statValueStyle.Render("Exit"))
+		fmt.Println("  " + optionStyle.Render("[5]") + "  " + statValueStyle.Render("Agent Setup Wizard") +
+			"     — pair this node with the central dashboard")
+		fmt.Println("  " + highlightStyle.Render("[6]") + "  " + statValueStyle.Render("Exit"))
 		fmt.Println()
-		fmt.Print(statLabelStyle.Render("  Enter choice [1-5]: "))
+		fmt.Print(statLabelStyle.Render("  Enter choice [1-6]: "))
 
 		input := readLine()
 		choice, err := strconv.Atoi(input)
-		if err != nil || choice < 1 || choice > 5 {
+		if err != nil || choice < 1 || choice > 6 {
 			fmt.Println()
-			fmt.Println(errorStyle.Render("  ✗ Invalid choice '" + input + "'. Please enter a number between 1 and 5."))
+			fmt.Println(errorStyle.Render("  ✗ Invalid choice '" + input + "'. Please enter a number between 1 and 6."))
 			fmt.Println(statLabelStyle.Render("  Press Enter to try again..."))
 			readLine()
 			continue
@@ -610,7 +612,11 @@ func runInteractiveMenu() {
 		case 4: // Port Management
 			managePort()
 
-		case 5: // Exit
+		case 5: // Agent Setup Wizard
+			clearScreen()
+			RunSetupWizard()
+
+		case 6: // Exit
 			fmt.Println()
 			fmt.Println(ingressStyle.Render("  ✓ Exiting NGFW Monitor. Goodbye!"))
 			fmt.Println()
@@ -1216,7 +1222,16 @@ func main() {
 	ifaceFlag := flag.String("iface", "", "Network interface to attach eBPF programs to")
 	proxyFlag := flag.Bool("proxy", false, "Run in reverse proxy mode with detection engine")
 	configFlag := flag.String("config", "proxy_config.yaml", "Path to proxy configuration file")
+	setupFlag := flag.Bool("setup", false, "Run the node pairing setup wizard")
 	flag.Parse()
+
+	if *setupFlag {
+		RunSetupWizard()
+		return
+	}
+
+	RunStreamer()
+	RunCommander()
 
 	// Detect if any meaningful flags were provided; if not, use the interactive menu.
 	flagsProvided := *portFlag > 0 || *proxyFlag || *ifaceFlag != ""

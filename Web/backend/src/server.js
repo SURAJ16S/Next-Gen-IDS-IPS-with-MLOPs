@@ -53,6 +53,8 @@ app.use('/api/network', require('./routes/network.routes'));
 app.use('/api/logs', require('./routes/logs.routes'));
 app.use('/api/analytics', require('./routes/analytics.routes'));
 app.use('/api/devops', require('./routes/devops.routes'));
+app.use('/api/nodes', require('./routes/node.routes'));
+app.use('/api/agent', require('./routes/agent.routes'));
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {

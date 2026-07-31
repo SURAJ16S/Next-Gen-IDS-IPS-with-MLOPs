@@ -214,6 +214,21 @@ listeners:
       transport: tcp
       service: elasticsearch
       enabled: true
+    - listen_port: 11337
+      backend_addr: 127.0.0.1:1337
+      transport: tcp
+      service: python3 (PID:111524)
+      enabled: true
+    - listen_port: 11338
+      backend_addr: 127.0.0.1:1337
+      transport: tcp
+      service: python3 (PID:99347)
+      enabled: true
+    - listen_port: 11339
+      backend_addr: 127.0.0.1:1337
+      transport: tcp
+      service: python3 (PID:104891)
+      enabled: true
 tls:
     enabled: false
     ca_cert_file: proxy/certs/ca.crt
@@ -229,3 +244,4 @@ detection:
         port_scan_threshold: 10
         brute_force_threshold: 5
     max_payload_inspect_bytes: 65536
+central_dashboard_url: http://localhost:5000

@@ -20,8 +20,9 @@ import (
 type ProxyConfig struct {
 	Listeners []ListenerConfig `yaml:"listeners"`
 	TLS       TLSConfig        `yaml:"tls"`
-	Logging   LoggingConfig    `yaml:"logging"`
-	Detection DetectionConfig  `yaml:"detection"`
+	Logging           LoggingConfig   `yaml:"logging"`
+	Detection         DetectionConfig `yaml:"detection"`
+	CentralDashboard  string          `yaml:"central_dashboard_url"`
 }
 
 // ListenerConfig defines how a single port is proxied.
@@ -177,6 +178,7 @@ func DefaultConfig() *ProxyConfig {
 				BruteForceThreshold:  5,
 			},
 		},
+		CentralDashboard: "http://localhost:5000",
 	}
 
 	return cfg
@@ -184,6 +186,9 @@ func DefaultConfig() *ProxyConfig {
 
 // applyDefaults fills in zero-value fields with sensible defaults.
 func (c *ProxyConfig) applyDefaults() {
+	if c.CentralDashboard == "" {
+		c.CentralDashboard = "http://localhost:5000"
+	}
 	if c.Logging.Dir == "" {
 		c.Logging.Dir = "logs"
 	}

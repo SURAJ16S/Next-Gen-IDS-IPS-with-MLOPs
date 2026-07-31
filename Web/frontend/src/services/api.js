@@ -42,4 +42,9 @@ export const getAnalyticsSummary = () => api.get('/analytics/summary');
 export const getDeployments = () => api.get('/devops');
 export const createDeployment = (data) => api.post('/devops', data);
 
+// Nodes
+export const getNodes = () => api.get('/nodes');
+export const generateEnrollmentToken = (name) => api.post('/nodes/enrollment-token', { name });
+export const revokeNode = (nodeId) => api.post(`/nodes/${nodeId}/revoke`);
+
 export default api;

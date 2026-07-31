@@ -192,16 +192,20 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 	}
 
 	requestLine := lines[0]
-	parts := strings.SplitN(requestLine, " ", 3)
 	method := ""
 	uri := ""
 	httpVer := ""
-	if len(parts) >= 2 {
-		method = parts[0]
-		uri = parts[1]
-	}
-	if len(parts) >= 3 {
-		httpVer = parts[2]
+
+	firstSpace := strings.IndexByte(requestLine, ' ')
+	lastSpace := strings.LastIndexByte(requestLine, ' ')
+
+	if firstSpace > 0 && lastSpace > firstSpace {
+		method = requestLine[:firstSpace]
+		uri = requestLine[firstSpace+1 : lastSpace]
+		httpVer = requestLine[lastSpace+1:]
+	} else if firstSpace > 0 {
+		method = requestLine[:firstSpace]
+		uri = requestLine[firstSpace+1:]
 	}
 
 	if strings.TrimSpace(method) == "" || strings.TrimSpace(uri) == "" {

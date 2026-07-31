@@ -4,6 +4,7 @@ import StatCard from '../components/StatCard';
 import ThreatTable from '../components/ThreatTable';
 import EmptyState from '../components/EmptyState';
 import { getDashboardStats, getRecentRequests } from '../services/api';
+import { io } from 'socket.io-client';
 
 function Dashboard() {
   const [stats, setStats] = useState(null);
@@ -24,6 +25,39 @@ function Dashboard() {
       }
     };
     fetchAll();
+
+    const socket = io('http://localhost:5000');
+    
+    socket.on('new_detection', (det) => {
+      setStats(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          totalThreats: prev.totalThreats + 1,
+          openThreats: prev.openThreats + 1,
+          recentEvents: [det, ...prev.recentEvents].slice(0, 10)
+        };
+      });
+    });
+
+    socket.on('new_connection', (conn) => {
+      setStats(prev => {
+        if (!prev) return prev;
+        return { ...prev, totalNetworkEvents: prev.totalNetworkEvents + 1 };
+      });
+      
+      setRequests(prev => {
+        const newReq = {
+          _id: Math.random().toString(),
+          message: `${conn.protocol || 'TCP'} Flow: ${conn.sourceIP} -> ${conn.destinationIP}`,
+          meta: { ip: conn.sourceIP, userAgent: 'Agent Sensor' },
+          createdAt: conn.timestamp || new Date()
+        };
+        return [newReq, ...prev].slice(0, 15);
+      });
+    });
+
+    return () => socket.disconnect();
   }, []);
 
   if (loading) return <p style={{ color: 'var(--text-secondary)' }}>Loading dashboard...</p>;

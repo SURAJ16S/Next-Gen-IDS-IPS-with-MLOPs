@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, ShieldAlert, Network, BarChart3, FileText, Server, ShieldCheck, Settings } from 'lucide-react';
+import { LayoutDashboard, ShieldAlert, Network, BarChart3, FileText, Server, ShieldCheck, Settings, Cpu } from 'lucide-react';
 
 const navItems = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
@@ -8,6 +8,7 @@ const navItems = [
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
   { to: '/logs', label: 'Logs', icon: FileText },
   { to: '/devops', label: 'DevOps', icon: Server },
+  { to: '/nodes', label: 'Agent Nodes', icon: Cpu },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -26,9 +27,9 @@ function Sidebar() {
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '0 20px', marginBottom: '32px' }}>
         <ShieldCheck size={22} color="var(--accent-blue)" />
         <div>
-          <div style={{ fontWeight: 700, fontSize: '15px', letterSpacing: '0.5px' }}>IDPS</div>
-          <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-            Security Platform
+          <div style={{ fontWeight: 700, fontSize: '15px', letterSpacing: '0.5px' }}>NGFW</div>
+          <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginTop: '2px' }}>
+            MLOps Intrusion Detection
           </div>
         </div>
       </div>
