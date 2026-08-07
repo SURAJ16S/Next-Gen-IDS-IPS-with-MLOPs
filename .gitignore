@@ -34,3 +34,5 @@ Web/frontend/node_modules/
 .env.production.local
 backend/.env
 frontend/.env
+Web/backend/.env
+Web/frontend/.env
