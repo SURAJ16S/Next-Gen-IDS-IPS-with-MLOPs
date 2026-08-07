@@ -1,19 +1,21 @@
-# NGFW - Intelligent multi protocol intrusion detection and prevention system using the ML Ops
+# NGFW - Intelligent Multi-Protocol Intrusion Detection and Prevention System using MLOps
 
-A comprehensive Go-based **Intelligent multi protocol intrusion detection and prevention system using the ML Ops (NGFW)** that leverages **eBPF TC (Traffic Control) hooks** for high-performance packet monitoring and a **Layer 7 Reverse Proxy Engine** for Deep Packet Inspection (DPI) and behavioral analysis.
+A comprehensive Go-based **Intelligent Multi-Protocol Intrusion Detection and Prevention System (NGFW)** that leverages **eBPF TC (Traffic Control) hooks** for high-performance packet monitoring, a **Layer 7 Reverse Proxy Engine** for Deep Packet Inspection (DPI), and a **Centralized MERN Stack Dashboard** for fleet management and MLOps telemetry.
 
 ## What's New (Latest Updates)
 
-- **Interactive 2-Question Wizard:** The CLI has been completely revamped. You no longer need to pass complex flags or map proxy ports manually. Just answer two simple questions (Interface and App Port), and the system auto-calculates a safe, non-conflicting proxy port that avoids browser restrictions.
-- **Integrated Port Management:** A built-in utility (`Option 4`) allows you to instantly detect and kill rogue processes holding your application ports (resolving `Address already in use` errors).
-- **Simultaneous eBPF & Proxy Execution:** The system bridges kernel-space eBPF and user-space Reverse Proxy engines within a single binary, capturing L4 flows and L7 payloads simultaneously.
-- **Flicker-Free Unified Dashboard:** Combines raw eBPF metrics and Proxy security detections into a beautiful, static dashboard that updates seamlessly in place without scrolling.
+- **Dashboard-First Node Enrollment:** A highly secure, modern node pairing system. The Central Web Dashboard generates a secure, one-time cryptographic enrollment token. The Go agent CLI instantly consumes this token to register itself securely, preventing rogue agent registrations.
+- **Robust HTTP Request Parsing:** The Layer 7 DPI engine features an upgraded HTTP parser resilient to evasion techniques, correctly handling unencoded spaces in URIs (e.g., raw SQL injection payloads) to prevent firewall bypasses.
+- **Centralized MERN Dashboard:** A beautiful React/Vite frontend and Express/MongoDB backend providing real-time Threat Monitoring, Network Monitoring, and Agent Node management via WebSockets.
+- **Interactive Setup Wizard:** The CLI has been completely revamped. Just answer two simple questions (Interface and App Port), and the system auto-calculates a safe proxy port.
+- **Integrated Port Management:** A built-in utility (`Option 4`) allows you to instantly detect and kill rogue processes holding your application ports.
+- **Simultaneous eBPF & Proxy Execution:** Bridges kernel-space eBPF and user-space DPI within a single binary, capturing L4 flows and L7 payloads simultaneously.
 
 ## Core Architecture
 
-The application features a dual-engine architecture running **simultaneously** within a single binary:
+The platform consists of a **Central Web Dashboard** and a **Distributed Agent Engine**:
 
-### 1. eBPF Packet Monitor Engine
+### 1. Distributed Go Agent (eBPF + Proxy Engine)
 ```text
 ┌──────────────────────────────────────────────────┐
 │                  Linux Kernel                    │
@@ -30,135 +32,115 @@ The application features a dual-engine architecture running **simultaneously** w
 │              User Space              │            │
 │                                      ▼            │
 │                              ┌──────────────┐    │
-│                              │  Go App       │    │
-│                              │  Dashboard    │    │
-│                              └──────────────┘    │
-└──────────────────────────────────────────────────┘
+│                              │  Go Agent     │    │
+│                              │  (CLI & DPI)  │    │
+│                              └──────┬───────┘    │
+└─────────────────────────────────────┼────────────┘
+                                      │ WebSockets
+                                      ▼
+                        ┌──────────────────────────┐
+                        │   Central Dashboard      │
+                        │   (Node.js + React)      │
+                        └──────────────────────────┘
 ```
 
-1. **eBPF C code** (`ebpf/monitor.c`) runs inside the Linux kernel, attached to TC ingress and egress hooks.
-2. Packets matching the target proxy port are captured and pushed to a **ring buffer**.
-3. The **Go application** (`main.go`) reads events, groups them into bidirectional flows, and seamlessly renders them alongside proxy Layer 7 metrics.
-
-### 2. Layer 7 Proxy & DPI Engine
-The proxy engine intercepts incoming connections using standard Go network listeners. It acts as an invisible middleman, analyzing payloads (HTTP, TLS, etc.) for malicious signatures before seamlessly forwarding traffic to your actual backend application. It features **robust connection state tracking** to prevent memory leaks during attacks and extracts machine-learning features to `logs/detections.jsonl`.
+1. **eBPF C code** (`ebpf/monitor.c`) runs inside the Linux kernel, capturing packets matching target proxy ports.
+2. The **Reverse Proxy** inspects Layer 7 payloads for malicious signatures (SQLi, XSS, Path Traversal, etc.).
+3. The **Go Agent** streams telemetry, flows, and detections directly to the Central Dashboard via WebSockets.
 
 ---
 
 ## Prerequisites
 
+### For the Central Dashboard
+- **Node.js** (v18+)
+- **MongoDB** (Local or Atlas)
+
+### For the Go Agent Sensor
 - **Linux** with kernel 6.6+ (for TCX support)
 - **Go** 1.23+
 - **Clang/LLVM** (for compiling eBPF C code)
 - **libbpf-dev** and **linux-headers**
 
 ```bash
+# Install agent dependencies (Debian/Ubuntu)
 sudo apt update
 sudo apt install -y golang clang llvm libbpf-dev linux-headers-$(uname -r)
 ```
 
-## Build Instructions
+## Setup & Deployment
 
+### 1. Start the Central Dashboard
 ```bash
-# Compile eBPF + build Go binary
+# Terminal 1: Backend
+cd Web/backend
+npm install
+npm run dev
+
+# Terminal 2: Frontend
+cd Web/frontend
+npm install
+npm run dev
+```
+
+### 2. Build the Go Agent
+```bash
+cd Security
 make all
 ```
 
----
-
-## Execution & Usage
-
-The application features an incredibly simple interactive CLI.
-
-```bash
-sudo ./ngfw-monitor
-```
-
-### Main Menu
-
-```text
-  [1]  eBPF Traffic Monitor — kernel-level packet inspection via TC hooks
-  [2]  Reverse Proxy          — application-layer DPI detection engine
-  [3]  Integrated Mode        — eBPF monitor + proxy detection combined
-  [4]  Port Management        — check if a port is in use and free it
-  [5]  Exit
-```
-
-### Option 3: Integrated Mode (Recommended)
-This runs both the Layer 4 eBPF packet monitor and the Layer 7 reverse proxy simultaneously to get full stack visibility.
-
-**How to test locally (using a Python server):**
-1. **Terminal 1:** Start your backend app on port 80.
+### 3. Enroll the Agent Node
+1. Open the Web Dashboard in your browser (`http://localhost:5173`).
+2. Navigate to **Agent Nodes** and click **Link New Node** to generate an Enrollment Secret.
+3. Start the Go Agent as root:
    ```bash
-   python3 -m http.server 80
+   sudo ./ngfw-monitor
    ```
-2. **Terminal 2:** Start the firewall (`sudo ./ngfw-monitor`).
-   - Select Option `3` (Integrated Mode).
-   - **CRITICAL:** When asked for the interface, select `lo` (loopback) if you plan to test using `localhost`.
-   - Enter your app's port (`80`).
-   - *The firewall will automatically create a safe proxy port (e.g., 10081) and begin monitoring.*
-3. **Terminal 3 / Browser:** Send traffic to the **Proxy Port**.
-   ```bash
-   curl http://localhost:10081
-   ```
-   *The dashboard will instantly light up with packet captures and HTTP detection telemetry.*
+4. Select **Option 5 (Agent Setup Wizard)** and paste your Enrollment Secret. The agent will securely pair with your dashboard.
 
-### Option 4: Port Management
-If you ever encounter an `OSError: [Errno 98] Address already in use` error when starting your backend application, use this tool.
-Simply enter the port number (e.g., `80`), and the tool will show you exactly what process is blocking it and give you a 1-click option to force-kill it safely.
+### 4. Start Monitoring (Integrated Mode)
+Once enrolled, select **Option 3 (Integrated Mode)** in the Go CLI. Enter your network interface and your application's port. The firewall will automatically deploy a reverse proxy in front of your application and load eBPF hooks into the kernel. 
+
+All malicious traffic detected at the edge will instantly stream to the Central Dashboard!
 
 ---
 
-## Features
+## Detection Features
 
 ### Advanced Protocol Analyzers
-- **HTTP**: Detects SQLi, XSS, Path Traversal, Command Injection, SSRF, XXE, Log4Shell, HTTP Smuggling, and more.
+- **HTTP**: Detects SQLi, XSS, Path Traversal, Command Injection, SSRF, XXE, Log4Shell, HTTP Smuggling, and more. Immune to space-based URI parser bypasses.
 - **SSH**: Analyzes version exchanges, detects weak KEX/Ciphers/MACs, computes Hassh fingerprints, and flags tunneling.
 - **DNS**: Detects DNS tunneling, Domain Generation Algorithms (DGA), DNS rebinding, zone transfers, and NXDOMAIN floods.
 - **Database (MySQL, PostgreSQL, Redis, MongoDB)**: Tracks authentication, detects dangerous commands, and flags SQL injection in queries.
 - **SMTP & FTP**: Detects open relays, spam indicators, anonymous logins, FTP bounce attacks, and brute-force attempts.
-- **TLS**: Deep parsing of ClientHello, JA3 fingerprinting, and detection of weak cipher suites or expired/self-signed certificates.
+- **TLS**: Deep parsing of ClientHello, JA3 fingerprinting, and detection of weak cipher suites or expired certificates.
 
 ### Cross-Protocol Behavioral Engine
 - **Port Scanning & Brute-Force**: Sliding-window rate limiters to detect scanners and auth brute-forcing.
 - **C2 & Beaconing**: Analyzes connection intervals to detect Command & Control beaconing.
-- **Data Exfiltration**: Tracks outbound data volumes per IP.
 
 ### Additional Features
-- **Smart Port Mapping**: Auto-calculates proxy ports and automatically avoids restricted browser ports (e.g., avoiding 10080 to prevent NAT slipstreaming blocks in Firefox/Chrome).
+- **Smart Port Mapping**: Auto-calculates proxy ports and completely avoids restricted browser ports.
 - **Protocol Fingerprinting (Magic Bytes)**: Identifies the true application protocol regardless of the port.
 - **TLS Interception (MITM)**: On-the-fly certificate generation to inspect encrypted traffic.
-- **JSONL Structured Logging**: Automated rotation and structured logging for connections (`connections.jsonl`) and detections (`detections.jsonl`).
-- **Raw Traffic Dumping**: Captures raw request bytes to `proxy-output.json` for forensic analysis.
+- **Automated Port Management**: The built-in port management utility safely kills rogue background processes blocking critical ports.
 
 ---
 
-## Data Collection & Telemetry Features (MLOps Ready)
+## MLOps Ready Telemetry
 
-The NGFW monitor has been significantly upgraded to collect comprehensive telemetry suitable for training and inference with Machine Learning models.
+The NGFW monitor collects comprehensive telemetry specifically designed for training and inference with Machine Learning models.
 
-### 1. eBPF Layer (Kernel Space)
-- **Connection Info**: Source/Dest IP, Port, Protocol, Direction.
+### 1. eBPF Layer (L4 Features)
 - **Packet Info**: Packet Size, TCP Flags, TTL, TOS, Window Size, Seq/Ack Num, Fragment Information.
-- **Connection Statistics**: Bidirectional aggregated flow output in `logs/flow_stats.jsonl` (Duration, Avg/Max/Min Packet Size).
+- **Connection Statistics**: Bidirectional aggregated flow output (Duration, Avg/Max/Min Packet Size).
 - **Timing**: Forward/Backward IAT (Mean/Std/Max/Min), Packets/sec.
 
-### 2. Reverse Proxy (JSON Logs)
+### 2. Reverse Proxy (L7 Features)
 - **HTTP Features**: Extracted URI Length, Query Params, Header Count/Size, Entropy, Character ratios (exported in `HTTP-FEAT-001`).
 - **TLS**: Extracted SNI, ALPN, Cipher Suites, JA3 hashes (`TLS-HELLO-001`).
 - **Pattern Statistics**: SQL/XSS/Path-Traversal counts exported as discrete binary values.
-- **Session Tracking**: Request counts, session duration, unique URIs tracked logically (`HTTP-SESSION-001`).
-
----
-
-## Extending to a Full NGFW
-
-This monitor and proxy engine provide the detection foundation. To build a complete inline firewall:
-
-1. **Kernel-level L7 parsing**: Move deep packet inspection from the Go proxy layer down into the kernel using `bpf_skb_load_bytes` for better performance.
-2. **IP blocking (IPS Mode)**: Add a `blocked_ips` BPF map and return `TC_ACT_SHOT` to actively drop malicious packets.
-3. **ML Inference Engine**: Connect the `logs/detections.jsonl` stream into a live Isolation Forest / GBT inference server to dynamically detect zero-day attacks.
-4. **Central management**: Export events and ML verdicts as JSON via WebSocket to a central UI dashboard.
+- **Session Tracking**: Request counts, session duration, unique URIs tracked logically.
 
 ---
 
