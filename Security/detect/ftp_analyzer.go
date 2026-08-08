@@ -40,7 +40,7 @@ const (
 // Sensitive paths that should trigger FTP-SUSPICIOUS-PATH.
 var ftpSensitivePaths = []string{
 	"/etc/", "/proc/", "/var/", "/root/", "/home/",
-	"shadow", "passwd", "sudoers", ".bash_history",
+	"/shadow", "/passwd", "/sudoers", ".bash_history",
 	".ssh/", "id_rsa", "id_ecdsa", "id_ed25519",
 }
 
@@ -94,6 +94,7 @@ type ftpSession struct {
 
 	connID  string
 	srcIP   string
+	dstIP   string
 	srcPort uint16
 	dstPort uint16
 
@@ -136,6 +137,7 @@ type ftpSession struct {
 
 type bfKey struct {
 	srcIP   string
+	dstIP   string
 	dstPort uint16
 }
 
@@ -154,10 +156,10 @@ func newBruteTracker() *bruteTracker {
 }
 
 // record returns true when threshold is met or exceeded within the window.
-func (bt *bruteTracker) record(srcIP string, dstPort uint16, window time.Duration, threshold int) bool {
+func (bt *bruteTracker) record(srcIP, dstIP string, dstPort uint16, window time.Duration, threshold int) bool {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
-	k := bfKey{srcIP: srcIP, dstPort: dstPort}
+	k := bfKey{srcIP: srcIP, dstIP: dstIP, dstPort: dstPort}
 	now := time.Now()
 	e, ok := bt.entries[k]
 	if !ok || now.Sub(e.since) > window {
@@ -263,7 +265,7 @@ func (a *FTPAnalyzer) expireSessions() {
 	}
 }
 
-func (a *FTPAnalyzer) getOrCreate(connID, srcIP string, srcPort, dstPort uint16) *ftpSession {
+func (a *FTPAnalyzer) getOrCreate(connID, srcIP, dstIP string, srcPort, dstPort uint16) *ftpSession {
 	a.sessionMu.Lock()
 	defer a.sessionMu.Unlock()
 	s, ok := a.sessions[connID]
@@ -271,6 +273,7 @@ func (a *FTPAnalyzer) getOrCreate(connID, srcIP string, srcPort, dstPort uint16)
 		s = &ftpSession{
 			connID:       connID,
 			srcIP:        srcIP,
+			dstIP:        dstIP,
 			srcPort:      srcPort,
 			dstPort:      dstPort,
 			state:        ftpStateInit,
@@ -281,12 +284,25 @@ func (a *FTPAnalyzer) getOrCreate(connID, srcIP string, srcPort, dstPort uint16)
 	return s
 }
 
+// IsTLSEstablished returns true if explicit FTPS negotiation has completed.
+func (a *FTPAnalyzer) IsTLSEstablished(connID string) bool {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	s, ok := a.sessions[connID]
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tlsEstablished
+}
+
 // Analyze inspects a chunk of FTP data and emits detections.
-func (a *FTPAnalyzer) Analyze(connID, srcIP string, srcPort, dstPort uint16, data []byte, fromClient bool) {
+func (a *FTPAnalyzer) Analyze(connID, srcIP, dstIP string, srcPort, dstPort uint16, data []byte, fromClient bool) {
 	if len(data) == 0 {
 		return
 	}
-	sess := a.getOrCreate(connID, srcIP, srcPort, dstPort)
+	sess := a.getOrCreate(connID, srcIP, dstIP, srcPort, dstPort)
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 
@@ -415,6 +431,7 @@ func (a *FTPAnalyzer) handleClientLine(sess *ftpSession, line string) {
 		a.emit(sess, "FTP-XFER-002", SevInfo, CatConnLifecycle,
 			fmt.Sprintf("FTP upload: STOR %s", truncate(arg, 100)),
 			map[string]any{"direction": "upload", "filename": arg})
+		a.checkSensitivePath(sess, arg, "STOR")
 		a.checkGlob(sess, arg, "STOR")
 
 	case "STOU":
@@ -524,7 +541,7 @@ func (a *FTPAnalyzer) handleSITE(sess *ftpSession, arg string) {
 		})
 	case "CHMOD":
 		sev := SevMedium
-		if strings.HasPrefix(subArg, "7") || strings.Contains(subArg, "777") {
+		if strings.Contains(subArg, "777") || strings.Contains(subArg, "776") || strings.Contains(subArg, "775") {
 			sev = SevCritical
 		}
 		a.emit(sess, "FTP-CHMOD", sev, CatDangerousCmd,
@@ -671,7 +688,7 @@ func (a *FTPAnalyzer) processResponseCode(sess *ftpSession, code, line string) {
 		a.emit(sess, "FTP-AUTH-FAIL", SevMedium, CatBruteForce,
 			fmt.Sprintf("FTP authentication failure for user '%s'", sess.currentUser),
 			map[string]any{"username": sess.currentUser})
-		if a.brute.record(sess.srcIP, sess.dstPort, a.bruteConf.Window, a.bruteConf.Threshold) {
+		if a.brute.record(sess.srcIP, sess.dstIP, sess.dstPort, a.bruteConf.Window, a.bruteConf.Threshold) {
 			a.bus.EmitDetection(Detection{
 				ID: "FTP-BRUTE-001", Timestamp: time.Now(),
 				Severity: SevCritical, Category: CatBruteForce, Protocol: "FTP",

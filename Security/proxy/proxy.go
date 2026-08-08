@@ -247,8 +247,11 @@ func (ar *AnalyzerRouter) AnalyzeStream(ctx *ConnContext, data []byte, fromClien
 		ar.smtpAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
 			ctx.ListenPort, data, fromClient)
 	case "ftp", "FTP":
-		ar.ftpAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
+		ar.ftpAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ServerIP.String(), ctx.ClientPort,
 			ctx.ListenPort, data, fromClient)
+		if ar.ftpAnalyzer.IsTLSEstablished(ctx.ConnID) {
+			ctx.DetectedProtocol = "tls"
+		}
 	case "mysql", "MySQL", "postgresql", "PostgreSQL", "redis", "Redis", "mongodb", "MongoDB":
 		ar.dbAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
 			ctx.ListenPort, protocol, data, fromClient)
