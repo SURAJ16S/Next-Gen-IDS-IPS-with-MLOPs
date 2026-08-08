@@ -64,6 +64,10 @@ func (f *Forwarder) Forward(ctx context.Context, clientConn, backendConn net.Con
 	}()
 
 	wg.Wait()
+
+	// Notify protocol analyzers that this connection has closed.
+	// Required for timing-based heuristics (e.g., SSH-BRUTE-001).
+	f.analyzers.AnalyzeClose(f.connCtx)
 }
 
 // relay copies data from src to dst while sending chunks to analyzers.

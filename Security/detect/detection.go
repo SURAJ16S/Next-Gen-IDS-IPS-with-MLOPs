@@ -109,8 +109,12 @@ const (
 	CatZoneTransfer  = "zone-transfer"
 	CatNXDomainFlood = "nxdomain-flood"
 
-	CatSSHWeakAlgo = "ssh-weak-algo"
-	CatSSHTunnel   = "ssh-tunnel"
+	CatSSHWeakAlgo    = "ssh-weak-algo"
+	CatSSHTunnel      = "ssh-tunnel"
+	CatSSHBruteForce  = "ssh-brute-force"
+	CatSSHMalformed   = "ssh-malformed"
+	CatSSHLegacyProto = "ssh-legacy-protocol"
+	CatSSHBannerScan  = "ssh-banner-scan"
 
 	CatOpenRelay = "open-relay"
 	CatSpam      = "spam"

@@ -208,7 +208,16 @@ func NewAnalyzerRouter(engine *ProxyEngine, bus *detect.DetectionBus, cfg *Proxy
 }
 
 // AnalyzeStream dispatches data to the appropriate analyzer based on detected protocol.
+// A deferred recover() ensures that a panic in any analyzer cannot bring down the
+// forwarding path — the proxy must remain operational even if inspection fails.
 func (ar *AnalyzerRouter) AnalyzeStream(ctx *ConnContext, data []byte, fromClient bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[proxy] ⚠ analyzer panic recovered (conn %s, proto %s): %v",
+				ctx.ConnID, ctx.ExpectedService, r)
+		}
+	}()
+
 	// Log the raw traffic to proxy-output.json
 	if ar.engine != nil {
 		ar.engine.LogRawTraffic(ctx, data, fromClient)
@@ -249,6 +258,23 @@ func (ar *AnalyzerRouter) AnalyzeStream(ctx *ConnContext, data []byte, fromClien
 	default:
 		ar.genericAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
 			ctx.ListenPort, protocol, data, fromClient)
+	}
+}
+
+// AnalyzeClose notifies protocol analyzers when a connection is torn down.
+// This is essential for timing-based heuristics (e.g., SSH brute-force detection)
+// that need to know the exact moment a connection closes.
+func (ar *AnalyzerRouter) AnalyzeClose(ctx *ConnContext) {
+	protocol := ctx.DetectedProtocol
+	if protocol == "" {
+		protocol = ctx.ExpectedService
+	}
+	switch protocol {
+	case "ssh", "SSH", "SSH-2.0":
+		ar.sshAnalyzer.AnalyzeClose(
+			ctx.ConnID, ctx.ClientIP.String(),
+			ctx.ClientPort, ctx.ListenPort,
+		)
 	}
 }
 
