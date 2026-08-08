@@ -130,6 +130,12 @@ const (
 
 	CatProtocolDetect = "protocol-detect"
 	CatConnLifecycle  = "connection-lifecycle"
+
+	// Telnet-specific categories
+	CatTelnetIoT  = "telnet-iot"
+	CatTelnetScan = "telnet-scan"
+	CatCredStuff  = "credential-stuffing"
+	CatPwdSpray   = "password-spray"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────

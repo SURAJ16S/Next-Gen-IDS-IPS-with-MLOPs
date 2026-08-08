@@ -184,6 +184,7 @@ type AnalyzerRouter struct {
 	smtpAnalyzer    *detect.SMTPAnalyzer
 	ftpAnalyzer     *detect.FTPAnalyzer
 	dbAnalyzer      *detect.DBAnalyzer
+	telnetAnalyzer  *detect.TelnetAnalyzer
 	genericAnalyzer *detect.GenericAnalyzer
 	tlsInspector    *detect.TLSInspector
 	behavioral      *detect.BehavioralEngine
@@ -200,6 +201,7 @@ func NewAnalyzerRouter(engine *ProxyEngine, bus *detect.DetectionBus, cfg *Proxy
 		smtpAnalyzer:    detect.NewSMTPAnalyzer(bus),
 		ftpAnalyzer:     detect.NewFTPAnalyzer(bus),
 		dbAnalyzer:      detect.NewDBAnalyzer(bus),
+		telnetAnalyzer:  detect.NewTelnetAnalyzer(bus),
 		genericAnalyzer: detect.NewGenericAnalyzer(bus),
 		tlsInspector:    detect.NewTLSInspector(bus),
 		behavioral: detect.NewBehavioralEngine(bus, cfg.Detection.RateLimit.ConnectionsPerMinute,
@@ -243,6 +245,9 @@ func (ar *AnalyzerRouter) AnalyzeStream(ctx *ConnContext, data []byte, fromClien
 	case "dns", "DNS":
 		ar.dnsAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ServerIP.String(), ctx.ClientPort,
 			ctx.ListenPort, data, fromClient, ctx.Transport == "udp")
+	case "telnet", "Telnet", "TELNET":
+		ar.telnetAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
+			ctx.ListenPort, data, fromClient)
 	case "smtp", "SMTP", "smtps":
 		ar.smtpAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
 			ctx.ListenPort, data, fromClient)
@@ -282,6 +287,8 @@ func (ar *AnalyzerRouter) AnalyzeClose(ctx *ConnContext) {
 		if ctx.Transport != "udp" {
 			ar.dnsAnalyzer.OnClose(ctx.ConnID)
 		}
+	case "telnet", "Telnet", "TELNET":
+		ar.telnetAnalyzer.OnClose(ctx.ConnID)
 	}
 }
 
