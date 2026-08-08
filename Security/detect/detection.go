@@ -120,7 +120,9 @@ const (
 	CatSpam      = "spam"
 	CatPhishing  = "phishing"
 
+	CatMalformed = "malformed-protocol"
 	CatFTPBounce = "ftp-bounce"
+	CatFTPData   = "ftp-data-channel"
 	CatAnonLogin = "anonymous-login"
 
 	CatDangerousCmd = "dangerous-command"
