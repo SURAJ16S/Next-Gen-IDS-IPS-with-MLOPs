@@ -241,8 +241,8 @@ func (ar *AnalyzerRouter) AnalyzeStream(ctx *ConnContext, data []byte, fromClien
 		ar.sshAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
 			ctx.ListenPort, data, fromClient)
 	case "dns", "DNS":
-		ar.dnsAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
-			ctx.ListenPort, data, fromClient)
+		ar.dnsAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ServerIP.String(), ctx.ClientPort,
+			ctx.ListenPort, data, fromClient, ctx.Transport == "udp")
 	case "smtp", "SMTP", "smtps":
 		ar.smtpAnalyzer.Analyze(ctx.ConnID, ctx.ClientIP.String(), ctx.ClientPort,
 			ctx.ListenPort, data, fromClient)
@@ -278,6 +278,10 @@ func (ar *AnalyzerRouter) AnalyzeClose(ctx *ConnContext) {
 			ctx.ConnID, ctx.ClientIP.String(),
 			ctx.ClientPort, ctx.ListenPort,
 		)
+	case "dns", "DNS":
+		if ctx.Transport != "udp" {
+			ar.dnsAnalyzer.OnClose(ctx.ConnID)
+		}
 	}
 }
 
