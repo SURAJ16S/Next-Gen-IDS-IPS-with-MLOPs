@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
-// detect/tls_inspect.go — TLS ClientHello deep parsing and JA3 fingerprinting.
-// Inspects TLS handshake data to extract SNI, cipher suites, extensions,
-// and computes JA3 fingerprints for client identification.
+// detect/tls_inspect.go — TLS deep parsing and JA3/JA3S fingerprinting.
+// Includes robust TCP stream reassembly for fragmented records and TLS 1.2
+// certificate inspection. Note: TLS 1.3 certificates are encrypted and
+// invisible to passive inspection.
 
 package detect
 
@@ -11,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,18 +20,42 @@ import (
 // TLS Inspector
 // ──────────────────────────────────────────────────────────────────────────────
 
+const tlsMaxReassemblyBuf = 32768 // 32KB max buffer to prevent exhaustion
+
+type tlsSession struct {
+	mu      sync.Mutex
+	connID  string
+	srcIP   string
+	srcPort uint16
+	dstPort uint16
+
+	clientBuf []byte
+	serverBuf []byte
+
+	clientHandshakeStream []byte
+	serverHandshakeStream []byte
+
+	clientHelloParsed bool
+	serverHelloParsed bool
+	serverCertParsed  bool
+
+	clientEncrypted bool
+	serverEncrypted bool
+}
+
 // TLSInspector analyzes TLS handshake traffic.
 type TLSInspector struct {
-	bus *DetectionBus
-
-	// Weak cipher suite IDs
+	bus         *DetectionBus
 	weakCiphers map[uint16]string
+	sessions    map[string]*tlsSession
+	sessionMu   sync.Mutex
 }
 
 // NewTLSInspector creates a TLS inspector with weak cipher databases.
 func NewTLSInspector(bus *DetectionBus) *TLSInspector {
-	return &TLSInspector{
-		bus: bus,
+	t := &TLSInspector{
+		bus:      bus,
+		sessions: make(map[string]*tlsSession),
 		weakCiphers: map[uint16]string{
 			0x0000: "TLS_NULL_WITH_NULL_NULL",
 			0x0001: "TLS_RSA_WITH_NULL_MD5",
@@ -46,76 +72,145 @@ func NewTLSInspector(bus *DetectionBus) *TLSInspector {
 			0x0064: "TLS_RSA_EXPORT1024_WITH_RC4_56_SHA",
 		},
 	}
+	bus.Subscribe(t)
+	return t
+}
+
+func (t *TLSInspector) OnDetection(d Detection) {}
+
+func (t *TLSInspector) OnConnectionClose(c ConnectionRecord) {
+	t.sessionMu.Lock()
+	delete(t.sessions, c.ConnID)
+	t.sessionMu.Unlock()
 }
 
 // Analyze inspects TLS data and emits detections.
 func (t *TLSInspector) Analyze(connID, srcIP string, srcPort, dstPort uint16, data []byte, fromClient bool) {
-	if len(data) < 6 {
+	if len(data) == 0 {
 		return
 	}
 
-	// Check for TLS record header
-	if data[0] != 0x16 { // Handshake
-		return
+	t.sessionMu.Lock()
+	sess, ok := t.sessions[connID]
+	if !ok {
+		sess = &tlsSession{
+			connID:  connID,
+			srcIP:   srcIP,
+			srcPort: srcPort,
+			dstPort: dstPort,
+		}
+		t.sessions[connID] = sess
+	}
+	t.sessionMu.Unlock()
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+
+	if fromClient {
+		if sess.clientEncrypted || len(sess.clientBuf) > tlsMaxReassemblyBuf {
+			return
+		}
+		sess.clientBuf = append(sess.clientBuf, data...)
+		t.extractRecords(sess, true)
+		t.parseHandshakeStream(sess, true)
+	} else {
+		if sess.serverEncrypted || len(sess.serverBuf) > tlsMaxReassemblyBuf {
+			return
+		}
+		sess.serverBuf = append(sess.serverBuf, data...)
+		t.extractRecords(sess, false)
+		t.parseHandshakeStream(sess, false)
+	}
+}
+
+func (t *TLSInspector) extractRecords(sess *tlsSession, fromClient bool) {
+	buf := sess.clientBuf
+	if !fromClient {
+		buf = sess.serverBuf
 	}
 
-	// Record layer version
-	recordVersion := uint16(data[1])<<8 | uint16(data[2])
-	// recordLength := binary.BigEndian.Uint16(data[3:5])
+	for len(buf) >= 5 {
+		recordType := buf[0]
+		recordLen := int(binary.BigEndian.Uint16(buf[3:5]))
 
-	// Handshake message starts at offset 5
-	if len(data) < 6 {
-		return
-	}
-
-	// Iterate through handshake messages in this record
-	offset := 5
-	for offset+4 <= len(data) {
-		handshakeType := data[offset]
-		handshakeLen := int(data[offset+1])<<16 | int(data[offset+2])<<8 | int(data[offset+3])
-
-		if offset+4+handshakeLen > len(data) {
-			break
+		if len(buf) < 5+recordLen {
+			break // Need more TCP data for this record
 		}
 
-		msgData := data[offset : offset+4+handshakeLen]
-
-		if fromClient && handshakeType == 0x01 { // ClientHello
-			t.parseClientHello(connID, srcIP, srcPort, dstPort, msgData, recordVersion)
-		} else if !fromClient {
-			if handshakeType == 0x02 { // ServerHello
-				t.parseServerHello(connID, srcIP, srcPort, dstPort, msgData, recordVersion)
-			} else if handshakeType == 0x0B { // Certificate
-				t.parseCertificate(connID, srcIP, srcPort, dstPort, msgData)
+		recordData := buf[5 : 5+recordLen]
+		if recordType == 0x16 { // Handshake
+			if fromClient {
+				sess.clientHandshakeStream = append(sess.clientHandshakeStream, recordData...)
+			} else {
+				sess.serverHandshakeStream = append(sess.serverHandshakeStream, recordData...)
+			}
+		} else if recordType == 0x14 || recordType == 0x17 {
+			// ChangeCipherSpec or ApplicationData means handshakes are encrypted from now on.
+			if fromClient {
+				sess.clientEncrypted = true
+			} else {
+				sess.serverEncrypted = true
 			}
 		}
 
-		offset += 4 + handshakeLen
+		buf = buf[5+recordLen:]
+	}
+
+	if fromClient {
+		sess.clientBuf = buf
+	} else {
+		sess.serverBuf = buf
+	}
+}
+
+func (t *TLSInspector) parseHandshakeStream(sess *tlsSession, fromClient bool) {
+	stream := sess.clientHandshakeStream
+	if !fromClient {
+		stream = sess.serverHandshakeStream
+	}
+
+	for len(stream) >= 4 {
+		msgType := stream[0]
+		msgLen := int(stream[1])<<16 | int(stream[2])<<8 | int(stream[3])
+
+		if len(stream) < 4+msgLen {
+			break // Need more record data for this handshake message
+		}
+
+		msgData := stream[4 : 4+msgLen]
+
+		if fromClient && msgType == 0x01 && !sess.clientHelloParsed {
+			t.parseClientHello(sess, msgData)
+			sess.clientHelloParsed = true
+		} else if !fromClient {
+			if msgType == 0x02 && !sess.serverHelloParsed {
+				t.parseServerHello(sess, msgData)
+				sess.serverHelloParsed = true
+			} else if msgType == 0x0B && !sess.serverCertParsed {
+				t.parseCertificate(sess, msgData)
+				sess.serverCertParsed = true
+			}
+		}
+
+		stream = stream[4+msgLen:]
+	}
+
+	if fromClient {
+		sess.clientHandshakeStream = stream
+	} else {
+		sess.serverHandshakeStream = stream
 	}
 }
 
 // parseClientHello extracts all data from a TLS ClientHello message.
-func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort uint16, data []byte, recordVersion uint16) {
-	// ClientHello structure:
-	// HandshakeType(1) + Length(3) + ClientVersion(2) + Random(32) +
-	// SessionIDLength(1) + SessionID(var) + CipherSuitesLength(2) +
-	// CipherSuites(var) + CompressionMethodsLength(1) + CompressionMethods(var) +
-	// ExtensionsLength(2) + Extensions(var)
-
-	if len(data) < 38 { // Minimum: type(1) + len(3) + version(2) + random(32)
+func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
+	if len(data) < 34 { // version(2) + random(32)
 		return
 	}
 
-	offset := 1 // Skip handshake type
-	// Skip handshake length (3 bytes)
-	offset += 3
-
-	// Client version
+	offset := 0
 	clientVersion := binary.BigEndian.Uint16(data[offset : offset+2])
-	offset += 2
-
-	// Skip random (32 bytes)
-	offset += 32
+	offset += 2 + 32 // Skip version + random
 
 	// Session ID
 	if offset >= len(data) {
@@ -209,20 +304,20 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 	}
 
 	// ── Compute JA3 fingerprint ──
-	// JA3 = MD5(TLSVersion,Ciphers,Extensions,EllipticCurves,EllipticCurvePointFormats)
-	ecStrs := make([]string, len(ellipticCurves))
-	for i, ec := range ellipticCurves {
-		ecStrs[i] = fmt.Sprintf("%d", ec)
+	var filteredEC []string
+	for _, ec := range ellipticCurves {
+		if !isGREASE(ec) {
+			filteredEC = append(filteredEC, fmt.Sprintf("%d", ec))
+		}
 	}
+	
 	ecpfStrs := make([]string, len(ecPointFormats))
 	for i, pf := range ecPointFormats {
 		ecpfStrs[i] = fmt.Sprintf("%d", pf)
 	}
 
-	// Filter out GREASE values (0x?A?A pattern)
 	filteredCiphers := filterGREASE16(cipherStrs, cipherSuites)
 	filteredExts := filterGREASE16(extensionStrs, extensions)
-	filteredEC := filterGREASEStr(ecStrs)
 
 	ja3String := fmt.Sprintf("%d,%s,%s,%s,%s",
 		clientVersion,
@@ -236,9 +331,8 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 	// Determine actual TLS version
 	actualVersion := tlsVersionString(clientVersion)
 	if len(supportedVersions) > 0 {
-		// TLS 1.3 advertises via supported_versions extension
 		for _, sv := range supportedVersions {
-			if sv == 0x0304 {
+			if sv == 0x0304 && !isGREASE(sv) {
 				actualVersion = "TLS 1.3"
 				break
 			}
@@ -247,23 +341,21 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 
 	sessionResumption := (sessionIDLen > 0) || hasPSK
 
-	// ── Emit ClientHello detection ──
 	t.bus.EmitDetection(Detection{
 		ID:         "TLS-HELLO-001",
 		Timestamp:  time.Now(),
 		Severity:   SevInfo,
 		Category:   CatProtocolDetect,
 		Protocol:   "TLS",
-		SourceIP:   srcIP,
-		SourcePort: srcPort,
-		DestPort:   dstPort,
+		SourceIP:   sess.srcIP,
+		SourcePort: sess.srcPort,
+		DestPort:   sess.dstPort,
 		Summary:    fmt.Sprintf("TLS ClientHello: %s, SNI=%s, JA3=%s", actualVersion, sni, ja3Hash),
-		ConnID:     connID,
+		ConnID:     sess.connID,
 		Details: map[string]any{
 			"ja3_hash":                   ja3Hash,
 			"ja3_string":                 truncate(ja3String, 500),
 			"tls_version":                actualVersion,
-			"record_version":             tlsVersionString(recordVersion),
 			"sni":                        sni,
 			"alpn":                       alpn,
 			"cipher_suite_count":         len(cipherSuites),
@@ -273,7 +365,6 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 		},
 	})
 
-	// ── Weak cipher detection ──
 	if len(weakFound) > 0 {
 		t.bus.EmitDetection(Detection{
 			ID:         "TLS-WEAK-001",
@@ -281,18 +372,17 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 			Severity:   SevHigh,
 			Category:   CatTLSWeakCipher,
 			Protocol:   "TLS",
-			SourceIP:   srcIP,
-			SourcePort: srcPort,
-			DestPort:   dstPort,
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
 			Summary:    fmt.Sprintf("Weak TLS cipher suites offered: %s", strings.Join(weakFound, ", ")),
-			ConnID:     connID,
+			ConnID:     sess.connID,
 			Details: map[string]any{
 				"weak_ciphers": weakFound,
 			},
 		})
 	}
 
-	// ── TLS downgrade detection ──
 	if clientVersion <= 0x0301 && len(supportedVersions) == 0 {
 		t.bus.EmitDetection(Detection{
 			ID:         "TLS-DOWNGRADE",
@@ -300,22 +390,22 @@ func (t *TLSInspector) parseClientHello(connID, srcIP string, srcPort, dstPort u
 			Severity:   SevHigh,
 			Category:   CatTLSDowngrade,
 			Protocol:   "TLS",
-			SourceIP:   srcIP,
-			SourcePort: srcPort,
-			DestPort:   dstPort,
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
 			Summary:    fmt.Sprintf("TLS downgrade: client only supports %s", tlsVersionString(clientVersion)),
-			ConnID:     connID,
+			ConnID:     sess.connID,
 		})
 	}
 }
 
 // parseServerHello extracts data from a TLS ServerHello message.
-func (t *TLSInspector) parseServerHello(connID, srcIP string, srcPort, dstPort uint16, data []byte, recordVersion uint16) {
-	if len(data) < 38 {
+func (t *TLSInspector) parseServerHello(sess *tlsSession, data []byte) {
+	if len(data) < 34 { // version(2) + random(32)
 		return
 	}
 
-	offset := 4 // Skip type(1) + length(3)
+	offset := 0
 	serverVersion := binary.BigEndian.Uint16(data[offset : offset+2])
 	offset += 2 + 32 // Skip version + random
 
@@ -331,9 +421,37 @@ func (t *TLSInspector) parseServerHello(connID, srcIP string, srcPort, dstPort u
 		return
 	}
 	selectedCipher := binary.BigEndian.Uint16(data[offset : offset+2])
+	offset += 2
+
+	// Compression
+	if offset >= len(data) {
+		return
+	}
+	offset += 1
+
+	// Extensions
+	var extensions []uint16
+	var extensionStrs []string
+	if offset+2 <= len(data) {
+		extTotalLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		offset += 2
+		extEnd := offset + extTotalLen
+
+		for offset+4 <= len(data) && offset < extEnd {
+			extType := binary.BigEndian.Uint16(data[offset : offset+2])
+			extLen := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
+			offset += 4
+			
+			extensions = append(extensions, extType)
+			extensionStrs = append(extensionStrs, fmt.Sprintf("%d", extType))
+			offset += extLen
+		}
+	}
+
+	filteredExts := filterGREASE16(extensionStrs, extensions)
 
 	// JA3S = MD5(TLSVersion,SelectedCipher,Extensions)
-	ja3sString := fmt.Sprintf("%d,%d,", serverVersion, selectedCipher)
+	ja3sString := fmt.Sprintf("%d,%d,%s", serverVersion, selectedCipher, strings.Join(filteredExts, "-"))
 	ja3sHash := fmt.Sprintf("%x", md5.Sum([]byte(ja3sString)))
 
 	t.bus.EmitDetection(Detection{
@@ -342,20 +460,20 @@ func (t *TLSInspector) parseServerHello(connID, srcIP string, srcPort, dstPort u
 		Severity:   SevInfo,
 		Category:   CatProtocolDetect,
 		Protocol:   "TLS",
-		SourceIP:   srcIP,
-		SourcePort: srcPort,
-		DestPort:   dstPort,
+		SourceIP:   sess.srcIP,
+		SourcePort: sess.srcPort,
+		DestPort:   sess.dstPort,
 		Summary: fmt.Sprintf("TLS ServerHello: %s, Cipher=0x%04X, JA3S=%s",
 			tlsVersionString(serverVersion), selectedCipher, ja3sHash),
-		ConnID: connID,
+		ConnID: sess.connID,
 		Details: map[string]any{
 			"ja3s_hash":       ja3sHash,
 			"tls_version":     tlsVersionString(serverVersion),
 			"selected_cipher": selectedCipher,
+			"ja3s_string":     ja3sString,
 		},
 	})
 
-	// Check if selected cipher is weak
 	if name, isWeak := t.weakCiphers[selectedCipher]; isWeak {
 		t.bus.EmitDetection(Detection{
 			ID:         "TLS-WEAK-SEL",
@@ -363,11 +481,11 @@ func (t *TLSInspector) parseServerHello(connID, srcIP string, srcPort, dstPort u
 			Severity:   SevCritical,
 			Category:   CatTLSWeakCipher,
 			Protocol:   "TLS",
-			SourceIP:   srcIP,
-			SourcePort: srcPort,
-			DestPort:   dstPort,
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
 			Summary:    fmt.Sprintf("Server selected weak cipher: %s", name),
-			ConnID:     connID,
+			ConnID:     sess.connID,
 		})
 	}
 }
@@ -377,13 +495,11 @@ func (t *TLSInspector) parseServerHello(connID, srcIP string, srcPort, dstPort u
 // ──────────────────────────────────────────────────────────────────────────────
 
 func extractSNI(data []byte) string {
-	// ServerNameList: Length(2) + ServerName entries
 	if len(data) < 5 {
 		return ""
 	}
-	// listLen := binary.BigEndian.Uint16(data[0:2])
 	nameType := data[2]
-	if nameType != 0 { // host_name
+	if nameType != 0 {
 		return ""
 	}
 	nameLen := int(binary.BigEndian.Uint16(data[3:5]))
@@ -397,7 +513,6 @@ func extractALPN(data []byte) []string {
 	if len(data) < 2 {
 		return nil
 	}
-	// listLen := binary.BigEndian.Uint16(data[0:2])
 	offset := 2
 	var protocols []string
 	for offset < len(data) {
@@ -416,7 +531,6 @@ func extractEllipticCurves(data []byte) []uint16 {
 	if len(data) < 2 {
 		return nil
 	}
-	// listLen := binary.BigEndian.Uint16(data[0:2])
 	offset := 2
 	var curves []uint16
 	for offset+2 <= len(data) {
@@ -442,22 +556,15 @@ func extractSupportedVersions(data []byte) []uint16 {
 
 func tlsVersionString(v uint16) string {
 	switch v {
-	case 0x0300:
-		return "SSL 3.0"
-	case 0x0301:
-		return "TLS 1.0"
-	case 0x0302:
-		return "TLS 1.1"
-	case 0x0303:
-		return "TLS 1.2"
-	case 0x0304:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("0x%04X", v)
+	case 0x0300: return "SSL 3.0"
+	case 0x0301: return "TLS 1.0"
+	case 0x0302: return "TLS 1.1"
+	case 0x0303: return "TLS 1.2"
+	case 0x0304: return "TLS 1.3"
+	default: return fmt.Sprintf("0x%04X", v)
 	}
 }
 
-// isGREASE checks if a TLS value is a GREASE (Generate Random Extensions And Sustain Extensibility) value.
 func isGREASE(v uint16) bool {
 	return v&0x0F0F == 0x0A0A
 }
@@ -472,23 +579,13 @@ func filterGREASE16(strs []string, vals []uint16) []string {
 	return result
 }
 
-func filterGREASEStr(strs []string) []string {
-	// For EC curves, already converted to string; just return as-is
-	return strs
-}
-
 // parseCertificate extracts data from a TLS Certificate message.
-func (t *TLSInspector) parseCertificate(connID, srcIP string, srcPort, dstPort uint16, data []byte) {
-	if len(data) < 7 {
+func (t *TLSInspector) parseCertificate(sess *tlsSession, data []byte) {
+	if len(data) < 3 {
 		return
 	}
 
-	offset := 4 // Skip type(1) + handshake_length(3)
-
-	// Certificate list length
-	if offset+3 > len(data) {
-		return
-	}
+	offset := 0
 	certsLen := int(data[offset])<<16 | int(data[offset+1])<<8 | int(data[offset+2])
 	offset += 3
 
@@ -496,7 +593,6 @@ func (t *TLSInspector) parseCertificate(connID, srcIP string, srcPort, dstPort u
 		return
 	}
 
-	// Parse the first certificate in the chain
 	if offset+3 > len(data) {
 		return
 	}
@@ -520,11 +616,11 @@ func (t *TLSInspector) parseCertificate(connID, srcIP string, srcPort, dstPort u
 		Severity:   SevInfo,
 		Category:   CatProtocolDetect,
 		Protocol:   "TLS",
-		SourceIP:   srcIP,
-		SourcePort: srcPort,
-		DestPort:   dstPort,
+		SourceIP:   sess.srcIP,
+		SourcePort: sess.srcPort,
+		DestPort:   sess.dstPort,
 		Summary:    fmt.Sprintf("TLS Certificate: Issuer=%s, Subject=%s", cert.Issuer.CommonName, cert.Subject.CommonName),
-		ConnID:     connID,
+		ConnID:     sess.connID,
 		Details: map[string]any{
 			"issuer":     cert.Issuer.String(),
 			"subject":    cert.Subject.String(),
@@ -534,4 +630,53 @@ func (t *TLSInspector) parseCertificate(connID, srcIP string, srcPort, dstPort u
 			"ip_addrs":   cert.IPAddresses,
 		},
 	})
+
+	// Rule: Expired Certificate
+	if time.Now().After(cert.NotAfter) {
+		t.bus.EmitDetection(Detection{
+			ID:         "TLS-CERT-EXPIRED",
+			Timestamp:  time.Now(),
+			Severity:   SevMedium,
+			Category:   CatProtocolDetect,
+			Protocol:   "TLS",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("Expired TLS Certificate: %s", cert.Subject.CommonName),
+			ConnID:     sess.connID,
+		})
+	}
+
+	// Rule: Self-Signed Certificate
+	if cert.Issuer.String() == cert.Subject.String() {
+		t.bus.EmitDetection(Detection{
+			ID:         "TLS-CERT-SELFSIGNED",
+			Timestamp:  time.Now(),
+			Severity:   SevLow,
+			Category:   CatProtocolDetect,
+			Protocol:   "TLS",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("Self-Signed TLS Certificate: %s", cert.Subject.CommonName),
+			ConnID:     sess.connID,
+		})
+	}
+
+	// Rule: Weak Signature Algorithm
+	sigAlg := cert.SignatureAlgorithm.String()
+	if strings.Contains(sigAlg, "MD2") || strings.Contains(sigAlg, "MD5") || strings.Contains(sigAlg, "SHA1") {
+		t.bus.EmitDetection(Detection{
+			ID:         "TLS-CERT-WEAK-SIG",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatProtocolDetect,
+			Protocol:   "TLS",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("Weak Certificate Signature Algorithm (%s): %s", sigAlg, cert.Subject.CommonName),
+			ConnID:     sess.connID,
+		})
+	}
 }
