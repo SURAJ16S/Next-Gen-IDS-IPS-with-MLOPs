@@ -1,0 +1,15 @@
+# Build output
+ngfw-monitor
+
+# Runtime logs (generated at runtime, not source)
+logs/
+
+# Temporary test configs
+proxy_config_test.yaml
+proxy_tls_test.yaml
+
+# Go test binaries
+*.test
+
+# OS files
+.DS_Store
