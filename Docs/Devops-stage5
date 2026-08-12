@@ -1,0 +1,131 @@
+# Phase 5: Disaster Recovery & MLOps Observability Workflow
+
+> **Integration Context:** This document dictates the final state management and observability phase of the DevOps pipeline. It implements zero-cost disaster recovery using Velero—simulating AWS S3 backups locally—and configures the monitoring stack to visualize the team's Next-Gen IDS/IPS telemetry.
+> **Environment:** 100% Local (Zero-Cost Proof of Concept mimicking AWS S3/EBS)
+> **Target Directory additions:** `DevOps/k8s/minio-deployment.yaml`, `DevOps/scripts/05-disaster-recovery.sh`
+
+---
+
+## 1. S3-Compatible Object Storage (Local Simulation)
+
+In the enterprise AWS architecture, Velero exports all captured Kubernetes object definitions, configurations, and metadata seamlessly to an Amazon Simple Storage Service (S3) bucket. To achieve this locally at zero cost, we deploy a lightweight, S3-compatible object storage container.
+
+**The Workflow:**
+1. **Provisioning:** A local storage bucket is created within the Minikube cluster.
+2. **Access Management:** Local access keys and secret keys are generated to simulate AWS IAM credentials.
+
+**Zero-Cost Implementation:**
+* **Tooling:** **MinIO**, an open-source, high-performance object storage server.
+* **Execution:** Deployed in a dedicated `backup-system` namespace.
+
+---
+
+## 2. Stateful Backups and Disaster Recovery
+
+In the cloud, Velero triggers Amazon Elastic Block Store (EBS) snapshots to protect persistent volumes. Because we are running locally without AWS block storage, we must utilize a file-level backup approach to capture application data.
+
+**The Workflow:**
+1. **API Interrogation:** Velero queries the local Kubernetes API to capture all object definitions and configurations.
+2. **File-Level Volume Backup:** The pipeline utilizes Velero's built-in file system backup tool to capture the actual stateful data residing on local persistent volumes.
+3. **Export:** The captured data and Kubernetes manifests are packaged and streamed directly into the local MinIO bucket.
+
+**Zero-Cost Implementation:**
+* **Tooling:** **Velero** integrated with **Restic** (an open-source backup program).
+* **Execution:** The Velero CLI installs the controller directly into Minikube, pointing to the MinIO internal IP rather than an AWS endpoint.
+
+---
+
+## 3. MLOps Telemetry & Observability Integration
+
+The team's Go-based Next-Gen IDS/IPS agent generates rich, MLOps-ready telemetry (e.g., CICFlowMeter data in `flow_stats.jsonl` and detection events). This data must be visualized in real-time to monitor the health of the promoted application.
+
+**The Workflow:**
+1. **Data Ingestion:** A local log scraper reads the JSONL output from the security proxy.
+2. **Visualization:** Dashboards display real-time connection rates, blocked IPs, and ML behavioral anomalies.
+
+**Zero-Cost Implementation:**
+* **Tooling:** **Prometheus** and **Grafana** (open-source).
+* **Execution:** Deployed locally, mapping the agent's telemetry directly to visual graphs.
+
+---
+
+## 4. Next Steps for Implementation
+
+To operationalize this final phase locally, the DevOps team must create the local MinIO storage manifest and the Velero backup orchestration script.
+
+1. **Create the Manifest:** `DevOps/k8s/minio-deployment.yaml`
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: minio
+     namespace: backup-system
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: minio
+     template:
+       metadata:
+         labels:
+           app: minio
+       spec:
+         containers:
+         - name: minio
+           image: minio/minio:latest
+           args:
+           - server
+           - /data
+           env:
+           - name: MINIO_ROOT_USER
+             value: "velero-admin"
+           - name: MINIO_ROOT_PASSWORD
+             value: "velero-secret-key"
+           ports:
+           - containerPort: 9000
+   ---
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: minio-service
+     namespace: backup-system
+   spec:
+     selector:
+       app: minio
+     ports:
+       - port: 9000
+         targetPort: 9000
+
+
+#!/bin/bash
+echo "Starting Phase 5: Disaster Recovery & MLOps Observability..."
+
+echo "Deploying S3-Compatible Storage (MinIO)..."
+kubectl create namespace backup-system || true
+kubectl apply -f DevOps/k8s/minio-deployment.yaml
+
+echo "Waiting for MinIO to initialize..."
+sleep 10
+
+echo "Creating Velero credentials file..."
+cat <<EOF > credentials-velero
+[default]
+aws_access_key_id = velero-admin
+aws_secret_access_key = velero-secret-key
+EOF
+
+echo "Installing Velero and configuring Restic for local volume backups..."
+# Note: The URL assumes MinIO is exposed locally on port 9000 within the cluster
+velero install \
+    --provider aws \
+    --plugins velero/velero-plugin-for-aws:v1.6.0 \
+    --bucket k8s-backups \
+    --secret-file ./credentials-velero \
+    --use-restic \
+    --backup-location-config region=minio,s3ForcePathStyle="true",s3Url=[http://minio-service.backup-system.svc.cluster.local:9000](http://minio-service.backup-system.svc.cluster.local:9000)
+
+echo "Triggering baseline backup of the production namespace..."
+velero backup create production-baseline-backup --include-namespaces production-workloads
+
+echo "Phase 5 Complete! The Zero-Cost DevOps & Security Pipeline is fully operational."
+echo "Check backup status with: velero backup describe production-baseline-backup"         

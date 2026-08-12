@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, ShieldAlert, Network, BarChart3, FileText, Server, ShieldCheck, Settings, Cpu } from 'lucide-react';
+import { LayoutDashboard, ShieldAlert, Network, BarChart3, FileText, Server, ShieldCheck, Settings, Cpu, Play } from 'lucide-react';
 
 const navItems = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
@@ -8,6 +8,7 @@ const navItems = [
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
   { to: '/logs', label: 'Logs', icon: FileText },
   { to: '/devops', label: 'DevOps', icon: Server },
+  { to: '/fixtures', label: 'Test Fixtures', icon: Play },
   { to: '/nodes', label: 'Agent Nodes', icon: Cpu },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];

@@ -36,6 +36,17 @@ const initSocket = (server) => {
       console.log(`Dashboard client connected: ${socket.id}`);
     }
 
+    // Subscribe dashboard client to real-time pipeline log streams by jobId
+    socket.on('subscribe:pipeline', ({ jobId }) => {
+      socket.join(`pipeline:${jobId}`);
+      console.log(`Socket ${socket.id} subscribed to pipeline:${jobId}`);
+    });
+
+    socket.on('unsubscribe:pipeline', ({ jobId }) => {
+      socket.leave(`pipeline:${jobId}`);
+      console.log(`Socket ${socket.id} unsubscribed from pipeline:${jobId}`);
+    });
+
     socket.on('disconnect', () => {
       if (socket.isAgent) {
         console.log(`Agent disconnected: ${socket.nodeId}`);

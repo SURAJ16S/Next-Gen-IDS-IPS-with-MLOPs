@@ -42,3 +42,8 @@ Security/logs/
 *test.yaml
 *.test
 
+DevOps/examples/
+
+# DevOps Orchestrator Sandbox Outputs
+DevOps/artifacts/
+DevOps/builds/
