@@ -229,6 +229,21 @@ listeners:
       transport: tcp
       service: python3 (PID:104891)
       enabled: true
+    - listen_port: 18080
+      backend_addr: 127.0.0.1:8080
+      transport: tcp
+      service: HTTP Alternate / Proxy [python3] PID:11569
+      enabled: true
+    - listen_port: 10022
+      backend_addr: 127.0.0.1:22
+      transport: tcp
+      service: SSH [ngfw-monitor] PID:10336
+      enabled: true
+    - listen_port: 13000
+      backend_addr: 127.0.0.1:3000
+      transport: tcp
+      service: Node.js / Grafana (Dev) [MainThread] PID:42581
+      enabled: true
 tls:
     enabled: false
     ca_cert_file: proxy/certs/ca.crt

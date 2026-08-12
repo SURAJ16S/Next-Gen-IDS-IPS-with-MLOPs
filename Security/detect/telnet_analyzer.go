@@ -680,8 +680,97 @@ func (a *TelnetAnalyzer) processAuthState(sess *TelnetSession, text []byte, from
 			}
 			sess.passOnlyFP = passOnlyFingerprint(line)
 			sess.authState = telnetAuthGotPassword
+		case telnetAuthAuthenticated:
+			for _, b := range text {
+				if b == '\r' || b == '\n' {
+					if len(sess.cmdBuf) > 0 {
+						cmd := sess.cmdBuf
+						sess.cmdBuf = ""
+						
+						a.mu.Unlock()
+						a.analyzeCommand(sess, cmd)
+						a.mu.Lock()
+					}
+				} else {
+					if len(sess.cmdBuf) < 4096 { // Max 4KB command
+						sess.cmdBuf += string(b)
+					}
+				}
+			}
 		}
 	}
+}
+
+// analyzeCommand checks a completed command against behavioral detection rules.
+func (a *TelnetAnalyzer) analyzeCommand(sess *TelnetSession, cmd string) {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return
+	}
+
+	lowerCmd := strings.ToLower(cmd)
+
+	// TELNET-DOWNLOAD-001
+	if containsAnyPrefixOrSubstring(lowerCmd, []string{"wget ", "curl ", "tftp ", "ftp ", "fetch "}) {
+		a.emitCommandDetection(sess, "TELNET-DOWNLOAD-001", SevCritical, CatDangerousCmd, "Malware download or remote fetch command detected via Telnet", cmd)
+	}
+
+	// TELNET-BOTNET-001
+	if containsAnyPrefixOrSubstring(lowerCmd, []string{"chmod +x", "./", "busybox", "echo -ne"}) {
+		a.emitCommandDetection(sess, "TELNET-BOTNET-001", SevCritical, CatBotScanner, "Botnet execution chain or binary drop detected via Telnet", cmd)
+	}
+
+	// TELNET-RECON-001
+	if containsAnyPrefixOrSubstring(lowerCmd, []string{"cat /etc/passwd", "uname -a", "ifconfig", "ip addr", "netstat", "id", "whoami"}) {
+		a.emitCommandDetection(sess, "TELNET-RECON-001", SevMedium, CatInfoLeakage, "System reconnaissance command detected via Telnet", cmd)
+	}
+
+	// TELNET-DEFENSE-EVASION-001
+	if containsAnyPrefixOrSubstring(lowerCmd, []string{"rm -rf", "history -c", "killall", "iptables -f", "set +o history", "unset histfile"}) {
+		a.emitCommandDetection(sess, "TELNET-DEFENSE-EVASION-001", SevHigh, CatDangerousCmd, "Defense evasion or log tampering detected via Telnet", cmd)
+	}
+
+	// TELNET-PERSIST-001
+	if containsAnyPrefixOrSubstring(lowerCmd, []string{"crontab", ">> /etc/rc.local", "useradd", "usermod"}) {
+		a.emitCommandDetection(sess, "TELNET-PERSIST-001", SevHigh, CatLateralMove, "Persistence mechanism installation detected via Telnet", cmd)
+	}
+
+	// TELNET-PRIVESC-001
+	if containsAnyPrefixOrSubstring(lowerCmd, []string{"sudo ", "su "}) {
+		a.emitCommandDetection(sess, "TELNET-PRIVESC-001", SevMedium, CatDangerousCmd, "Privilege escalation attempt detected via Telnet", cmd)
+	}
+
+	// TELNET-CONFIG-001
+	if containsAnyPrefixOrSubstring(lowerCmd, []string{"enable", "conf t", "configure terminal", "write memory"}) {
+		a.emitCommandDetection(sess, "TELNET-CONFIG-001", SevHigh, CatDangerousCmd, "Device configuration alteration detected via Telnet", cmd)
+	}
+}
+
+// containsAnyPrefixOrSubstring checks if the command contains any of the target substrings.
+func containsAnyPrefixOrSubstring(cmd string, targets []string) bool {
+	for _, t := range targets {
+		if strings.Contains(cmd, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitCommandDetection is a helper to emit command-level behavioral alerts.
+func (a *TelnetAnalyzer) emitCommandDetection(sess *TelnetSession, id string, severity Severity, category string, summary string, cmd string) {
+	a.bus.EmitDetection(Detection{
+		ID:          id,
+		Timestamp:   time.Now(),
+		Severity:    severity,
+		Category:    category,
+		Protocol:    "Telnet",
+		SourceIP:    sess.srcIP,
+		SourcePort:  sess.srcPort,
+		DestPort:    sess.dstPort,
+		ConnID:      sess.connID,
+		Summary:     summary,
+		RawEvidence: cmd,
+	})
 }
 
 // handleAuthSuccess runs checks when a successful login is observed.
