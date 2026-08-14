@@ -44,6 +44,7 @@ function Sidebar() {
             key={to}
             to={to}
             end={end}
+            className="sidebar-nav-link"  
             style={({ isActive }) => ({
               display: 'flex',
               alignItems: 'center',
@@ -53,7 +54,7 @@ function Sidebar() {
               borderRadius: 'var(--radius-sm)',
               color: isActive ? '#fff' : 'var(--text-secondary)',
               textDecoration: 'none',
-              background: isActive ? 'var(--accent-blue)' : 'transparent',
+              background: isActive ? 'var(--accent-blue)' : undefined,
               fontSize: '13.5px',
               fontWeight: isActive ? 600 : 500,
               transition: 'background 0.12s, color 0.12s',
