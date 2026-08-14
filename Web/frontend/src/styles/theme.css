@@ -5,7 +5,7 @@
 
 :root {
   /* Legacy aliases for components that use --bg-primary */
-  --bg-primary: #060b14;
+  --bg-primary: #f5f7fa;
 
   /* Extended card border-radius for existing components */
   --radius-sm: 6px;
