@@ -309,11 +309,49 @@ const getGithubUserProfile = async (req, res) => {
         Authorization: `Bearer ${user.githubAccessToken}`,
         'User-Agent': 'IDPS-DevOps',
       },
-      params: { per_page: 30, sort: 'updated' },
+      params: { per_page: 100, sort: 'updated' }, // Increased to 100 to show more repos!
     });
+
+    // Fetch GraphQL calendar
+    const graphqlQuery = `
+      query($username: String!) {
+        user(login: $username) {
+          contributionsCollection {
+            contributionCalendar {
+              totalContributions
+              weeks {
+                contributionDays {
+                  contributionCount
+                  date
+                  color
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    let calendar = null;
+    try {
+      const gqlRes = await axios.post(
+        'https://api.github.com/graphql',
+        { query: graphqlQuery, variables: { username: user.githubUsername || profileRes.data.login } },
+        {
+          headers: {
+            Authorization: `Bearer ${user.githubAccessToken}`,
+            'User-Agent': 'IDPS-DevOps',
+          }
+        }
+      );
+      calendar = gqlRes.data?.data?.user?.contributionsCollection?.contributionCalendar || null;
+    } catch (gqlErr) {
+      console.error('Failed to fetch GitHub GraphQL calendar:', gqlErr.message);
+    }
 
     res.json({
       profile: profileRes.data,
+      calendar,
       repos: reposRes.data.map(r => ({
         name: r.name,
         fullName: r.full_name,

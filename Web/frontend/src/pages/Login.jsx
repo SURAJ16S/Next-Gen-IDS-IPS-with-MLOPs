@@ -286,7 +286,7 @@ function Login() {
           onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
         >
           <img
-            src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+            src="https://cdn-icons-png.flaticon.com/512/25/25231.png"
             alt="GitHub"
             style={{ width: '18px', height: '18px', filter: 'invert(1)' }}
           />

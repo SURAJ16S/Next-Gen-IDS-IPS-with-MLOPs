@@ -200,7 +200,7 @@ function Profile() {
                 display: 'flex', alignItems: 'center', justifyContent: 'center'
               }}>
                 <img
-                  src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+                  src="https://cdn-icons-png.flaticon.com/512/25/25231.png"
                   alt="GitHub"
                   style={{ width: '36px', height: '36px', filter: 'invert(1)' }}
                 />
@@ -225,7 +225,7 @@ function Profile() {
                 onMouseLeave={e => e.currentTarget.style.opacity = '1'}
               >
                 <img
-                  src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+                  src="https://cdn-icons-png.flaticon.com/512/25/25231.png"
                   alt="GitHub"
                   style={{ width: '16px', height: '16px', filter: 'invert(1)' }}
                 />
@@ -312,20 +312,84 @@ function Profile() {
 
               {/* GitHub Contribution Calendar Matrix (Green squares) */}
               <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                <h3 style={{ fontSize: '14px', margin: '0', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <RefreshCw size={14} style={{ color: 'var(--accent-cyan)' }} /> GitHub Contribution Activity
-                </h3>
-                {ghProfile && (
-                  <div style={{
-                    width: '100%', overflowX: 'auto', background: 'rgba(0,0,0,0.2)',
-                    border: '1px solid rgba(255,255,255,0.06)', borderRadius: 'var(--radius-sm)',
-                    padding: '16px', display: 'flex', justifyContent: 'center'
-                  }}>
-                    <img
-                      src={`https://ghchart.rshah.org/06b6d4/${ghProfile.login}`}
-                      alt={`${ghProfile.login}'s GitHub contributions chart`}
-                      style={{ maxWidth: '100%', height: 'auto', display: 'block' }}
-                    />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                  <h3 style={{ fontSize: '14px', margin: '0', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <RefreshCw size={14} style={{ color: 'var(--accent-cyan)' }} /> GitHub Contribution Activity
+                  </h3>
+                  {githubData?.calendar && (
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                      {githubData.calendar.totalContributions.toLocaleString()} contributions in the last year
+                    </span>
+                  )}
+                </div>
+
+                {githubData?.calendar ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <div style={{
+                      width: '100%', overflowX: 'auto', background: 'rgba(0,0,0,0.2)',
+                      border: '1px solid rgba(255,255,255,0.06)', borderRadius: 'var(--radius-sm)',
+                      padding: '16px', display: 'flex', gap: '6px', position: 'relative'
+                    }}>
+                      {/* Left Labels: Mon, Wed, Fri */}
+                      <div style={{
+                        display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+                        padding: '12px 6px 4px 0', fontSize: '9px', color: 'var(--text-muted)',
+                        fontFamily: 'var(--font-mono)', height: '88px', userSelect: 'none'
+                      }}>
+                        <span>Mon</span>
+                        <span>Wed</span>
+                        <span>Fri</span>
+                      </div>
+
+                      {/* Flex wrapper for the weeks columns */}
+                      <div style={{ display: 'flex', gap: '3px' }}>
+                        {githubData.calendar.weeks.map((week, wIdx) => (
+                          <div key={wIdx} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                            {week.contributionDays.map((day, dIdx) => {
+                              let bgColor = 'rgba(255,255,255,0.04)';
+                              if (day.contributionCount > 0 && day.contributionCount <= 2) bgColor = 'rgba(6,182,212,0.25)';
+                              else if (day.contributionCount > 2 && day.contributionCount <= 5) bgColor = 'rgba(6,182,212,0.5)';
+                              else if (day.contributionCount > 5 && day.contributionCount <= 9) bgColor = 'rgba(6,182,212,0.75)';
+                              else if (day.contributionCount > 9) bgColor = 'rgba(6,182,212,1)';
+
+                              const formattedDate = new Date(day.date).toLocaleDateString(undefined, {
+                                month: 'short', day: 'numeric', year: 'numeric'
+                              });
+
+                              return (
+                                <div
+                                  key={day.date || dIdx}
+                                  title={`${day.contributionCount} contributions on ${formattedDate}`}
+                                  style={{
+                                    width: '10px', height: '10px',
+                                    borderRadius: '2px',
+                                    background: bgColor,
+                                    transition: 'transform 0.1s',
+                                    cursor: 'pointer'
+                                  }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.25)'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; }}
+                                />
+                              );
+                            })}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {/* Legend bar */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '6px', fontSize: '10px', color: 'var(--text-muted)' }}>
+                      <span>Less</span>
+                      <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: 'rgba(255,255,255,0.04)' }} />
+                      <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: 'rgba(6,182,212,0.25)' }} />
+                      <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: 'rgba(6,182,212,0.5)' }} />
+                      <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: 'rgba(6,182,212,0.75)' }} />
+                      <div style={{ width: '10px', height: '10px', borderRadius: '2px', background: 'rgba(6,182,212,1)' }} />
+                      <span>More</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                    GraphQL calendar not loaded. Make sure your GitHub token is connected and active.
                   </div>
                 )}
               </div>

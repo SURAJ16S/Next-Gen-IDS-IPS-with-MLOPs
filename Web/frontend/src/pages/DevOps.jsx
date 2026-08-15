@@ -26,7 +26,7 @@ import {
 
 const Github = (props) => (
   <img
-    src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+    src="https://cdn-icons-png.flaticon.com/512/25/25231.png"
     alt="GitHub Logo"
     style={{
       width: props.size || 20,
@@ -870,8 +870,8 @@ function DevOps() {
           {/* ── Tab Switcher ─────────────────────────────────────────────── */}
           <div style={{ display: 'flex', gap: '4px', background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--radius-md)', padding: '4px', border: '1px solid var(--border-subtle)' }}>
             {[
-              { id: 'zip', label: '📦 ZIP Upload', icon: null },
-              { id: 'github', label: '🐙 GitHub Import', icon: null },
+              { id: 'zip', label: 'ZIP Upload', icon: <Upload size={14} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} /> },
+              { id: 'github', label: 'GitHub Import', icon: <Github size={14} style={{ marginRight: '6px', display: 'inline-block', verticalAlign: 'middle' }} /> },
             ].map(tab => (
               <button
                 key={tab.id}
@@ -882,8 +882,10 @@ function DevOps() {
                   fontWeight: 600, fontSize: '12.5px', cursor: 'pointer', transition: 'all 0.15s',
                   background: uploadTab === tab.id ? 'var(--grad-brand)' : 'transparent',
                   color: uploadTab === tab.id ? '#fff' : 'var(--text-muted)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center'
                 }}
               >
+                {tab.icon}
                 {tab.label}
               </button>
             ))}
@@ -1074,6 +1076,155 @@ function DevOps() {
                           <input type="number" min="1024" max="65535" value={previewPort} onChange={e => setPreviewPort(e.target.value)} style={{ ...inputStyle, width: '80px', textAlign: 'center' }} />
                         </div>
                       </div>
+
+                      {/* Build subdirectory path (Optional) */}
+                      <div style={sectionStyle}>
+                        <label style={labelStyle}>Build Subdirectory (Optional)</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. backend or server (leave empty to auto-detect)"
+                          value={targetSubfolder}
+                          onChange={(e) => setTargetSubfolder(e.target.value)}
+                          style={inputStyle}
+                        />
+                      </div>
+
+                      {/* .env files section */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <FileText size={13} style={{ color: 'var(--accent-cyan)' }} />
+                            <label style={labelStyle}>Environment Files (.env)</label>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={addEnvRow}
+                            style={{
+                              background: 'rgba(34,211,238,0.1)',
+                              border: '1px solid rgba(34,211,238,0.3)',
+                              borderRadius: 'var(--radius-sm)',
+                              color: 'var(--accent-cyan)',
+                              padding: '3px 8px',
+                              fontSize: '11px',
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                            }}
+                          >
+                            <Plus size={11} /> Add .env
+                          </button>
+                        </div>
+
+                        <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: 0 }}>
+                          Specify paths relative to repo root, e.g. <code>backend/.env</code> or <code>.env</code>. Leave empty to skip.
+                        </p>
+
+                        {envFiles.map((row, idx) => (
+                          <div key={idx} style={{
+                            background: 'rgba(255,255,255,0.02)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: 'var(--radius-sm)',
+                            padding: '10px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '8px',
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <input
+                                type="text"
+                                placeholder="Path inside repo (e.g. backend/.env)"
+                                value={row.path}
+                                onChange={(e) => updateEnvRow(idx, 'path', e.target.value)}
+                                style={{ ...inputStyle, fontFamily: 'var(--font-mono)', fontSize: '12px' }}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowEnvContent(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                                title={showEnvContent[idx] ? "Mask secrets" : "Show secrets"}
+                                style={{
+                                  background: 'rgba(255,255,255,0.05)',
+                                  border: '1px solid var(--border-subtle)',
+                                  borderRadius: 'var(--radius-sm)',
+                                  color: 'var(--text-muted)',
+                                  padding: '8px',
+                                  cursor: 'pointer',
+                                  flexShrink: 0,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                }}
+                              >
+                                {showEnvContent[idx] ? <EyeOff size={13} /> : <Eye size={13} />}
+                              </button>
+                              {envFiles.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeEnvRow(idx)}
+                                  title="Remove this .env entry"
+                                  style={{
+                                    background: 'rgba(239,68,68,0.1)',
+                                    border: '1px solid rgba(239,68,68,0.3)',
+                                    borderRadius: 'var(--radius-sm)',
+                                    color: 'var(--sev-critical)',
+                                    padding: '8px',
+                                    cursor: 'pointer',
+                                    flexShrink: 0,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                  }}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
+                            </div>
+                            <textarea
+                              rows={3}
+                              placeholder={'PORT=3001\nMONGO_URI=mongodb://localhost:27017/mydb\nJWT_SECRET=my_secret'}
+                              value={row.content}
+                              onChange={(e) => updateEnvRow(idx, 'content', e.target.value)}
+                              style={{
+                                ...inputStyle,
+                                fontFamily: 'var(--font-mono)',
+                                fontSize: '11px',
+                                resize: 'vertical',
+                                minHeight: '64px',
+                                WebkitTextSecurity: showEnvContent[idx] ? 'none' : 'disc'
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Dependency Upgrade Mode Toggle */}
+                      <div style={{ marginBottom: '14px' }}>
+                        <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>Dependency Upgrade Mode</label>
+                        <div style={{ display: 'flex', gap: '20px' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                            <input
+                              type="radio"
+                              name="gh-upgrade-mode"
+                              value="automatic"
+                              checked={upgradeMode === 'automatic'}
+                              onChange={() => setUpgradeMode('automatic')}
+                              style={{ cursor: 'pointer' }}
+                            />
+                            Automatic Stable Upgrade
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                            <input
+                              type="radio"
+                              name="gh-upgrade-mode"
+                              value="semi-automatic"
+                              checked={upgradeMode === 'semi-automatic'}
+                              onChange={() => setUpgradeMode('semi-automatic')}
+                              style={{ cursor: 'pointer' }}
+                            />
+                            Semi-Automatic Approval
+                          </label>
+                        </div>
+                      </div>
+
                       <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', fontSize: '11.5px', color: 'var(--text-muted)' }}>
                         Importing: <strong style={{ color: 'var(--text-primary)' }}>{selectedRepo.fullName}</strong> @ <code>{repoBranch}</code>
                       </div>
