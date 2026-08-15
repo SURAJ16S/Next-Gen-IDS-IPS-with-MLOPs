@@ -20,7 +20,7 @@ module.exports = {
   runCommand: 'npm install && npm run build',
   getPreviewCommand: (workDir) => {
     // Runs sveltekit build preview on custom port
-    return { cmd: 'npx', args: ['vite', 'preview', '--port', '0', '--host', '0.0.0.0'], env: {} };
+    return { cmd: 'npx', args: ['vite', 'preview', '--port', '${PORT}', '--host', '0.0.0.0'], env: {} };
   },
   detectArchitecture: (targetDir) => {
     const { detectGeneralArchitecture } = require('../framework-detector.service');

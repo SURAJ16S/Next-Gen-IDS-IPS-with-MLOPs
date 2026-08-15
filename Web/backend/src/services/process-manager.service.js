@@ -1,5 +1,6 @@
 const { spawn, exec } = require('child_process');
 const net = require('net');
+const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const Docker = require('dockerode');
@@ -7,6 +8,50 @@ const Deployment = require('../models/Deployment');
 const { getIO } = require('../websocket/socket');
 const { detectFramework } = require('./framework-detector.service');
 const { analyzeLogsAndDiagnose } = require('./diagnostics.service');
+
+/**
+ * Polls http://localhost:{port}/ until the server returns any response (≤599)
+ * or until the timeout expires. Logs each attempt to the deployment.
+ * @returns {Promise<{ok: boolean, status: number|null, durationMs: number}>}
+ */
+const waitForHttpReady = (port, deploymentId, jobId, opts = {}) => {
+  const maxWaitMs  = opts.maxWaitMs  || 180_000; // 3 min
+  const intervalMs = opts.intervalMs || 3_000;   // poll every 3 s
+  const start      = Date.now();
+  let attempt      = 0;
+
+  return new Promise((resolve) => {
+    const poll = () => {
+      attempt++;
+      const elapsed = Date.now() - start;
+      const req = http.get(`http://localhost:${port}/`, { timeout: 5_000 }, (res) => {
+        const durationMs = Date.now() - start;
+        const isHtml = (res.headers['content-type'] || '').includes('text/html');
+        const ok = res.statusCode < 400 || isHtml;
+        logPreview(deploymentId, jobId,
+          `[HEALTH] ✅ App responded — HTTP ${res.statusCode} in ${durationMs}ms (attempt #${attempt})`
+        );
+        resolve({ ok: true, status: res.statusCode, durationMs });
+      });
+      req.on('error', () => {
+        const elapsed = Date.now() - start;
+        if (elapsed >= maxWaitMs) {
+          logPreview(deploymentId, jobId,
+            `[HEALTH] ❌ Timeout after ${Math.round(elapsed / 1000)}s — app never responded on port ${port}.`
+          );
+          resolve({ ok: false, status: null, durationMs: elapsed });
+        } else {
+          logPreview(deploymentId, jobId,
+            `[HEALTH] ⏳ Waiting for app on port ${port}… (${Math.round(elapsed / 1000)}s elapsed, attempt #${attempt})`
+          );
+          setTimeout(poll, intervalMs);
+        }
+      });
+      req.on('timeout', () => req.destroy());
+    };
+    poll();
+  });
+};
 
 // Dynamically list our modular framework modules
 const mern = require('./frameworks/mern');
@@ -324,14 +369,26 @@ const spawnHostPreview = async (jobId, deploymentId, workDir, framework, port) =
     previewStatus: 'running',
   });
 
-  try {
-    const io = getIO();
-    io.to(`pipeline:${jobId}`).emit('preview:ready', {
-      jobId,
-      port,
-      url: `http://localhost:${port}`,
-    });
-  } catch (_) {}
+  // Wait for the app to actually serve HTTP before declaring it live
+  const health = await waitForHttpReady(port, deploymentId, jobId);
+  if (health.ok) {
+    await Deployment.findByIdAndUpdate(deploymentId, { status: 'deployed' });
+    try {
+      const io = getIO();
+      io.to(`pipeline:${jobId}`).emit('preview:ready', {
+        jobId,
+        port,
+        url: `http://localhost:${port}`,
+      });
+    } catch (_) {}
+  } else {
+    await logPreview(deploymentId, jobId, `[PREVIEW] ❌ App failed health check — marking as failed.`);
+    await Deployment.findByIdAndUpdate(deploymentId, { status: 'failed', previewStatus: 'stopped' });
+    try {
+      const io = getIO();
+      io.to(`pipeline:${jobId}`).emit('preview:stopped', { jobId });
+    } catch (_) {}
+  }
 };
 
 /**
@@ -457,7 +514,8 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
         for (const [key, value] of Object.entries(envFileVars)) {
           if (key !== 'PORT' && key !== 'SERVER_PORT' && key !== 'NODE_ENV') {
             let val = value;
-            if (!FRONTEND_URL_VARS.has(key) && typeof val === 'string') {
+            const isClientVar = key.startsWith('VITE_') || key.startsWith('REACT_APP_') || key.startsWith('NEXT_PUBLIC_') || key.startsWith('PUBLIC_');
+            if (!FRONTEND_URL_VARS.has(key) && !isClientVar && typeof val === 'string') {
               val = val.replace(/^(https?:\/\/|mongodb(?:\+srv)?:\/\/|postgres(?:ql)?:\/\/|mysql:\/\/|redis:\/\/)(?:localhost|127\.0\.0\.1)(:\d+)?(.*)?$/i, '$1host.docker.internal$2$3');
             }
             containerEnv.push(`${key}=${val}`);
@@ -509,14 +567,26 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
           previewStatus: 'running',
         });
 
-        try {
-          const io = getIO();
-          io.to(`pipeline:${jobId}`).emit('preview:ready', {
-            jobId,
-            port,
-            url: `http://localhost:${port}`,
-          });
-        } catch (_) {}
+        // Wait for the containerised app to serve HTTP before declaring live
+        const health = await waitForHttpReady(port, deploymentId, jobId);
+        if (health.ok) {
+          await Deployment.findByIdAndUpdate(deploymentId, { status: 'deployed' });
+          try {
+            const io = getIO();
+            io.to(`pipeline:${jobId}`).emit('preview:ready', {
+              jobId,
+              port,
+              url: `http://localhost:${port}`,
+            });
+          } catch (_) {}
+        } else {
+          await logPreview(deploymentId, jobId, `[PREVIEW] ❌ App failed health check — marking as failed.`);
+          await Deployment.findByIdAndUpdate(deploymentId, { status: 'failed', previewStatus: 'stopped' });
+          try {
+            const io = getIO();
+            io.to(`pipeline:${jobId}`).emit('preview:stopped', { jobId });
+          } catch (_) {}
+        }
 
         // Wait for container to exit in the background.
         // Wrap everything in try-catches to be completely crash-safe.

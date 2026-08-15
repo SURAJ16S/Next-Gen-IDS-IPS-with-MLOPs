@@ -41,8 +41,9 @@ export const getAnalyticsSummary = () => api.get('/analytics/summary');
 // DevOps
 export const getDeployments = () => api.get('/devops');
 export const createDeployment = (data) => api.post('/devops', data);
-export const uploadDeploymentZip = (formData) => api.post('/devops/upload', formData, {
-  headers: { 'Content-Type': 'multipart/form-data' }
+export const uploadDeploymentZip = (formData, onUploadProgress) => api.post('/devops/upload', formData, {
+  headers: { 'Content-Type': 'multipart/form-data' },
+  onUploadProgress
 });
 export const downloadDeploymentArtifact = (id) => api.get(`/devops/${id}/artifact`, {
   responseType: 'blob'
@@ -55,6 +56,15 @@ export const getActivePreviews = () => api.get('/devops/previews');
 export const stopDeploymentPreview = (id) => api.post(`/devops/${id}/stop-preview`);
 export const startDeploymentPreview = (id) => api.post(`/devops/${id}/start-preview`);
 export const deleteDeployment = (id) => api.delete(`/devops/${id}`);
+
+// GitHub OAuth
+export const getGithubAuthUrl  = ()     => api.get('/devops/github/auth-url');
+export const getGithubStatus   = ()     => api.get('/devops/github/status');
+export const getGithubUserProfile = ()   => api.get('/devops/github/profile');
+export const getGithubRepos    = ()     => api.get('/devops/github/repos');
+export const getGithubBranches = (owner, repo) => api.get(`/devops/github/repos/${owner}/${repo}/branches`);
+export const importGithubRepo  = (data) => api.post('/devops/github/import', data);
+export const unlinkGithub      = ()     => api.post('/devops/github/unlink');
 
 // Nodes
 export const getNodes = () => api.get('/nodes');

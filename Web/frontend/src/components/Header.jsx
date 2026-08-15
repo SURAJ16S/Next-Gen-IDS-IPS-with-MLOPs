@@ -188,6 +188,24 @@ function Header() {
                 {user.email || 'user@idps.com'}
               </div>
               <div
+                onClick={() => { setShowProfile(false); navigate('/profile'); }}
+                style={{
+                  padding: '10px 14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontSize: '12.5px',
+                  color: 'var(--text-primary)',
+                  cursor: 'pointer',
+                  borderBottom: '1px solid var(--border-subtle)'
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-hover)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              >
+                <User size={14} />
+                Profile
+              </div>
+              <div
                 onClick={() => { setShowProfile(false); navigate('/settings'); }}
                 style={{
                   padding: '10px 14px',

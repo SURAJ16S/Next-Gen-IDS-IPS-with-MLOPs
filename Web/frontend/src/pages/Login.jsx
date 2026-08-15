@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useState, useCallback, useEffect } from 'react';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, AlertCircle, ShieldAlert } from 'lucide-react';
 import { loginUser } from '../services/api';
 import './Auth.css';
@@ -46,6 +46,29 @@ function Login() {
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
 
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Detect GitHub redirect
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token');
+    const userStr = params.get('user');
+    const err = params.get('error');
+
+    if (token && userStr) {
+      try {
+        localStorage.setItem('token', token);
+        localStorage.setItem('user', decodeURIComponent(userStr));
+        navigate('/');
+      } catch (e) {
+        setServerError('Failed to process GitHub authentication.');
+      }
+    } else if (err) {
+      if (err === 'no_code') setServerError('Authorization code missing from GitHub.');
+      else if (err === 'token_failed') setServerError('GitHub token exchange failed.');
+      else setServerError('Authentication failed. Please try again.');
+    }
+  }, [location, navigate]);
 
   // ── Field-level validate ───────────────────────────────────────────────────
   const validate = useCallback((field, value) => {
@@ -237,6 +260,38 @@ function Login() {
         </form>
 
         <div className="auth-divider">or</div>
+
+        <button
+          type="button"
+          onClick={() => { window.location.href = 'http://localhost:5000/api/auth/github'; }}
+          style={{
+            width: '100%',
+            background: '#24292f',
+            border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 'var(--radius-md)',
+            color: '#fff',
+            padding: '11px',
+            fontWeight: 600,
+            fontSize: '13.5px',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '10px',
+            transition: 'opacity 0.15s',
+            marginBottom: '16px',
+            boxSizing: 'border-box'
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.85'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
+        >
+          <img
+            src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+            alt="GitHub"
+            style={{ width: '18px', height: '18px', filter: 'invert(1)' }}
+          />
+          Sign In with GitHub
+        </button>
 
         <div className="auth-links">
           <Link to="/forgot-password" id="forgot-password-link">Forgot Password?</Link>

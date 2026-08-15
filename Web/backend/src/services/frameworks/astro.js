@@ -19,6 +19,6 @@ module.exports = {
   buildImage: 'node:20-alpine',
   runCommand: 'npm install && npm run build',
   getPreviewCommand: (workDir) => {
-    return { cmd: 'npx', args: ['astro', 'preview', '--port', '0', '--host', '0.0.0.0'], env: {} };
+    return { cmd: 'npx', args: ['astro', 'preview', '--port', '${PORT}', '--host', '0.0.0.0'], env: {} };
   }
 };

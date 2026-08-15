@@ -7,6 +7,8 @@ const {
   verifyOtp,
   resetPassword,
   getMe,
+  githubLoginRedirect,
+  githubLoginCallback,
 } = require('../controllers/auth.controller');
 const { protect } = require('../middleware/auth.middleware');
 const { validateLogin, validateRegister } = require('../middleware/auth.validation');
@@ -19,5 +21,9 @@ router.post('/forgot-password', otpLimiter, forgotPassword);
 router.post('/verify-otp', verifyOtp);
 router.post('/reset-password', resetPassword);
 router.get('/me', protect, getMe);
+
+// GitHub OAuth Login/Signup
+router.get('/github', githubLoginRedirect);
+router.get('/github/callback', githubLoginCallback);
 
 module.exports = router;

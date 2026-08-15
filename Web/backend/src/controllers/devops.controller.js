@@ -12,7 +12,9 @@ const { suggestPort, stopPreview, getRunningPreviews } = require('../services/pr
 
 const getDeployments = async (req, res) => {
   try {
-    const deployments = await Deployment.find({}, '-envFiles.content').sort({ createdAt: -1 });
+    const deployments = await Deployment.find({}, '-envFiles.content')
+      .populate('deployedBy', 'firstName lastName email role')
+      .sort({ createdAt: -1 });
     res.json(deployments);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -84,6 +86,7 @@ const uploadZip = (req, res) => {
         envFiles,
         targetSubfolder,
         upgradeMode,
+        deploymentType: 'zip',
       });
 
       // Run pipeline in background

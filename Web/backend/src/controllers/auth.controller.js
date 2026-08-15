@@ -199,4 +199,111 @@ const getMe = async (req, res) => {
   }
 };
 
-module.exports = { registerUser, loginUser, forgotPassword, verifyOtp, resetPassword, getMe };
+const githubLoginRedirect = (req, res) => {
+  const { GITHUB_CLIENT_ID } = process.env;
+  const authCallbackUrl = `http://localhost:5000/api/auth/github/callback`;
+  const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: authCallbackUrl,
+    scope: 'repo read:user user:email',
+    allow_signup: 'true',
+  });
+  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+};
+
+const githubLoginCallback = async (req, res) => {
+  const axios = require('axios');
+  const crypto = require('crypto');
+  const { code } = req.query;
+  const { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, FRONTEND_URL } = process.env;
+  const authCallbackUrl = `http://localhost:5000/api/auth/github/callback`;
+
+  if (!code) {
+    return res.redirect(`${FRONTEND_URL}/login?error=no_code`);
+  }
+
+  try {
+    const tokenRes = await axios.post(
+      'https://github.com/login/oauth/access_token',
+      {
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: authCallbackUrl,
+      },
+      { headers: { Accept: 'application/json' } }
+    );
+
+    const { access_token, error } = tokenRes.data;
+    if (error || !access_token) {
+      return res.redirect(`${FRONTEND_URL}/login?error=token_failed`);
+    }
+
+    const userRes = await axios.get('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'IDPS-Auth' },
+    });
+    const ghUser = userRes.data;
+
+    let email = ghUser.email;
+    if (!email) {
+      try {
+        const emailsRes = await axios.get('https://api.github.com/user/emails', {
+          headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'IDPS-Auth' },
+        });
+        const primaryEmail = emailsRes.data.find(e => e.primary && e.verified);
+        if (primaryEmail) email = primaryEmail.email;
+      } catch (_) {}
+    }
+    if (!email) email = `${ghUser.login}@github.com`;
+
+    let user = await User.findOne({ $or: [{ email }, { githubUsername: ghUser.login }] });
+    if (!user) {
+      const nameParts = (ghUser.name || ghUser.login).split(' ');
+      const firstName = nameParts[0] || ghUser.login;
+      const lastName = nameParts.slice(1).join(' ') || ' ';
+      
+      user = await User.create({
+        firstName,
+        lastName,
+        username: ghUser.login + Math.floor(100 + Math.random() * 900),
+        email,
+        dob: new Date('2000-01-01'),
+        mobile: '0000000000',
+        password: crypto.randomBytes(16).toString('hex'),
+        role: 'viewer',
+        githubAccessToken: access_token,
+        githubUsername: ghUser.login,
+      });
+    } else {
+      user.githubAccessToken = access_token;
+      user.githubUsername = ghUser.login;
+      await user.save();
+    }
+
+    const token = generateToken(user._id);
+    const userJSON = encodeURIComponent(JSON.stringify({
+      _id: user._id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+    }));
+
+    res.redirect(`${FRONTEND_URL}/login?token=${token}&user=${userJSON}`);
+  } catch (err) {
+    console.error('GitHub OAuth error:', err.message);
+    res.redirect(`${FRONTEND_URL}/login?error=server_error`);
+  }
+};
+
+module.exports = {
+  registerUser,
+  loginUser,
+  forgotPassword,
+  verifyOtp,
+  resetPassword,
+  getMe,
+  githubLoginRedirect,
+  githubLoginCallback,
+};

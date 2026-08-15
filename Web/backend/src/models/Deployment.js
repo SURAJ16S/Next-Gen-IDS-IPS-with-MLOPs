@@ -55,6 +55,7 @@ const deploymentSchema = new mongoose.Schema(
     previewStatus: { type: String, enum: ['running', 'stopped', 'none'], default: 'none' },
     targetSubfolder: { type: String },
     isGuiApp: { type: Boolean, default: false },
+    deploymentType: { type: String, enum: ['zip', 'github'], default: 'zip' },
     // Environment file configuration submitted at upload time
     envFiles: [
       {

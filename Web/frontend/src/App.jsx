@@ -15,6 +15,7 @@ import DevOps from './pages/DevOps';
 import Settings from './pages/Settings';
 import NodesPage from './pages/NodesPage';
 import Fixtures from './pages/Fixtures';
+import Profile from './pages/Profile';
 
 function App() {
   return (
@@ -41,6 +42,7 @@ function App() {
         <Route path="nodes" element={<NodesPage />} />
         <Route path="fixtures" element={<Fixtures />} />
         <Route path="settings" element={<Settings />} />
+        <Route path="profile" element={<Profile />} />
       </Route>
     </Routes>
   );

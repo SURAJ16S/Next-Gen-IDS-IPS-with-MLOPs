@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import StatusBadge from '../components/StatusBadge';
 import EmptyState from '../components/EmptyState';
 import {
@@ -10,12 +10,34 @@ import {
   stopDeploymentPreview,
   startDeploymentPreview,
   deleteDeployment,
+  getGithubAuthUrl,
+  getGithubStatus,
+  getGithubRepos,
+  importGithubRepo,
+  unlinkGithub,
+  getGithubBranches,
 } from '../services/api';
 import { io } from 'socket.io-client';
 import {
   Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu,
-  Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff
+  Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff,
+  RefreshCw, Search, Lock, Unlock, GitBranch, Star
 } from 'lucide-react';
+
+const Github = (props) => (
+  <img
+    src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png"
+    alt="GitHub Logo"
+    style={{
+      width: props.size || 20,
+      height: props.size || 20,
+      filter: 'invert(1)', // Invert black mark to white for dark theme
+      display: 'inline-block',
+      verticalAlign: 'middle',
+      ...props.style
+    }}
+  />
+);
 
 // ─── Small UI helpers ─────────────────────────────────────────────────────────
 
@@ -91,6 +113,7 @@ const computeStagesFromLogs = (logs, currentStatus) => {
   let hasPackDone = false;
   let hasPreviewStarted = false;
   let hasPreviewDone = false;
+  let hasPreviewFailed = false;
 
   for (const log of logs) {
     const uppercaseLog = log.toUpperCase();
@@ -139,8 +162,11 @@ const computeStagesFromLogs = (logs, currentStatus) => {
       hasPreviewStarted = true;
       hasPackDone = true;
     }
-    if (uppercaseLog.includes('LIVE APP READY') || uppercaseLog.includes('SERVER RUNNING ON PORT') || uppercaseLog.includes('LIVE PREVIEW PROCESS READY') || uppercaseLog.includes('SERVER RUNNING')) {
+    if (uppercaseLog.includes('LIVE APP READY') || uppercaseLog.includes('SERVER RUNNING ON PORT') || uppercaseLog.includes('LIVE PREVIEW PROCESS READY') || uppercaseLog.includes('SERVER RUNNING') || uppercaseLog.includes('[HEALTH] ✅') || uppercaseLog.includes('[HEALTH] APP RESPONDED')) {
       hasPreviewDone = true;
+    }
+    if (uppercaseLog.includes('[HEALTH] ❌') || uppercaseLog.includes('APP FAILED HEALTH CHECK') || uppercaseLog.includes('FAILED HEALTH CHECK')) {
+      hasPreviewFailed = true;
     }
   }
 
@@ -170,7 +196,8 @@ const computeStagesFromLogs = (logs, currentStatus) => {
   else if (hasPackStarted) statuses.package = 'running';
   else if (statuses.trivy === 'done') statuses.package = 'running';
 
-  if (currentStatus === 'deployed' || hasPreviewDone) statuses.preview = 'done';
+  if (hasPreviewFailed) statuses.preview = 'failed';
+  else if (currentStatus === 'deployed' || hasPreviewDone) statuses.preview = 'done';
   else if (hasPreviewStarted || statuses.package === 'done') statuses.preview = 'running';
 
   // Override stages on failure
@@ -197,12 +224,32 @@ const computeStagesFromLogs = (logs, currentStatus) => {
   return statuses;
 };
 
+const MAX_FILE_SIZE = 300 * 1024 * 1024; // 300 MB
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 function DevOps() {
   const [deployments, setDeployments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [currentUser, setCurrentUser] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
+  // ── Tab state: 'zip' | 'github' ──────────────────────────────────────────
+  const [uploadTab, setUploadTab] = useState('zip');
+
+  // ── GitHub OAuth state ───────────────────────────────────────────────────
+  const [githubLinked, setGithubLinked] = useState(false);
+  const [githubUsername, setGithubUsername] = useState(null);
+  const [githubRepos, setGithubRepos] = useState([]);
+  const [reposLoading, setReposLoading] = useState(false);
+  const [repoSearch, setRepoSearch] = useState('');
+  const [selectedRepo, setSelectedRepo] = useState(null);
+  const [repoBranch, setRepoBranch] = useState('main');
+  const [repoBranches, setRepoBranches] = useState([]);
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [githubImporting, setGithubImporting] = useState(false);
+  const [githubError, setGithubError] = useState('');
 
   // Upload form state
   const [projectName, setProjectName] = useState('');
@@ -234,13 +281,20 @@ function DevOps() {
     setIsDragActive(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const file = e.dataTransfer.files[0];
-      if (file.name.toLowerCase().endsWith('.zip')) {
-        setSelectedFile(file);
-        if (!projectName) {
-          setProjectName(file.name.substring(0, file.name.lastIndexOf('.')) || file.name);
-        }
-      } else {
-        alert('Please drop a valid .zip file.');
+      const isZip = file.name.toLowerCase().endsWith('.zip') || 
+                    file.type === 'application/zip' || 
+                    file.type === 'application/x-zip-compressed';
+      if (!isZip) {
+        alert('Only ZIP files are allowed!');
+        return;
+      }
+      if (file.size > MAX_FILE_SIZE) {
+        alert(`File is too large! Maximum allowed size is 300MB. Your file is ${(file.size / (1024 * 1024)).toFixed(2)}MB.`);
+        return;
+      }
+      setSelectedFile(file);
+      if (!projectName) {
+        setProjectName(file.name.substring(0, file.name.lastIndexOf('.')) || file.name);
       }
     }
   };
@@ -319,6 +373,23 @@ function DevOps() {
     socketRef.current = socket;
 
     const init = async () => {
+      // Get current user from localStorage
+      const userStr = localStorage.getItem('user');
+      if (userStr) {
+        try {
+          setCurrentUser(JSON.parse(userStr));
+        } catch (e) {
+          console.error("Failed to parse user from local storage", e);
+        }
+      }
+
+      // Check if GitHub is already linked
+      try {
+        const ghRes = await getGithubStatus();
+        setGithubLinked(ghRes.data.linked);
+        setGithubUsername(ghRes.data.githubUsername);
+      } catch (_) {}
+
       await fetchSuggestedPort();
       
       // Fetch deployments to check if there is an active running job
@@ -362,6 +433,7 @@ function DevOps() {
       setActiveJobArtifactUrl(data.artifactUrl);
       setActiveJobUpgrades(data.recommendedUpgrades || []);
       setUploading(false);
+      setUploadProgress(0);
       fetchDeployments();
       if (data.status === 'deployed' && data.isGuiApp) {
         alert("🖥️ Desktop GUI App Detected!\n\nThis application does not run on a port and cannot be previewed in the browser. Please use the Download button under Actions to download the zip, extract it, and run the executable locally.");
@@ -396,6 +468,141 @@ function DevOps() {
       socket.disconnect();
     };
   }, []);
+
+  // ── Detect ?github=linked after OAuth popup redirect ─────────────────────
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const gh = params.get('github');
+    if (gh === 'linked') {
+      // Clean URL
+      window.history.replaceState({}, '', '/devops');
+      // Re-check status and load repos
+      getGithubStatus().then(r => {
+        setGithubLinked(r.data.linked);
+        setGithubUsername(r.data.githubUsername);
+        if (r.data.linked) loadGithubRepos();
+      }).catch(() => {});
+      setUploadTab('github');
+    } else if (gh === 'denied' || gh === 'error') {
+      window.history.replaceState({}, '', '/devops');
+      setGithubError('GitHub authorization failed or was denied. Please try again.');
+    }
+  }, []); // eslint-disable-line
+
+  const loadGithubRepos = useCallback(async () => {
+    setReposLoading(true);
+    setGithubError('');
+    try {
+      const res = await getGithubRepos();
+      setGithubRepos(res.data);
+    } catch (err) {
+      setGithubError(err.response?.data?.message || 'Failed to load repositories.');
+      if (err.response?.status === 401) { setGithubLinked(false); setGithubUsername(null); }
+    } finally {
+      setReposLoading(false);
+    }
+  }, []);
+
+  const loadGithubBranches = useCallback(async (repo) => {
+    if (!repo) return;
+    setBranchesLoading(true);
+    setGithubError('');
+    try {
+      const [owner, repoName] = repo.fullName.split('/');
+      const res = await getGithubBranches(owner, repoName);
+      setRepoBranches(res.data);
+      setRepoBranch(repo.defaultBranch || 'main');
+    } catch (err) {
+      setGithubError(err.response?.data?.message || 'Failed to fetch repository branches.');
+    } finally {
+      setBranchesLoading(false);
+    }
+  }, []);
+
+  // Fetch branches when selected repo changes
+  useEffect(() => {
+    if (selectedRepo) {
+      loadGithubBranches(selectedRepo);
+    } else {
+      setRepoBranches([]);
+    }
+  }, [selectedRepo, loadGithubBranches]);
+
+  const handleConnectGithub = async () => {
+    setGithubError('');
+    try {
+      const res = await getGithubAuthUrl();
+      // Open a small popup — GitHub login happens there
+      const popup = window.open(res.data.url, 'github-oauth', 'width=600,height=700,scrollbars=yes');
+      // Poll until popup closes or redirects back
+      const poll = setInterval(() => {
+        try {
+          if (!popup || popup.closed) {
+            clearInterval(poll);
+            // Re-check status
+            getGithubStatus().then(r => {
+              setGithubLinked(r.data.linked);
+              setGithubUsername(r.data.githubUsername);
+              if (r.data.linked) loadGithubRepos();
+            }).catch(() => {});
+          }
+        } catch (_) {}
+      }, 500);
+    } catch (err) {
+      setGithubError('Failed to initiate GitHub OAuth.');
+    }
+  };
+
+  const handleUnlinkGithub = async () => {
+    if (!window.confirm('Unlink your GitHub account from this platform?')) return;
+    try {
+      await unlinkGithub();
+      setGithubLinked(false);
+      setGithubUsername(null);
+      setGithubRepos([]);
+      setSelectedRepo(null);
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to unlink GitHub.');
+    }
+  };
+
+  const handleGithubImport = async () => {
+    if (!selectedRepo) return;
+    setGithubImporting(true);
+    setGithubError('');
+    setActiveJobLogs([]);
+    setActiveJobArtifactUrl(null);
+    setActiveJobStatus('building');
+    setActiveJobVulns(0);
+    setActiveJobTech('');
+    setActiveJobUpgrades([]);
+    setPreviewReady(false);
+    setPreviewRunning(false);
+    setPreviewUrl('');
+    try {
+      const res = await importGithubRepo({
+        repoFullName:   selectedRepo.fullName,
+        branch:         repoBranch || selectedRepo.defaultBranch || 'main',
+        projectName:    selectedRepo.name,
+        previewPort:    previewPort || '3001',
+        sessionId:      socketRef.current?.id || '',
+        envFiles:       JSON.stringify(envFiles.filter(r => r.path.trim() && r.content.trim())),
+        targetSubfolder,
+        upgradeMode,
+      });
+      const { jobId, deploymentId } = res.data;
+      setActiveJobId(jobId);
+      setActiveDeploymentId(deploymentId);
+      socketRef.current?.emit('subscribe:pipeline', { jobId });
+      fetchSuggestedPort();
+      setUploadTab('zip'); // Switch back so logs panel is prominent
+    } catch (err) {
+      setGithubError(err.response?.data?.message || 'GitHub import failed.');
+      setActiveJobStatus('failed');
+    } finally {
+      setGithubImporting(false);
+    }
+  };
 
   // Countdown timer for interactive dependency upgrade choices
   useEffect(() => {
@@ -435,6 +642,19 @@ function DevOps() {
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
+      const isZip = file.name.toLowerCase().endsWith('.zip') || 
+                    file.type === 'application/zip' || 
+                    file.type === 'application/x-zip-compressed';
+      if (!isZip) {
+        alert('Only ZIP files are allowed!');
+        e.target.value = ''; // Reset input
+        return;
+      }
+      if (file.size > MAX_FILE_SIZE) {
+        alert(`File is too large! Maximum allowed size is 300MB. Your file is ${(file.size / (1024 * 1024)).toFixed(2)}MB.`);
+        e.target.value = ''; // Reset input
+        return;
+      }
       setSelectedFile(file);
       if (!projectName) {
         setProjectName(file.name.substring(0, file.name.lastIndexOf('.')) || file.name);
@@ -476,6 +696,7 @@ function DevOps() {
     }
 
     setUploading(true);
+    setUploadProgress(0);
     setUploadError('');
     setActiveJobLogs([]);
     setActiveJobArtifactUrl(null);
@@ -502,7 +723,10 @@ function DevOps() {
     formData.append('upgradeMode', upgradeMode);
 
     try {
-      const res = await uploadDeploymentZip(formData);
+      const res = await uploadDeploymentZip(formData, (progressEvent) => {
+        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+        setUploadProgress(percentCompleted);
+      });
       const { jobId, deploymentId } = res.data;
       setActiveJobId(jobId);
       setActiveDeploymentId(deploymentId);
@@ -520,6 +744,7 @@ function DevOps() {
       setUploadError(errMsg);
       setActiveJobStatus('failed');
       setUploading(false);
+      setUploadProgress(0);
     }
   };
 
@@ -635,15 +860,249 @@ function DevOps() {
 
         {/* ── Upload Card ──────────────────────────────────────────────── */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px', height: '620px', overflowY: 'auto', paddingRight: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <Upload size={20} style={{ color: 'var(--accent-blue)' }} />
-            <h2 style={{ fontSize: '15px' }}>Upload & Configure Project</h2>
-          </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
-            Upload a <code>.zip</code> file. Specify a custom preview port and any <code>.env</code> files
-            to inject before the build runs. Folders like <code>node_modules</code>, <code>target</code>, <code>.git</code> are stripped automatically.
-          </p>
 
+          {/* ── Card title row ─────────────────────────────────────────── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {uploadTab === 'zip' ? <Upload size={20} style={{ color: 'var(--accent-blue)' }} /> : <Github size={20} style={{ color: '#fff' }} />}
+            <h2 style={{ fontSize: '15px' }}>{uploadTab === 'zip' ? 'Upload & Configure Project' : 'Import from GitHub'}</h2>
+          </div>
+
+          {/* ── Tab Switcher ─────────────────────────────────────────────── */}
+          <div style={{ display: 'flex', gap: '4px', background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--radius-md)', padding: '4px', border: '1px solid var(--border-subtle)' }}>
+            {[
+              { id: 'zip', label: '📦 ZIP Upload', icon: null },
+              { id: 'github', label: '🐙 GitHub Import', icon: null },
+            ].map(tab => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setUploadTab(tab.id)}
+                style={{
+                  flex: 1, padding: '8px 12px', border: 'none', borderRadius: 'var(--radius-sm)',
+                  fontWeight: 600, fontSize: '12.5px', cursor: 'pointer', transition: 'all 0.15s',
+                  background: uploadTab === tab.id ? 'var(--grad-brand)' : 'transparent',
+                  color: uploadTab === tab.id ? '#fff' : 'var(--text-muted)',
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* ── User identity chip (always visible) ──────────────────────── */}
+          {currentUser && (
+            <div style={{
+              background: 'rgba(59, 130, 246, 0.06)',
+              border: '1px solid rgba(59, 130, 246, 0.15)',
+              borderRadius: 'var(--radius-md)',
+              padding: '10px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '10px',
+              marginTop: '-4px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{
+                  width: '28px', height: '28px', borderRadius: '50%',
+                  background: 'var(--grad-brand)', color: '#fff',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontWeight: 'bold', fontSize: '12px', textTransform: 'uppercase'
+                }}>
+                  {currentUser.firstName?.[0] || currentUser.username?.[0] || '?'}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: '12.5px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {currentUser.firstName} {currentUser.lastName || ''}
+                  </span>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{currentUser.email}</span>
+                </div>
+              </div>
+              <span style={{
+                fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em',
+                background: 'rgba(255,255,255,0.06)', padding: '2px 8px', borderRadius: '10px',
+                color: 'var(--accent-blue)', border: '1px solid rgba(255,255,255,0.1)'
+              }}>
+                {currentUser.role}
+              </span>
+            </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {/* ── GITHUB IMPORT PANEL ──────────────────────────────────────── */}
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {uploadTab === 'github' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+              {githubError && (
+                <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 'var(--radius-sm)', padding: '10px 14px', fontSize: '12.5px', color: 'var(--sev-critical)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <AlertOctagon size={14} /> {githubError}
+                </div>
+              )}
+
+              {/* Not linked ─── show connect button */}
+              {!githubLinked ? (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', padding: '32px 0', textAlign: 'center' }}>
+                  <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Github size={32} style={{ color: 'var(--text-secondary)' }} />
+                  </div>
+                  <div>
+                    <p style={{ fontWeight: 600, fontSize: '14px', color: 'var(--text-primary)', margin: '0 0 4px' }}>Connect your GitHub Account</p>
+                    <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: 0 }}>Authorize this platform to list and import your repositories. Only granted once.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleConnectGithub}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '8px',
+                      background: '#24292f', border: '1px solid rgba(255,255,255,0.15)',
+                      borderRadius: 'var(--radius-md)', color: '#fff',
+                      padding: '10px 20px', fontWeight: 600, fontSize: '13px', cursor: 'pointer',
+                      transition: 'opacity 0.15s'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.opacity = '0.85'}
+                    onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+                  >
+                    <Github size={16} /> Connect GitHub
+                  </button>
+                </div>
+              ) : (
+                /* Linked ─── show repo browser */
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {/* GitHub account badge */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(36,41,47,0.6)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 'var(--radius-md)', padding: '10px 14px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Github size={16} style={{ color: '#fff' }} />
+                      <span style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)' }}>@{githubUsername}</span>
+                      <span style={{ fontSize: '10px', background: 'rgba(34,211,238,0.12)', color: 'var(--accent-cyan)', border: '1px solid rgba(34,211,238,0.25)', borderRadius: '8px', padding: '1px 7px', fontWeight: 600 }}>Linked</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button type="button" onClick={loadGithubRepos} title="Refresh repositories" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-muted)', padding: '5px', cursor: 'pointer', display: 'flex' }}>
+                        <RefreshCw size={13} />
+                      </button>
+                      <button type="button" onClick={handleUnlinkGithub} title="Unlink GitHub" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 'var(--radius-sm)', color: 'var(--sev-critical)', padding: '5px', cursor: 'pointer', display: 'flex' }}>
+                        <Unlock size={13} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Search */}
+                  <div style={{ position: 'relative' }}>
+                    <Search size={13} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+                    <input
+                      type="text"
+                      placeholder="Filter repositories..."
+                      value={repoSearch}
+                      onChange={e => setRepoSearch(e.target.value)}
+                      style={{ ...inputStyle, paddingLeft: '30px', fontSize: '12px' }}
+                    />
+                  </div>
+
+                  {/* Repo list */}
+                  <div style={{ maxHeight: '260px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px', paddingRight: '4px' }}>
+                    {reposLoading ? (
+                      <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: '13px' }}>Loading repositories...</div>
+                    ) : githubRepos.length === 0 ? (
+                      <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: '13px' }}>
+                        No repositories found.{' '}
+                        <button type="button" onClick={loadGithubRepos} style={{ background: 'none', border: 'none', color: 'var(--accent-cyan)', cursor: 'pointer', textDecoration: 'underline', fontSize: '13px' }}>Load repos</button>
+                      </div>
+                    ) : (
+                      githubRepos
+                        .filter(r => r.name.toLowerCase().includes(repoSearch.toLowerCase()) || (r.description || '').toLowerCase().includes(repoSearch.toLowerCase()))
+                        .map(repo => {
+                          const isSelected = selectedRepo?.id === repo.id;
+                          return (
+                            <div
+                              key={repo.id}
+                              onClick={() => { setSelectedRepo(repo); setRepoBranch(repo.defaultBranch || 'main'); }}
+                              style={{
+                                padding: '10px 12px', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                                border: isSelected ? '1px solid var(--accent-cyan)' : '1px solid var(--border-subtle)',
+                                background: isSelected ? 'rgba(6,182,212,0.06)' : 'rgba(255,255,255,0.02)',
+                                transition: 'all 0.15s',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                                  {isSelected && <CheckCircle size={13} style={{ color: 'var(--accent-cyan)', flexShrink: 0 }} />}
+                                  <span style={{ fontWeight: 600, fontSize: '12.5px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo.name}</span>
+                                  {repo.private && <Lock size={11} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                  {repo.language && <span style={{ fontSize: '10px', color: 'var(--accent-purple)', fontWeight: 600, background: 'rgba(168,85,247,0.1)', padding: '1px 6px', borderRadius: '8px' }}>{repo.language}</span>}
+                                  {repo.stars > 0 && <span style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '2px' }}><Star size={10} />{repo.stars}</span>}
+                                </div>
+                              </div>
+                              {repo.description && <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '4px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo.description}</p>}
+                            </div>
+                          );
+                        })
+                    )}
+                  </div>
+
+                  {/* Branch + import */}
+                  {selectedRepo && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end' }}>
+                        <div style={{ ...sectionStyle, flex: 1 }}>
+                          <label style={labelStyle}><GitBranch size={10} style={{ marginRight: '4px' }} />Branch</label>
+                          {branchesLoading ? (
+                            <select disabled style={{ ...inputStyle, fontSize: '12px' }}>
+                              <option>Loading branches...</option>
+                            </select>
+                          ) : (
+                            <select
+                              value={repoBranch}
+                              onChange={e => setRepoBranch(e.target.value)}
+                              style={{ ...inputStyle, fontSize: '12px', cursor: 'pointer' }}
+                            >
+                              {repoBranches.length === 0 ? (
+                                <option value="main">main</option>
+                              ) : (
+                                repoBranches.map(b => (
+                                  <option key={b.name} value={b.name}>
+                                    {b.name}
+                                  </option>
+                                ))
+                              )}
+                            </select>
+                          )}
+                        </div>
+                        <div style={{ ...sectionStyle }}>
+                          <label style={labelStyle}>Port</label>
+                          <input type="number" min="1024" max="65535" value={previewPort} onChange={e => setPreviewPort(e.target.value)} style={{ ...inputStyle, width: '80px', textAlign: 'center' }} />
+                        </div>
+                      </div>
+                      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                        Importing: <strong style={{ color: 'var(--text-primary)' }}>{selectedRepo.fullName}</strong> @ <code>{repoBranch}</code>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleGithubImport}
+                        disabled={githubImporting}
+                        style={{
+                          background: 'var(--grad-brand)', border: 'none', borderRadius: 'var(--radius-md)',
+                          color: '#fff', padding: '12px', fontWeight: 600, fontSize: '13px',
+                          cursor: githubImporting ? 'not-allowed' : 'pointer',
+                          opacity: githubImporting ? 0.6 : 1, transition: 'opacity 0.2s',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+                        }}
+                      >
+                        <Github size={15} />
+                        {githubImporting ? 'Cloning & Starting Pipeline...' : 'Import & Run Pipeline'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {/* ── ZIP UPLOAD FORM (only shown when tab === 'zip') ──────────── */}
+          {/* ═══════════════════════════════════════════════════════════════ */}
+          {uploadTab === 'zip' && (
           <form onSubmit={handleUploadSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
 
             {/* Project name + port side-by-side */}
@@ -866,7 +1325,7 @@ function DevOps() {
 
             {uploadError && <p style={{ color: 'var(--sev-critical)', fontSize: '12px', margin: 0 }}>{uploadError}</p>}
 
-            <button
+             <button
               type="submit"
               disabled={uploading && activeJobStatus === 'building'}
               style={{
@@ -889,7 +1348,28 @@ function DevOps() {
                 ? 'Compiling & Scanning...'
                 : 'Start Pipeline Execution'}
             </button>
+
+            {uploading && uploadProgress > 0 && (
+              <div style={{ marginTop: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  <span>{uploadProgress === 100 ? 'Processing ZIP package...' : 'Uploading repository...'}</span>
+                  <span>{uploadProgress}%</span>
+                </div>
+                <div style={{ width: '100%', height: '5px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+                  <div 
+                    style={{ 
+                      width: `${uploadProgress}%`, 
+                      height: '100%', 
+                      background: 'var(--grad-brand)', 
+                      borderRadius: '3px',
+                      transition: 'width 0.1s ease-out' 
+                    }} 
+                  />
+                </div>
+              </div>
+            )}
           </form>
+          )}
         </div>
 
         {/* ── Live Pipeline Console ──────────────────────────────────────── */}
@@ -1179,6 +1659,8 @@ function DevOps() {
                 <th>Tech Stack</th>
                 <th>Architecture</th>
                 <th>Status</th>
+                <th>Type</th>
+                <th>Deployed By</th>
                 <th>Vulnerabilities</th>
                 <th>Preview Port</th>
                 <th>Date</th>
@@ -1188,7 +1670,7 @@ function DevOps() {
             <tbody>
               {deployments.length === 0 ? (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={10}>
                     <EmptyState message="No sandbox builds tracked in registry." />
                   </td>
                 </tr>
@@ -1229,6 +1711,45 @@ function DevOps() {
                       </span>
                     </td>
                     <td><StatusBadge status={d.status} /></td>
+                    <td>
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        textTransform: 'uppercase',
+                        padding: '3px 8px',
+                        borderRadius: '12px',
+                        background: d.deploymentType === 'github' ? 'rgba(255,255,255,0.06)' : 'rgba(59,130,246,0.08)',
+                        color: d.deploymentType === 'github' ? 'var(--text-primary)' : 'var(--accent-blue)',
+                        border: d.deploymentType === 'github' ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(59,130,246,0.15)',
+                      }}>
+                        {d.deploymentType === 'github' ? (
+                          <>
+                            <Github size={11} style={{ filter: 'invert(1)' }} /> GitHub
+                          </>
+                        ) : (
+                          <>
+                            <Upload size={11} /> ZIP
+                          </>
+                        )}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: '12.5px', color: 'var(--text-primary)' }}>
+                      {d.deployedBy ? (
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                          <span style={{ fontWeight: 500 }}>
+                            {d.deployedBy.firstName} {d.deployedBy.lastName || ''}
+                          </span>
+                          <span style={{ fontSize: '10.5px', color: 'var(--text-muted)' }}>
+                            {d.deployedBy.role}
+                          </span>
+                        </div>
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)' }}>system</span>
+                      )}
+                    </td>
                     <td style={{ fontWeight: 600, color: d.vulnerabilitiesFound > 0 ? 'var(--sev-critical)' : 'var(--sev-low)' }}>
                       {d.vulnerabilitiesFound} findings
                     </td>
