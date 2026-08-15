@@ -1294,6 +1294,7 @@ func initProxyEngine(configPath string) (*proxy.ProxyEngine, *detect.StatsCollec
 	}
 	bus.Subscribe(jsonLogger)
 	bus.Subscribe(stats)
+	bus.Subscribe(&ConsoleLogger{})
 
 	engine := proxy.NewProxyEngine(cfg, bus, stats)
 	if err := engine.Start(); err != nil {
@@ -1302,6 +1303,27 @@ func initProxyEngine(configPath string) (*proxy.ProxyEngine, *detect.StatsCollec
 
 	return engine, stats, nil
 }
+
+// ConsoleLogger prints real-time detections to the terminal.
+type ConsoleLogger struct{}
+
+func (c *ConsoleLogger) OnDetection(d detect.Detection) {
+	// Clear the current line (which contains the ticker) before printing
+	fmt.Printf("\r\033[K")
+
+	emoji := d.Severity.Emoji()
+	fmt.Printf("  %s [%s] %s | %s:%d -> %d | %s\n",
+		emoji,
+		d.Timestamp.Format("15:04:05"),
+		d.Severity.String(),
+		d.SourceIP,
+		d.SourcePort,
+		d.DestPort,
+		d.Summary,
+	)
+}
+
+func (c *ConsoleLogger) OnConnectionClose(conn detect.ConnectionRecord) {}
 
 func runStandaloneProxy(stats *detect.StatsCollector) {
 	clearScreen()

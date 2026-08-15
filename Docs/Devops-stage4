@@ -1,0 +1,127 @@
+# Phase 4: Production Promotion & Security Proxy Handoff Workflow
+
+> **Integration Context:** This document dictates the final deployment phase of the application after it has successfully passed dynamic sandboxing. The trusted code is promoted to a standard, high-performance container runtime and placed strictly behind the team's custom Layer-7 DPI and eBPF security proxy.
+> **Environment:** 100% Local (Zero-Cost Proof of Concept mimicking AWS EC2/EKS)
+> **Target Directory additions:** `DevOps/k8s/production-deployment.yaml`, `DevOps/scripts/04-production-promotion.sh`
+
+---
+
+## 1. Runtime Optimization and Efficiency
+
+Because the application has been exhaustively vetted during Phase 3, it no longer requires the heavy syscall interception of a user-space kernel. To maximize computational efficiency and lower latency, the architecture swaps the runtime environment.
+
+**The Workflow:**
+1. **Remove Isolation Restrictions:** The deployment manifest is updated to remove the `runtimeClassName: gvisor` directive.
+2. **Standard Execution:** The trusted container is deployed using the standard host-shared kernel runtime. This removes the computational overhead introduced by syscall translation. *(Note: No explicit reference provided in bibliography for the containerd swap)*.
+
+**Zero-Cost Implementation:**
+* **Tooling:** **Minikube** default runtime (`containerd`).
+* **Execution:** A new production Kubernetes namespace is created, and the application is deployed natively.
+
+---
+
+## 2. Identity and Access Management (Least Privilege)
+
+In the enterprise AWS environment, this phase deeply integrates AWS IAM with Kubernetes via EKS Pod Identity to restrict what the pod can access *(Note: No explicit reference provided in bibliography for AWS IAM or EKS Pod Identity)*. For our local zero-cost demo, we simulate this using Kubernetes Role-Based Access Control (RBAC).
+
+**The Workflow:**
+1. **Service Account Creation:** The application is assigned a dedicated Kubernetes ServiceAccount rather than using the default one.
+2. **Role Binding:** A strict Role is created that explicitly denies the pod access to the Kubernetes API, ensuring that even if the app is compromised later, it cannot query the cluster state.
+
+**Zero-Cost Implementation:**
+* **Tooling:** Native Kubernetes **RBAC**.
+* **Execution:** Included directly within the `production-deployment.yaml` manifest.
+
+---
+
+## 3. The Security Proxy Handoff (The Shield Integration)
+
+This is the most critical integration point of the entire zero-cost demo. The newly synthesized and validated application must never be exposed directly to the user. It must be shielded by the team's custom Next-Gen IDS/IPS system.
+
+**The Workflow:**
+1. **Local Port Forwarding:** The Kubernetes service is exposed locally (e.g., on port 8080).
+2. **Proxy Configuration:** The team's `Security/proxy_config.yaml` is dynamically updated to point to this local deployment.
+3. **Traffic Routing:** All user traffic now hits the Go proxy (e.g., on port 18080), passes through the Layer 0 eBPF monitor, gets inspected by the Layer 7 analyzers (HTTP, SQLi, XSS), and is only forwarded to the application if deemed safe.
+
+**Zero-Cost Implementation:**
+* **Tooling:** The team's **Go Agent** (`Security/main.go`).
+* **Execution:** An automated script updates the YAML config and restarts the proxy agent to register the new backend address.
+
+---
+
+## 4. Next Steps for Implementation
+
+To operationalize this phase locally, the DevOps team must create the standard deployment manifest and the promotion script that bridges the gap between the DevOps pipeline and the Security team's proxy.
+
+1. **Create the Manifest:** `DevOps/k8s/production-deployment.yaml`
+   ```yaml
+   apiVersion: v1
+   kind: ServiceAccount
+   metadata:
+     name: secure-app-sa
+     namespace: production-workloads
+   automountServiceAccountToken: false # Strictly limits API access
+   ---
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: trusted-app-production
+     namespace: production-workloads
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: trusted-app
+     template:
+       metadata:
+         labels:
+           app: trusted-app
+       spec:
+         serviceAccountName: secure-app-sa
+         # Notice: runtimeClassName is explicitly omitted here to use containerd
+         containers:
+         - name: app-container
+           image: local-devops-build:latest
+           ports:
+           - containerPort: 8080
+   ---
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: trusted-app-svc
+     namespace: production-workloads
+   spec:
+     type: NodePort
+     selector:
+       app: trusted-app
+     ports:
+       - port: 8080
+         targetPort: 8080
+         nodePort: 30080
+
+
+Create the Script: DevOps/scripts/04-production-promotion.sh
+
+Bash
+#!/bin/bash
+echo "Starting Phase 4: Production Promotion & Proxy Handoff..."
+
+echo "Creating production namespace and deploying trusted container..."
+kubectl create namespace production-workloads
+kubectl apply -f DevOps/k8s/production-deployment.yaml
+
+echo "Forwarding traffic from Minikube to localhost:8080..."
+# Run port-forwarding in the background
+kubectl port-forward service/trusted-app-svc 8080:8080 -n production-workloads &
+
+echo "Updating Security Proxy Configuration..."
+# Assuming yq is installed to modify YAML locally
+yq e '.listeners[0].backend_addr = "127.0.0.1:8080"' -i Security/proxy_config.yaml
+yq e '.listeners[0].enabled = true' -i Security/proxy_config.yaml
+
+echo "Restarting the Next-Gen IDS/IPS Go Agent..."
+pkill -f "ngfw-monitor" || true
+cd Security && go run main.go &
+
+echo "Phase 4 Complete! Application is now live and protected by the eBPF/L7 Proxy."
+echo "Users can now securely access the app at http://localhost         

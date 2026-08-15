@@ -2,6 +2,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Otp = require('../models/Otp');
+const sendEmail = require('../utils/sendEmail');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -97,13 +98,17 @@ const forgotPassword = async (req, res) => {
 
     await Otp.create({ email, otp, expiresAt });
 
-    // Log OTP to console (dev mode — no SMTP configured)
-    console.log(`\n🔐 OTP for ${email}: ${otp}\n`);
 
+    console.log('KEY CHECK:', process.env.BREVO_API_KEY);
+
+    await sendEmail({
+      to: email,
+      subject: 'Your OTP for password reset',
+      htmlContent: `<p>Your OTP is <b>${otp}</b>. It expires in 5 minutes.</p>`,
+    });
     // Return OTP in response body (dev mode only — remove in production)
     res.json({
       message: 'OTP generated successfully.',
-      otp, // ← Remove this line when email delivery is configured
     });
   } catch (error) {
     console.error('FORGOT PASSWORD ERROR:', error);
