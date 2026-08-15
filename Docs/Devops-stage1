@@ -1,0 +1,79 @@
+# Phase 1: Zero-Cost DevSecOps & Ephemeral Sandbox Workflow
+
+> **Integration Context:** This document outlines the pre-deployment DevOps pipeline. It dictates how application code is synthesized, scanned, and sandboxed locally *before* it is permanently hosted behind the team's Go-based Next-Gen IDS/IPS Proxy.
+> **Environment:** 100% Local (Zero-Cost Proof of Concept)
+> **Target Directory additions:** `.github/workflows/` (or local shell scripts) and `DevOps/`
+
+---
+
+## 1. Pipeline Trigger and The Entry Point
+
+The DevOps pipeline initiates before the application ever reaches the network interfaces monitored by the eBPF hooks. 
+
+**The Workflow:**
+1. **User Intent:** The user describes a desired web application feature (e.g., "Create a login page connecting to MongoDB").
+2. **Local AI Execution:** Instead of calling a paid AWS GPU instance, a local agent script intercepts this request.
+3. **Synthesis:** The script utilizes a locally hosted, quantized Large Language Model to generate the raw application code in a temporary staging directory (`/tmp/devops-build/`).
+
+**Zero-Cost Implementation:**
+* **Tooling:** We utilize the **Qwen2.5-Coder-7B-Instruct-GGUF** (4-bit quantized) model.
+* **Execution:** Run locally via `llama.cpp` or LM Studio CLI. This allows the massive context window to execute entirely on a standard developer laptop using consumer RAM.
+
+---
+
+## 2. Semantic Static Analysis & Malware Auditing
+
+Before building the Docker container, the synthesized code must pass local security gating. This ensures we do not waste compute resources containerizing known malware or vulnerable code.
+
+**The Workflow:**
+1. **AST Parsing:** The local source code is parsed into Abstract Syntax Trees to detect semantic flaws (e.g., hardcoded secrets or theoretical SQL injection).
+2. **Malware Unpacking:** The compiled binaries/assets are scanned for trojans or malicious signatures.
+3. **Gating:** If any Critical/High vulnerabilities are found, the pipeline fails immediately.
+
+**Zero-Cost Implementation:**
+* **SAST:** Execute **Semgrep Community Edition**. 
+  * *Command:* `semgrep scan --config auto /tmp/devops-build/`
+* **Malware:** Execute a local **ClamAV** daemon scan.
+  * *Command:* `clamscan -r /tmp/devops-build/`
+
+---
+
+## 3. The Ephemeral Sandbox (10-Minute Validation)
+
+This is the critical handoff phase. We must test the compiled application dynamically, but we cannot trust it on the host machine. We will use a local, zero-cost Kubernetes cluster mimicking production.
+
+**The Workflow:**
+1. **Containerization:** The validated code is packaged into a local Docker image.
+2. **Cluster Provisioning:** The image is pushed into a local Kubernetes cluster.
+3. **User-Space Isolation:** The pod is forced to run inside the `runsc` (gVisor) runtime class, intercepting all system calls to prevent container escapes.
+4. **Dynamic Testing:** A script hits the local endpoints for 10 minutes to verify uptime and stability.
+5. **Teardown:** The pod is killed, memory is flushed, and the cluster is sanitized.
+
+**Zero-Cost Implementation:**
+* **Kubernetes:** **Minikube** running locally.
+* **Isolation:** Minikube has native support for gVisor. 
+  * *Initialization Command:* `minikube start --container-runtime=containerd --docker-opt containerd=/var/run/containerd/containerd.sock --addons=gvisor`
+* **Deployment Hook:** The Kubernetes deployment YAML is explicitly configured with `runtimeClassName: gvisor` to ensure strict user-space execution.
+
+---
+
+## 4. Promotion & Handoff to the Security Proxy
+
+Once the 10-minute sandbox validation passes, the application is ready for "production" (in this case, the permanent local hosting for the 10 users).
+
+**The Workflow:**
+1. The container is promoted out of the `gVisor` sandbox and redeployed using the standard `containerd` runtime for maximum performance.
+2. The application is exposed locally (e.g., on `localhost:8080`).
+3. **The IDS/IPS Handoff:** The team's Security Agent (`Security/proxy_config.yaml`) is configured to protect this application.
+
+**Integration with the Team's Architecture:**
+The DevOps pipeline updates the `proxy_config.yaml` to ensure the Go reverse proxy is the only entry point to the newly synthesized app:
+
+```yaml
+# Auto-updated by DevOps Pipeline post-sandbox validation
+listeners:
+  - listen_port: 18080               # External users connect here
+    backend_addr: "127.0.0.1:8080"   # The newly deployed container
+    transport: "tcp"
+    service: "http"
+    enabled: true

@@ -1,0 +1,112 @@
+# Phase 3: Runtime Isolation & Ephemeral Sandbox Workflow
+
+> **Integration Context:** This document dictates the execution and dynamic testing phase of the DevOps pipeline. Because static analysis cannot catch every zero-day or obfuscated vulnerability, the untrusted code must be containerized and run in a strictly isolated ten-minute temporary environment. 
+> **Environment:** 100% Local (Zero-Cost Proof of Concept)
+> **Target Directory additions:** `DevOps/k8s/sandbox-deployment.yaml`, `DevOps/scripts/03-ephemeral-test.sh`
+
+---
+
+## 1. Containerization and User-Space Kernel Isolation
+
+Traditional containers share the host's underlying kernel, meaning a single vulnerability could allow untrusted code to execute a privilege escalation and escape the container. To solve the "sandbox dilemma" locally, we mandate user-space isolation.
+
+**The Workflow:**
+1. **Image Build:** The validated application code from Phase 2 is packaged into a local Docker image.
+2. **Cluster Provisioning:** The image is deployed into a dedicated, temporary Kubernetes namespace.
+3. **Syscall Interception:** The pod is explicitly bound to a memory-safe user-space kernel. This kernel intercepts and translates all system calls before they can reach the host operating system, structurally preventing container escapes.
+
+**Zero-Cost Implementation:**
+* **Tooling:** **Minikube** (Local Kubernetes) and **gVisor** (Open-source application kernel / `runsc` runtime).
+* **Execution:** Minikube natively supports gVisor as an addon. 
+  * *Cluster Init Command:* `minikube start --container-runtime=containerd --addons=gvisor`
+  * *Deployment Config:* The Kubernetes YAML must include `runtimeClassName: gvisor` to ensure the pod uses `runsc` instead of standard `containerd`.
+
+---
+
+## 2. Behavioral Threat Detection via eBPF
+
+While gVisor provides a hard structural boundary in user space, we must still monitor the infrastructure for anomalous behavior during the testing phase.
+
+**The Workflow:**
+1. **Kernel Monitoring:** A cloud-native security engine operates in kernel space, utilizing eBPF probes to monitor the system calls that successfully pass down to the host.
+2. **Alerting:** If the untrusted code attempts unauthorized lateral network movement or modification of critical system files within the sandbox, the engine triggers an immediate security alert.
+
+**Zero-Cost Implementation:**
+* **Tooling:** **Falco**, an open-source CNCF project.
+* **Execution:** Deployed locally within the Minikube cluster via Helm to monitor the gVisor workloads.
+
+---
+
+## 3. Cryptographic Orchestration
+
+To accurately mirror a production environment and secure the dynamic testing traffic (e.g., StackHawk DAST from Phase 2), the ephemeral environment must operate over encrypted HTTPS channels.
+
+**The Workflow:**
+1. **CSR Generation:** As soon as the sandbox deployment initiates, a Certificate Signing Request (CSR) is automatically generated.
+2. **Ephemeral Provisioning:** Temporary TLS certificates are provisioned and mounted to the workload.
+
+**Zero-Cost Implementation:**
+* **Tooling:** **cert-manager**, an open-source Kubernetes addon.
+* **Execution:** Installed locally in Minikube.
+  * *Command:* `kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml`
+
+---
+
+## 4. The 10-Minute Execution and Teardown
+
+The ephemeral sandbox is strictly time-bound. It only exists long enough for integration testing and dynamic security scanning to confirm the application's stability.
+
+**The Workflow:**
+1. **Dynamic Execution:** The application runs for a strict 10-minute window while automated tests hit its endpoints.
+2. **Garbage Collection:** Once the window expires, the namespace is aggressively destroyed.
+3. **Sanitization:** The pod is terminated, the gVisor `runsc` runtime state is evicted, the temporary TLS certificates are revoked, and all associated memory allocations are flushed.
+
+**Zero-Cost Implementation:**
+* **Tooling:** Standard Bash scripting and `kubectl`.
+* **Execution:** A local script manages the timer and triggers the teardown.
+
+---
+
+## 5. Next Steps for Implementation
+
+To operationalize this phase locally without cost, the DevOps team must create the deployment manifest and the orchestration script.
+
+1. **Create the Manifest:** `DevOps/k8s/sandbox-deployment.yaml`
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: untrusted-app-sandbox
+     namespace: ephemeral-sandbox
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: untrusted-app
+     template:
+       metadata:
+         labels:
+           app: untrusted-app
+       spec:
+         runtimeClassName: gvisor # CRITICAL: Enforces user-space isolation
+         containers:
+         - name: app-container
+           image: local-devops-build:latest
+
+
+
+
+#!/bin/bash
+echo "Starting Phase 3: Ephemeral Sandbox Deployment..."
+
+kubectl create namespace ephemeral-sandbox
+kubectl apply -f DevOps/k8s/sandbox-deployment.yaml
+
+echo "Sandbox running. Initiating 10-minute (600s) dynamic testing window..."
+# (Trigger DAST tools like HawkScan here)
+sleep 600
+
+echo "Testing window expired. Initiating garbage collection..."
+kubectl delete namespace ephemeral-sandbox --force
+
+echo "Phase 3 Complete. Memory flushed and certificates revoked. Ready for Phase 4 (Promotion)."           

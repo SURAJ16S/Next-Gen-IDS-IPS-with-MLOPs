@@ -14,6 +14,7 @@ import Logs from './pages/Logs';
 import DevOps from './pages/DevOps';
 import Settings from './pages/Settings';
 import NodesPage from './pages/NodesPage';
+import Fixtures from './pages/Fixtures';
 
 function App() {
   return (
@@ -38,6 +39,7 @@ function App() {
         <Route path="logs" element={<Logs />} />
         <Route path="devops" element={<DevOps />} />
         <Route path="nodes" element={<NodesPage />} />
+        <Route path="fixtures" element={<Fixtures />} />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>

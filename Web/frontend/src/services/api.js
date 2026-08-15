@@ -41,6 +41,20 @@ export const getAnalyticsSummary = () => api.get('/analytics/summary');
 // DevOps
 export const getDeployments = () => api.get('/devops');
 export const createDeployment = (data) => api.post('/devops', data);
+export const uploadDeploymentZip = (formData) => api.post('/devops/upload', formData, {
+  headers: { 'Content-Type': 'multipart/form-data' }
+});
+export const downloadDeploymentArtifact = (id) => api.get(`/devops/${id}/artifact`, {
+  responseType: 'blob'
+});
+export const downloadDeploymentPdfReport = (id) => api.get(`/devops/${id}/pdf-report`, {
+  responseType: 'blob'
+});
+export const suggestDeploymentPort = () => api.get('/devops/suggest-port');
+export const getActivePreviews = () => api.get('/devops/previews');
+export const stopDeploymentPreview = (id) => api.post(`/devops/${id}/stop-preview`);
+export const startDeploymentPreview = (id) => api.post(`/devops/${id}/start-preview`);
+export const deleteDeployment = (id) => api.delete(`/devops/${id}`);
 
 // Nodes
 export const getNodes = () => api.get('/nodes');

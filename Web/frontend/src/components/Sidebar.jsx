@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, ShieldAlert, Network, BarChart3, FileText, Server, ShieldCheck, Settings, Cpu } from 'lucide-react';
+import { LayoutDashboard, ShieldAlert, Network, BarChart3, FileText, Server, ShieldCheck, Settings, Cpu, Play } from 'lucide-react';
 
 const navItems = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
@@ -8,6 +8,7 @@ const navItems = [
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
   { to: '/logs', label: 'Logs', icon: FileText },
   { to: '/devops', label: 'DevOps', icon: Server },
+  { to: '/fixtures', label: 'Test Fixtures', icon: Play },
   { to: '/nodes', label: 'Agent Nodes', icon: Cpu },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
@@ -44,6 +45,7 @@ function Sidebar() {
             key={to}
             to={to}
             end={end}
+            className="sidebar-nav-link"  
             style={({ isActive }) => ({
               display: 'flex',
               alignItems: 'center',
@@ -53,7 +55,7 @@ function Sidebar() {
               borderRadius: 'var(--radius-sm)',
               color: isActive ? '#fff' : 'var(--text-secondary)',
               textDecoration: 'none',
-              background: isActive ? 'var(--accent-blue)' : 'transparent',
+              background: isActive ? 'var(--accent-blue)' : undefined,
               fontSize: '13.5px',
               fontWeight: isActive ? 600 : 500,
               transition: 'background 0.12s, color 0.12s',

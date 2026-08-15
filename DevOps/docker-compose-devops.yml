@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # 1. MongoDB Database
+  database:
+    image: mongo:6.0
+    container_name: devops-local-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - devops-local-net
+
+  # 2. Local Container Registry
+  registry:
+    image: registry:2
+    container_name: devops-local-registry
+    restart: unless-stopped
+    ports:
+      - "5001:5000"
+    networks:
+      - devops-local-net
+
+  # 3. Prometheus (Metrics Collector)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: devops-local-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - devops-local-net
+
+  # 4. Grafana (Dashboard Visualizer)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: devops-local-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - devops-local-net
+
+  # 5. HashiCorp Vault (Secrets Manager)
+  vault:
+    image: hashicorp/vault:latest
+    container_name: devops-local-vault
+    restart: unless-stopped
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=my-secure-token
+    networks:
+      - devops-local-net
+
+  # 6. RabbitMQ (Message Broker)
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: devops-local-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - devops-local-net
+
+networks:
+  devops-local-net:
+    name: devops-local-net
+
+volumes:
+  mongo-data:
