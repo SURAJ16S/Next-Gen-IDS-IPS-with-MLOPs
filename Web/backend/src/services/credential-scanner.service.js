@@ -35,9 +35,9 @@ const SECRETS_REGEXES = {
   // ==========================================
   'S3 Access Key ID': /s3_(?:access_key_id|access_key|key_id)\s*[:=]\s*["']?[A-Za-z0-9]{20,40}["']?/gi,
   'S3 Secret Key': /s3_(?:secret_access_key|secret_key|secret)\s*[:=]\s*["']?[A-Za-z0-9/\+=]{40}["']?/gi,
-  'MongoDB URI': /mongodb(?:\+srv)?:\/\/[a-zA-Z0-9_.-]+:[^@\s]+@[a-zA-Z0-9.-]+/gi,
-  'PostgreSQL URI': /postgres(?:ql)?:\/\/[a-zA-Z0-9_.-]+:[^@\s]+@[a-zA-Z0-9.-]+/gi,
-  'MySQL URI': /mysql:\/\/[a-zA-Z0-9_.-]+:[^@\s]+@[a-zA-Z0-9.-]+/gi,
+  'MongoDB URI': /mongodb(?:\+srv)?:\/\/[a-zA-Z0-9_.-]+:[^@\s]+@[a-zA-Z0-9.-]+[a-zA-Z0-9\-_./?=&%]*/gi,
+  'PostgreSQL URI': /postgres(?:ql)?:\/\/[a-zA-Z0-9_.-]+:[^@\s]+@[a-zA-Z0-9.-]+[a-zA-Z0-9\-_./?=&%]*/gi,
+  'MySQL URI': /mysql:\/\/[a-zA-Z0-9_.-]+:[^@\s]+@[a-zA-Z0-9.-]+[a-zA-Z0-9\-_./?=&%]*/gi,
   'Redis URI': /redis:\/\/(?:[^:]+:[^@]+@)?[a-zA-Z0-9.-]+:[0-9]+/gi,
   'PlanetScale Password': /pscale_pw_[a-zA-Z0-9\-_]{43}/g,
   'Supabase Token': /sbp_[a-zA-Z0-9]{40}/g,
@@ -47,7 +47,7 @@ const SECRETS_REGEXES = {
   'Firebase URL': /https:\/\/[a-zA-Z0-9\-_]+\.firebaseio\.com/gi,
   'Terraform Cloud Token': /(?:terraform|tf_token)\s*[:=]\s*["']?[a-zA-Z0-9_]+\.[a-zA-Z0-9\-]+\.[a-zA-Z0-9\-]+["']?/gi,
   'Pulumi PAT': /pul-[a-f0-9]{40}/g,
-  'HashiCorp Vault Token': /(?:s|hvs)\.[a-zA-Z0-9]{24,}/g,
+  'HashiCorp Vault Token': /\b(?:s|hvs)\.[a-zA-Z0-9]{24,}\b/g,
 
   // ==========================================
   // CRYPTOGRAPHIC / PRIVATE KEYS
@@ -205,6 +205,11 @@ const scanDirectoryForCredentials = (dir) => {
     
     // Skip .env files (credentials belong there)
     if (baseName.startsWith('.env')) {
+      return;
+    }
+    
+    // Skip package-lock.json, yarn.lock, pnpm-lock.yaml, and other lockfiles
+    if (['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'composer.lock'].includes(baseName)) {
       return;
     }
     

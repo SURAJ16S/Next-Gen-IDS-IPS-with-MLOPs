@@ -99,5 +99,9 @@ module.exports = {
       return false;
     };
     return detectJavaGui(targetDir);
+  },
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
   }
 };

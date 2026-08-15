@@ -41,5 +41,9 @@ module.exports = {
   getConfig: (targetDir) => ({
     buildImage: 'node:20-alpine',
     runCommand: 'npm install'
-  })
+  }),
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
+  }
 };

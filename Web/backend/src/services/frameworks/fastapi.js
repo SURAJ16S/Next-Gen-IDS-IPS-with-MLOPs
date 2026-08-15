@@ -22,20 +22,36 @@ const pyprojectHas = (dir, pkg) => {
   return fs.readFileSync(p, 'utf8').toLowerCase().includes(pkg);
 };
 
-/** Discovers the FastAPI app module (looks for main.py, app.py, api.py, run.py, etc.) */
+/** Discovers the FastAPI app module (looks for main.py, app.py, api.py, run.py, etc. and dynamically resolves the FastAPI instance variable name) */
 const findAppModule = (workDir) => {
   const candidates = [
-    { file: 'main.py', module: 'main:app' },
-    { file: 'app.py', module: 'app:app' },
-    { file: 'api.py', module: 'api:app' },
-    { file: 'run.py', module: 'run:app' },
-    { file: 'server.py', module: 'server:app' },
-    { file: 'application.py', module: 'application:app' },
+    { file: 'main.py', base: 'main' },
+    { file: 'app.py', base: 'app' },
+    { file: 'api.py', base: 'api' },
+    { file: 'run.py', base: 'run' },
+    { file: 'server.py', base: 'server' },
+    { file: 'application.py', base: 'application' },
   ];
+
   for (const c of candidates) {
-    if (fs.existsSync(path.join(workDir, c.file))) return c.module;
-    // Also check src/ subdirectory
-    if (fs.existsSync(path.join(workDir, 'src', c.file))) return `src.${c.module}`;
+    let filePath = path.join(workDir, c.file);
+    let modulePrefix = '';
+    if (!fs.existsSync(filePath)) {
+      filePath = path.join(workDir, 'src', c.file);
+      modulePrefix = 'src.';
+    }
+
+    if (fs.existsSync(filePath)) {
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        // Regex to search for custom instance names like `my_api = FastAPI(...)` or `app = fastapi.FastAPI(...)`
+        const match = content.match(/([a-zA-Z0-9_]+)\s*=\s*(?:[a-zA-Z0-9_]+\.)?FastAPI\s*\(/);
+        if (match && match[1]) {
+          return `${modulePrefix}${c.base}:${match[1]}`;
+        }
+      } catch (_) {}
+      return `${modulePrefix}${c.base}:app`; // default fallback for that file
+    }
   }
   return 'main:app'; // Default fallback
 };
@@ -67,23 +83,44 @@ module.exports = {
       uvicornCmd = '.venv/Scripts/uvicorn';
     }
 
+    const hasPoetry = fs.existsSync(path.join(workDir, 'poetry.lock'));
+    const hasPipfile = fs.existsSync(path.join(workDir, 'Pipfile'));
+    
+    let cmd = uvicornCmd;
+    let args = [appModule, '--host', '0.0.0.0', '--port', '${PORT:-8000}'];
+    
+    if (hasPoetry && fs.existsSync(path.join(workDir, '.venv', 'bin', 'poetry'))) {
+      cmd = '.venv/bin/poetry';
+      args = ['run', 'uvicorn', ...args];
+    } else if (hasPipfile && fs.existsSync(path.join(workDir, '.venv', 'bin', 'pipenv'))) {
+      cmd = '.venv/bin/pipenv';
+      args = ['run', 'uvicorn', ...args];
+    }
+
     return {
-      cmd: uvicornCmd,
-      args: [appModule, '--host', '0.0.0.0', '--port', '${PORT:-8000}'],
+      cmd,
+      args,
       env: { PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
     };
   },
   getConfig: (targetDir) => {
     const hasReqs = fs.existsSync(path.join(targetDir, 'requirements.txt'));
     const hasPyproject = fs.existsSync(path.join(targetDir, 'pyproject.toml'));
+    const hasPoetry = fs.existsSync(path.join(targetDir, 'poetry.lock'));
+    const hasPipfile = fs.existsSync(path.join(targetDir, 'Pipfile'));
 
-    let installCmd = '';
-    if (hasReqs) {
-      installCmd = 'python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt';
+    let installCmd = 'python -m venv .venv && .venv/bin/pip install --upgrade pip';
+    
+    if (hasPoetry) {
+      installCmd += ' && .venv/bin/pip install poetry && .venv/bin/poetry install';
+    } else if (hasPipfile) {
+      installCmd += ' && .venv/bin/pip install pipenv && .venv/bin/pipenv install --deploy';
+    } else if (hasReqs) {
+      installCmd += ' && .venv/bin/pip install -r requirements.txt';
     } else if (hasPyproject) {
-      installCmd = 'python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install .';
+      installCmd += ' && .venv/bin/pip install .';
     } else {
-      installCmd = 'python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install fastapi uvicorn';
+      installCmd += ' && .venv/bin/pip install fastapi uvicorn';
     }
 
     return { buildImage: 'python:3.12-slim', runCommand: installCmd };
@@ -91,5 +128,10 @@ module.exports = {
   detectGui: (targetDir) => {
     // FastAPI is an API framework, it will never launch GUI apps
     return false;
+  },
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
   }
 };
+

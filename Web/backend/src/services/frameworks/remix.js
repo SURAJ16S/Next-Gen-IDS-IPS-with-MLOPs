@@ -20,5 +20,9 @@ module.exports = {
   runCommand: 'npm install && npm run build',
   getPreviewCommand: (workDir) => {
     return { cmd: 'npm', args: ['run', 'start'], env: {} };
+  },
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
   }
 };

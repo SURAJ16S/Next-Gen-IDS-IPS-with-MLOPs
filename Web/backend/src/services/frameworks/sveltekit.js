@@ -21,5 +21,9 @@ module.exports = {
   getPreviewCommand: (workDir) => {
     // Runs sveltekit build preview on custom port
     return { cmd: 'npx', args: ['vite', 'preview', '--port', '0', '--host', '0.0.0.0'], env: {} };
+  },
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
   }
 };

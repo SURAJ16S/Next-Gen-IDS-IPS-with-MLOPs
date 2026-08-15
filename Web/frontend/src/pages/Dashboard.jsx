@@ -17,23 +17,24 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-<<<<<<< Updated upstream
+  const fetchAll = async () => {
+    try {
+      setLoading(true);
+      const [statsRes, reqRes] = await Promise.all([getDashboardStats(), getRecentRequests()]);
+      setStats(statsRes.data);
+      setRequests(reqRes.data);
+    } catch (err) {
+      setError('Failed to load dashboard data.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchAll = async () => {
-      try {
-        const [statsRes, reqRes] = await Promise.all([getDashboardStats(), getRecentRequests()]);
-        setStats(statsRes.data);
-        setRequests(reqRes.data);
-      } catch (err) {
-        setError('Failed to load dashboard data.');
-      } finally {
-        setLoading(false);
-      }
-    };
     fetchAll();
 
     const socket = io('http://localhost:5000');
-    
+
     socket.on('new_detection', (det) => {
       setStats(prev => {
         if (!prev) return prev;
@@ -51,7 +52,7 @@ function Dashboard() {
         if (!prev) return prev;
         return { ...prev, totalNetworkEvents: prev.totalNetworkEvents + 1 };
       });
-      
+
       setRequests(prev => {
         const newReq = {
           _id: Math.random().toString(),
@@ -65,22 +66,6 @@ function Dashboard() {
 
     return () => socket.disconnect();
   }, []);
-=======
-  const fetchAll = async () => {
-    try {
-      setLoading(true);
-      const [statsRes, reqRes] = await Promise.all([getDashboardStats(), getRecentRequests()]);
-      setStats(statsRes.data);
-      setRequests(reqRes.data);
-    } catch (err) {
-      setError('Failed to load dashboard data.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => { fetchAll(); }, []);
->>>>>>> Stashed changes
 
   if (loading) return <p style={{ color: 'var(--text-secondary)' }}>Loading dashboard...</p>;
   if (error) return <p style={{ color: 'var(--sev-critical)' }}>{error}</p>;

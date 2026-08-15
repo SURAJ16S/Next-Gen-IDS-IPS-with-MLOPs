@@ -47,6 +47,15 @@ const initSocket = (server) => {
       console.log(`Socket ${socket.id} unsubscribed from pipeline:${jobId}`);
     });
 
+    socket.on('pipeline:submit-upgrades', ({ jobId, selectedUpgrades }) => {
+      console.log(`[Socket] Received upgrade choices for job ${jobId}`);
+      const { submitUserSelection } = require('../services/interaction-manager.service');
+      const resumed = submitUserSelection(jobId, selectedUpgrades);
+      if (resumed) {
+        console.log(`[Socket] Successfully resumed pipeline for job ${jobId}`);
+      }
+    });
+
     socket.on('disconnect', () => {
       if (socket.isAgent) {
         console.log(`Agent disconnected: ${socket.nodeId}`);

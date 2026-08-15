@@ -6,7 +6,7 @@ module.exports = {
   detect: (targetDir) => {
     return fs.existsSync(path.join(targetDir, 'Cargo.toml'));
   },
-  buildImage: 'rust:1.75-slim',
+  buildImage: 'rust:1.85-slim',
   runCommand: 'export CARGO_TARGET_DIR=/tmp/target && cargo build --release && mkdir -p target/release && find /tmp/target/release/ -maxdepth 1 -type f -executable -exec cp {} target/release/ \\;',
   getPreviewCommand: (workDir) => {
     const releaseDir = path.join(workDir, 'target', 'release');
@@ -40,5 +40,9 @@ module.exports = {
       }
     } catch (_) {}
     return false;
+  },
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
   }
 };

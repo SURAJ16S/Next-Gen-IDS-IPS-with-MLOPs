@@ -6,6 +6,7 @@ const Docker = require('dockerode');
 const Deployment = require('../models/Deployment');
 const { getIO } = require('../websocket/socket');
 const { detectFramework } = require('./framework-detector.service');
+const { analyzeLogsAndDiagnose } = require('./diagnostics.service');
 
 // Dynamically list our modular framework modules
 const mern = require('./frameworks/mern');
@@ -37,8 +38,45 @@ const hono = require('./frameworks/hono');
 const koa = require('./frameworks/koa');
 const h3 = require('./frameworks/h3');
 const express = require('./frameworks/express');
+const php = require('./frameworks/php');
 
-// ── Emerging & Other Stack ───────────────────────────────────────────────
+// ── New: Java Ecosystem ─────────────────────────────────────────
+const quarkus = require('./frameworks/quarkus');
+
+// ── New: .NET / C# ───────────────────────────────────────────────
+const blazor = require('./frameworks/blazor');
+const dotnet = require('./frameworks/dotnet');
+
+// ── New: Elixir ──────────────────────────────────────────────────
+const phoenix = require('./frameworks/phoenix');
+
+// ── New: Ruby ────────────────────────────────────────────────────
+const rails = require('./frameworks/rails');
+const sinatra = require('./frameworks/sinatra');
+
+// ── New: PHP Full-Stack ─────────────────────────────────────────
+const symfony = require('./frameworks/symfony');
+
+// ── New: Deno ────────────────────────────────────────────────────
+const denoFresh = require('./frameworks/deno-fresh');
+const deno = require('./frameworks/deno');
+
+// ── New: Go Ecosystem ───────────────────────────────────────────
+const gin = require('./frameworks/gin');
+const fiber = require('./frameworks/fiber');
+const echoGo = require('./frameworks/echo-go');
+
+// ── New: Modern React Meta-Frameworks ───────────────────────────
+const tanstackStart = require('./frameworks/tanstack-start');
+const analog = require('./frameworks/analog');
+
+// ── New: Svelte Standalone ─────────────────────────────────────────
+const svelte = require('./frameworks/svelte');
+
+// ── New: Bun Native ───────────────────────────────────────────────
+const bunNative = require('./frameworks/bun-native');
+
+// ── Emerging & Other Stack ─────────────────────────────────────────
 const nitro = require('./frameworks/nitro');
 const blitz = require('./frameworks/blitz');
 const redwood = require('./frameworks/redwood');
@@ -49,11 +87,43 @@ const preact = require('./frameworks/preact');
 const staticAssets = require('./frameworks/static');
 
 const plugins = [
-  mern, spring, django, rust,
-  angular, astro, cra, eleventy, gatsby, hugo, nextjs, nuxt, remix, sveltekit, vite, vuecli,
-  fastapi, flask,
-  fastify, elysia, hono, koa, h3, express,
-  nitro, blitz, redwood, qwik, solidstart, marko, preact,
+  // Java
+  quarkus, spring,
+  // Compiled languages
+  rust,
+  // .NET
+  blazor, dotnet,
+  // Elixir
+  phoenix,
+  // Ruby
+  rails, sinatra,
+  // PHP (Symfony before generic)
+  symfony, php,
+  // Deno (Fresh before generic)
+  denoFresh, deno,
+  // Python
+  fastapi, flask, django,
+  // Bun (elysia first, then bun-native)
+  elysia, bunNative,
+  // Modern React meta-frameworks
+  tanstackStart, analog,
+  // Full-Stack meta-frameworks
+  nextjs, sveltekit, nuxt, astro, remix, blitz, redwood, solidstart,
+  // Svelte standalone (after sveltekit)
+  svelte,
+  // Emerging / Component frameworks
+  qwik, nitro, marko, preact,
+  // Bundler-based frontends
+  gatsby, cra, vite, angular, vuecli,
+  // Static Site Generators
+  hugo, eleventy,
+  // Go backends
+  gin, fiber, echoGo,
+  // Node.js backends
+  fastify, hono, koa, h3, express,
+  // Full-stack Node catch-all
+  mern,
+  // Static HTML/CSS/JS
   staticAssets
 ];
 
@@ -164,6 +234,15 @@ const parseEnvFile = (workDir) => {
   return env;
 };
 
+const resolvePortPlaceholder = (args, port) => {
+  return args.map(arg => {
+    if (typeof arg === 'string') {
+      return arg.replace(/\$\{PORT(?::-?\d+)?\}/g, String(port));
+    }
+    return arg;
+  });
+};
+
 /**
  * Helper to run the preview process on the local host.
  */
@@ -180,7 +259,8 @@ const spawnHostPreview = async (jobId, deploymentId, workDir, framework, port) =
     ...extraEnv,
   };
 
-  let finalArgs = args.map(a => (a === '0' ? `0.0.0.0:${port}` : a));
+  let finalArgs = resolvePortPlaceholder(args, port);
+  finalArgs = finalArgs.map(a => (a === '0' ? `0.0.0.0:${port}` : a));
 
   // On Windows host, normalize Unix-style relative paths and classpath separators
   let hostCmd = cmd;
@@ -255,6 +335,23 @@ const spawnHostPreview = async (jobId, deploymentId, workDir, framework, port) =
 };
 
 /**
+ * Helper to ensure a Docker image exists locally by pulling it if missing.
+ */
+const ensureDockerImage = async (activeDocker, imageName, deploymentId, jobId) => {
+  try {
+    const image = activeDocker.getImage(imageName);
+    await image.inspect();
+    await logPreview(deploymentId, jobId, `[PREVIEW] Using local cached image: ${imageName}`);
+  } catch (_) {
+    await logPreview(deploymentId, jobId, `[PREVIEW] Pulling image from registry: ${imageName}...`);
+    await new Promise((resolve, reject) => activeDocker.pull(imageName, (err, stream) => {
+      if (err) return reject(err);
+      activeDocker.modem.followProgress(stream, resolve);
+    }));
+  }
+};
+
+/**
  * Spawns the compiled app on the given port (using container mode if Docker is available, or host mode as fallback).
  */
 const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
@@ -269,6 +366,7 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
     const detection = detectFramework(workDir);
     const containerName = `devops-preview-${jobId}`;
     const { cmd, args } = await getPreviewCommand(framework, workDir);
+    const finalArgs = resolvePortPlaceholder(args, port);
 
     // Pre-emptively stop and remove any conflicting preview container of the same name.
     // Wrap in try/catch to make it completely crash-safe (prevents unhandled modem 404s)
@@ -284,15 +382,62 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
     await logPreview(deploymentId, jobId, `[PREVIEW] Spawning live preview in isolated container: ${containerName}`);
     await logPreview(deploymentId, jobId, `[PREVIEW] Image: ${previewImage}`);
 
+    try {
+      await ensureDockerImage(activeDocker, previewImage, deploymentId, jobId);
+    } catch (pullErr) {
+      await logPreview(deploymentId, jobId, `[PREVIEW] [WARNING] Failed to pull preview image: ${pullErr.message}. Trying container start anyway...`);
+    }
+
+    // Detect MERN monorepo patterns:
+    // Case A: client/ is inside workDir (e.g. workDir has both client/ and server/ or just client/)
+    // Case B: client/ is a sibling of workDir (workDir IS the server/, client/ is next to it)
+    const clientDir = path.join(workDir, 'client');
+    const clientDirSibling = path.join(workDir, '..', 'client');
+    const hasClientDir = fs.existsSync(path.join(clientDir, 'package.json'));
+    const hasClientSibling = !hasClientDir && fs.existsSync(path.join(clientDirSibling, 'package.json'));
+
+    // When client is a SIBLING, we must mount the PARENT directory so both
+    // client/ and server/ are accessible inside the container.
+    // Otherwise Docker only sees the server/ directory at /workspace.
+    let containerBind = `${path.resolve(workDir)}:/workspace`;
+    let containerWorkDir = '/workspace';
+    let absClientPath = null;
+    let absServerPath = '/workspace';
+
+    if (hasClientSibling) {
+      // Mount parent dir at /project so /project/client and /project/server both exist
+      const parentDir = path.resolve(workDir, '..');
+      containerBind = `${parentDir}:/project`;
+      const serverDirName = path.basename(workDir); // e.g. "server"
+      absClientPath = '/project/client';
+      absServerPath = `/project/${serverDirName}`;
+      containerWorkDir = absServerPath;
+      await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo (sibling layout). Mounting parent at /project.`);
+    } else if (hasClientDir) {
+      absClientPath = '/workspace/client';
+    }
+
+    // Build the startup command, chaining client build first if needed
+    let containerCmd = [cmd, ...finalArgs];
+    if (absClientPath && (framework === 'mern' || framework === 'express')) {
+      const serverStartCmd = [cmd, ...finalArgs].join(' ');
+      containerCmd = [
+        'sh', '-c',
+        `cd ${absClientPath} && npm install --prefer-offline --no-audit --no-fund --ignore-scripts --include=dev && npm run build && cd ${absServerPath} && ${serverStartCmd}`
+      ];
+      await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo. Will build React client at ${absClientPath} before starting server at ${absServerPath}.`);
+    }
+
     activeDocker.createContainer({
       Image: previewImage,
-      Cmd: [cmd, ...args],
+      Cmd: containerCmd,
       name: containerName,
       HostConfig: {
-        Binds: [bind],
+        Binds: [containerBind],
         PortBindings: {
           [`${port}/tcp`]: [{ HostPort: String(port) }]
-        }
+        },
+        ExtraHosts: ['host.docker.internal:host-gateway']
       },
       ExposedPorts: {
         [`${port}/tcp`]: {}
@@ -304,14 +449,23 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
           `SERVER_PORT=${port}`,
           `NODE_ENV=production`
         ];
+        const FRONTEND_URL_VARS = new Set([
+          'FRONTEND_URL', 'CLIENT_URL', 'APP_URL', 'CORS_ORIGIN', 'ALLOWED_ORIGIN',
+          'REACT_APP_URL', 'VUE_APP_URL', 'NEXT_PUBLIC_URL', 'VITE_APP_URL',
+          'FRONTEND_BASE_URL', 'CLIENT_BASE_URL', 'WEB_URL', 'WEBAPP_URL',
+        ]);
         for (const [key, value] of Object.entries(envFileVars)) {
           if (key !== 'PORT' && key !== 'SERVER_PORT' && key !== 'NODE_ENV') {
-            containerEnv.push(`${key}=${value}`);
+            let val = value;
+            if (!FRONTEND_URL_VARS.has(key) && typeof val === 'string') {
+              val = val.replace(/^(https?:\/\/|mongodb(?:\+srv)?:\/\/|postgres(?:ql)?:\/\/|mysql:\/\/|redis:\/\/)(?:localhost|127\.0\.0\.1)(:\d+)?(.*)?$/i, '$1host.docker.internal$2$3');
+            }
+            containerEnv.push(`${key}=${val}`);
           }
         }
         return containerEnv;
       })(),
-      WorkingDir: '/workspace'
+      WorkingDir: containerWorkDir
     }, async (err, container) => {
       if (err) {
         await logPreview(deploymentId, jobId, `[PREVIEW] Failed to create preview container: ${err.message}. Falling back to host mode.`);
@@ -374,9 +528,34 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
             const io = getIO();
             io.to(`pipeline:${jobId}`).emit('preview:stopped', { jobId });
           } catch (_) {}
-          
-          // Do not delete container entirely on exit so it stays in stopped mode.
-          // This allows users to start/stop the same container repeatedly without recreating conflicts.
+
+          // Run log diagnostics on container exit
+          try {
+            const logsBuffer = await container.logs({ stdout: true, stderr: true, tail: 100 });
+            // Demux docker logs multiplexed format
+            let logsText = '';
+            let offset = 0;
+            while (offset < logsBuffer.length) {
+              if (offset + 8 > logsBuffer.length) break;
+              const size = logsBuffer.readUInt32BE(offset + 4);
+              if (offset + 8 + size > logsBuffer.length) break;
+              logsText += logsBuffer.toString('utf8', offset + 8, offset + 8 + size);
+              offset += 8 + size;
+            }
+            if (!logsText) logsText = logsBuffer.toString('utf8');
+
+            const diagnoses = analyzeLogsAndDiagnose(logsText);
+            if (diagnoses.length > 0) {
+              await logPreview(deploymentId, jobId, `\n[DIAGNOSTICS] DevOps Smart Diagnosis Engine identified potential issues:`);
+              for (const d of diagnoses) {
+                await logPreview(deploymentId, jobId, `  ↪ ❌ ${d.error}:`);
+                await logPreview(deploymentId, jobId, `    👉 Solution: ${d.solution}`);
+              }
+              await logPreview(deploymentId, jobId, `\n`);
+            }
+          } catch (logErr) {
+            console.error('Failed to parse container exit logs for diagnostics:', logErr);
+          }
         });
       });
     });

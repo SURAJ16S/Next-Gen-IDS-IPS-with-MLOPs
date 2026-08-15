@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
 const Deployment = require('../models/Deployment');
+const FixtureReview = require('../models/FixtureReview');
 const upload = require('../middleware/upload.middleware');
 const { runPipeline } = require('../services/pipeline-runner.service');
 const { suggestPort, stopPreview, getRunningPreviews } = require('../services/process-manager.service');
@@ -11,7 +12,7 @@ const { suggestPort, stopPreview, getRunningPreviews } = require('../services/pr
 
 const getDeployments = async (req, res) => {
   try {
-    const deployments = await Deployment.find().sort({ createdAt: -1 });
+    const deployments = await Deployment.find({}, '-envFiles.content').sort({ createdAt: -1 });
     res.json(deployments);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -69,6 +70,7 @@ const uploadZip = (req, res) => {
       }
 
       const targetSubfolder = req.body.targetSubfolder || '';
+      const upgradeMode = req.body.upgradeMode || 'automatic';
 
       // Create deployment record in MongoDB
       const deployment = await Deployment.create({
@@ -81,10 +83,11 @@ const uploadZip = (req, res) => {
         previewStatus: 'none',
         envFiles,
         targetSubfolder,
+        upgradeMode,
       });
 
       // Run pipeline in background
-      runPipeline(jobId, deployment._id, req.file.path, previewPort, envFiles, targetSubfolder);
+      runPipeline(jobId, deployment._id, req.file.path, previewPort, envFiles, targetSubfolder, upgradeMode);
 
       res.status(202).json({
         message: 'Deployment upload accepted. Pipeline started.',
@@ -107,12 +110,15 @@ const getDeploymentStatus = async (req, res) => {
       id: deployment._id,
       projectName: deployment.projectName,
       techStackDetected: deployment.techStackDetected,
+      architectureDetected: deployment.architectureDetected,
       status: deployment.status,
       vulnerabilitiesFound: deployment.vulnerabilitiesFound,
       buildLogs: deployment.buildLogs,
       scanReport: deployment.scanReport,
       previewPort: deployment.previewPort,
       previewStatus: deployment.previewStatus,
+      recommendedUpgrades: deployment.recommendedUpgrades || [],
+      upgradeMode: deployment.upgradeMode || 'automatic',
       createdAt: deployment.createdAt,
     });
   } catch (error) {
@@ -279,6 +285,7 @@ const deleteDeployment = async (req, res) => {
 };
 
 const FIXTURES_LIST = [
+  { id: 'microservices', name: 'Microservices Monorepo (Node.js)', type: 'Backend', description: 'API Gateway (Express), Auth Service (Koa), and Threat Service (Hono) running concurrently in a monorepo workspace.' },
   { id: 'express', name: 'Express.js (Node.js)', type: 'Backend', description: 'Structured REST API with mock users/threat database and a beautiful dark status console.' },
   { id: 'fastify', name: 'Fastify (Node.js)', type: 'Backend', description: 'Cyan-themed, high-performance mock API service with memory/CPU health metrics.' },
   { id: 'elysia', name: 'Elysia (Bun/Node)', type: 'Backend', description: 'Elysia web-standards application with Bun-native runtime & live duration statistics.' },
@@ -287,6 +294,45 @@ const FIXTURES_LIST = [
   { id: 'fastapi', name: 'FastAPI (Python)', type: 'Backend', description: 'FastAPI async microservice featuring uvicorn serving and venv persistence caching.' },
   { id: 'flask', name: 'Flask (Python)', type: 'Backend', description: 'Classic Python Flask web microservice template with wsgi environment parameters.' },
   { id: 'koa', name: 'Koa (Node.js)', type: 'Backend', description: 'Next-generation Koa middleware server with standard async/await routing.' },
+  { id: 'django', name: 'Django (Python)', type: 'Backend', description: 'High performance Django application with SQLite database and customized admin views.' },
+  { id: 'mern', name: 'MERN / Node.js Express', type: 'Backend', description: 'Full-featured Node.js and Express.js REST application.' },
+  { id: 'rust', name: 'Rust (Axum)', type: 'Backend', description: 'Lightning-fast backend built in Rust using Tokio and Axum frameworks.' },
+  { id: 'spring', name: 'Spring Boot (Java)', type: 'Backend', description: 'Enterprise-grade Java/Kotlin Spring Boot microservice with web starter.' },
+  { id: 'php', name: 'PHP (Laravel Framework)', type: 'Backend', description: 'Structured Laravel application mocking Artisan commands, PDO database connectivity checks, and web router dashboard views.' },
+  
+  // Go Ecosystem
+  { id: 'gin', name: 'Go (Gin)', type: 'Backend', description: 'High-performance HTTP API routing template built with Gin in Go.' },
+  { id: 'fiber', name: 'Go (Fiber)', type: 'Backend', description: 'Express-inspired web framework for Go optimized for high throughput.' },
+  { id: 'echo-go', name: 'Go (Echo)', type: 'Backend', description: 'Minimalist and extensible REST API template in Go.' },
+  
+  // Ruby Ecosystem
+  { id: 'rails', name: 'Ruby on Rails', type: 'Backend', description: 'Full-stack Ruby MVC web framework with active-record emulation.' },
+  { id: 'sinatra', name: 'Ruby (Sinatra)', type: 'Backend', description: 'Classically simple lightweight Ruby web API application.' },
+  
+  // .NET Ecosystem
+  { id: 'dotnet', name: 'ASP.NET Core (.NET)', type: 'Backend', description: 'Enterprise C# Minimal API template with dynamic compilation.' },
+  { id: 'blazor', name: 'Blazor WebAssembly', type: 'Backend', description: 'Interactive web UI template running C# in the client.' },
+  
+  // Elixir Ecosystem
+  { id: 'phoenix', name: 'Elixir (Phoenix)', type: 'Backend', description: 'Real-time Elixir MVC framework showcasing extreme concurrency.' },
+  
+  // Deno Ecosystem
+  { id: 'deno-fresh', name: 'Deno (Fresh)', type: 'Backend', description: 'Full-stack SSR web framework built specifically for Deno.' },
+  { id: 'deno', name: 'Deno (Generic)', type: 'Backend', description: 'Modern TypeScript server runtime demonstrating native HTTP services.' },
+  
+  // PHP Ecosystem
+  { id: 'symfony', name: 'Symfony (PHP)', type: 'Backend', description: 'Structured PHP web application with bundles and console component.' },
+  
+  // Java Ecosystem
+  { id: 'quarkus', name: 'Quarkus (Java)', type: 'Backend', description: 'Supersonic Subatomic Java framework optimized for containerized microservices.' },
+  
+  // Bun Ecosystem
+  { id: 'bun-native', name: 'Bun (Native HTTP)', type: 'Backend', description: 'Bun native serve HTTP router with no external JS dependencies.' },
+  
+  // Emerging
+  { id: 'tanstack-start', name: 'TanStack Start', type: 'Emerging', description: 'Modern React full-stack meta-framework with file-based routing.' },
+  { id: 'analog', name: 'Analog (Angular SSR)', type: 'Emerging', description: 'Angular meta-framework built on Vite with SSR and file routing.' },
+  { id: 'svelte', name: 'Svelte (Standalone)', type: 'Emerging', description: 'Compiler-based modern frontend template built on Vite.' },
   { id: 'nitro', name: 'Nitro (Nuxt Engine)', type: 'Emerging', description: 'Nuxt engine standalone web server showcasing fast universal outputs.' },
   { id: 'blitz', name: 'Blitz.js', type: 'Emerging', description: 'React-based fullstack application template utilizing Blitz and Next.js layers.' },
   { id: 'redwood', name: 'RedwoodJS', type: 'Emerging', description: 'Yarn-based fullstack multi-workspace workspace simulation.' },
@@ -294,11 +340,7 @@ const FIXTURES_LIST = [
   { id: 'solidstart', name: 'SolidStart', type: 'Emerging', description: 'SolidJS server-side rendering meta-framework template.' },
   { id: 'marko', name: 'Marko', type: 'Emerging', description: 'Streaming HTML component-driven framework template.' },
   { id: 'preact', name: 'Preact', type: 'Emerging', description: 'Preact client-side SPA demo serving custom static bundles.' },
-  { id: 'static', name: 'Static Assets', type: 'Emerging', description: 'Tailwind/glassmorphic responsive static HTML/CSS template.' },
-  { id: 'django', name: 'Django (Python)', type: 'Backend', description: 'High performance Django application with SQLite database and customized admin views.' },
-  { id: 'mern', name: 'MERN / Node.js Express', type: 'Backend', description: 'Full-featured Node.js and Express.js REST application.' },
-  { id: 'rust', name: 'Rust (Axum)', type: 'Backend', description: 'Lightning-fast backend built in Rust using Tokio and Axum frameworks.' },
-  { id: 'spring', name: 'Spring Boot (Java)', type: 'Backend', description: 'Enterprise-grade Java/Kotlin Spring Boot microservice with web starter.' }
+  { id: 'static', name: 'Static Assets', type: 'Emerging', description: 'Tailwind/glassmorphic responsive static HTML/CSS template.' }
 ];
 
 const listFixtures = (req, res) => {
@@ -430,13 +472,49 @@ const downloadPdfReport = async (req, res) => {
     const range = doc.bufferedPageRange();
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
-      doc.fillColor('#94a3b8').fontSize(9).font('Helvetica').text(`Page ${i + 1} of ${range.count}`, 50, 750, { align: 'center' });
+      const oldBottomMargin = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
+      doc.fillColor('#94a3b8').fontSize(9).font('Helvetica').text(`Page ${i + 1} of ${range.count}`, 50, 760, { align: 'center' });
+      doc.page.margins.bottom = oldBottomMargin;
     }
 
     doc.end();
   } catch (error) {
     console.error('Error generating PDF Report:', error);
     res.status(500).json({ message: 'Error generating security PDF report.' });
+  }
+};
+
+const getFixtureReviews = async (req, res) => {
+  try {
+    const { frameworkId } = req.params;
+    const reviews = await FixtureReview.find({ frameworkId }).sort({ createdAt: -1 });
+    res.json(reviews);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const createFixtureReview = async (req, res) => {
+  try {
+    const { frameworkId } = req.params;
+    const { reviewerName, status, rating, comment } = req.body;
+    
+    if (!reviewerName || !status || !rating) {
+      return res.status(400).json({ message: 'reviewerName, status, and rating are required.' });
+    }
+
+    const review = await FixtureReview.create({
+      frameworkId,
+      reviewerName,
+      status,
+      rating,
+      comment
+    });
+
+    res.status(201).json(review);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
@@ -455,4 +533,6 @@ module.exports = {
   listFixtures,
   generateFixture,
   downloadPdfReport,
+  getFixtureReviews,
+  createFixtureReview,
 };

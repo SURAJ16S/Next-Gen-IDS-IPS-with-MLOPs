@@ -14,7 +14,7 @@ import {
 import { io } from 'socket.io-client';
 import {
   Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu,
-  Plus, Trash2, ExternalLink, Square, FileText, Globe,
+  Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff
 } from 'lucide-react';
 
 // ─── Small UI helpers ─────────────────────────────────────────────────────────
@@ -44,6 +44,159 @@ const sectionStyle = {
   gap: '6px',
 };
 
+// ─── Pipeline stages config & parsing helper ──────────────────────────────────
+const PIPELINE_STAGES = [
+  { id: 'extract', label: '📦 Extract & Clean' },
+  { id: 'techDetect', label: '🔍 Tech Detection' },
+  { id: 'install', label: '⚙️ Resolve Deps' },
+  { id: 'sast', label: '🛡️ SAST Security' },
+  { id: 'osv', label: '🔬 Supply Chain Scan' },
+  { id: 'trivy', label: '🐳 Container Sec' },
+  { id: 'package', label: '📦 Package Build' },
+  { id: 'preview', label: '🚀 Deploy Sandbox' },
+];
+
+const computeStagesFromLogs = (logs, currentStatus) => {
+  const statuses = {
+    extract: 'pending',
+    techDetect: 'pending',
+    install: 'pending',
+    sast: 'pending',
+    osv: 'pending',
+    trivy: 'pending',
+    package: 'pending',
+    preview: 'pending',
+  };
+
+  if (!currentStatus) return statuses;
+
+  if (!logs || logs.length === 0) {
+    if (['building', 'pending', 'scanning'].includes(currentStatus)) {
+      statuses.extract = 'running';
+    }
+    return statuses;
+  }
+
+  let hasSetupStarted = false;
+  let hasExtractDone = false;
+  let hasTechDone = false;
+  let hasAuditDone = false;
+  let hasSastStarted = false;
+  let hasSastDone = false;
+  let hasOsvStarted = false;
+  let hasOsvDone = false;
+  let hasTrivyStarted = false;
+  let hasTrivyDone = false;
+  let hasPackStarted = false;
+  let hasPackDone = false;
+  let hasPreviewStarted = false;
+  let hasPreviewDone = false;
+
+  for (const log of logs) {
+    const uppercaseLog = log.toUpperCase();
+    
+    if (uppercaseLog.includes('INITIALIZING DEVOPS PIPELINE') || uppercaseLog.includes('EXTRACTING SOURCE')) {
+      hasSetupStarted = true;
+    }
+    if (uppercaseLog.includes('ZIP EXTRACTION COMPLETED') || uppercaseLog.includes('EXTRACTION COMPLETED')) {
+      hasExtractDone = true;
+    }
+    if (uppercaseLog.includes('DETECTED TECH STACK') || uppercaseLog.includes('DETECTED ARCHITECTURE')) {
+      hasTechDone = true;
+    }
+    if (uppercaseLog.includes('AUDITING PACKAGE DEPENDENCIES') || uppercaseLog.includes('DEPENDENCY-AUDIT') || uppercaseLog.includes('RESOLVING DEPENDENCIES')) {
+      hasAuditDone = true;
+    }
+    if (uppercaseLog.includes('STARTING STEP: SEMGREP') || uppercaseLog.includes('RUNNING SEMGREP') || uppercaseLog.includes('SEMGREP-SAST')) {
+      hasSastStarted = true;
+      hasAuditDone = true;
+    }
+    if (uppercaseLog.includes('STEP COMPLETED: SEMGREP') || uppercaseLog.includes('SEMGREP SAST: PASSED') || uppercaseLog.includes('ALERT(S) FOUND')) {
+      hasSastDone = true;
+    }
+    if (uppercaseLog.includes('STARTING STEP: OSV') || uppercaseLog.includes('RUNNING OSV') || uppercaseLog.includes('OSV-SCAN')) {
+      hasOsvStarted = true;
+      hasSastDone = true;
+    }
+    if (uppercaseLog.includes('STEP COMPLETED: OSV') || uppercaseLog.includes('OSV COMPLETED') || uppercaseLog.includes('OSV-SCANNER: PASSED') || uppercaseLog.includes('DEPENDENCY SCAN:')) {
+      hasOsvDone = true;
+    }
+    if (uppercaseLog.includes('STARTING STEP: TRIVY') || uppercaseLog.includes('RUNNING TRIVY') || uppercaseLog.includes('TRIVY-SEC-SCAN')) {
+      hasTrivyStarted = true;
+      hasOsvDone = true;
+    }
+    if (uppercaseLog.includes('STEP COMPLETED: TRIVY') || uppercaseLog.includes('TRIVY COMPLETED') || uppercaseLog.includes('TRIVY SCAN: PASSED') || uppercaseLog.includes('TRIVY:')) {
+      hasTrivyDone = true;
+    }
+    if (uppercaseLog.includes('PACKAGING BUILD ARTIFACT')) {
+      hasPackStarted = true;
+      hasTrivyDone = true;
+    }
+    if (uppercaseLog.includes('ARTIFACT READY AT') || uppercaseLog.includes('PIPELINE COMPLETED SUCCESSFULLY') || uppercaseLog.includes('BUILD PIPELINE COMPLETED')) {
+      hasPackDone = true;
+    }
+    if (uppercaseLog.includes('LAUNCHING LIVE PREVIEW') || uppercaseLog.includes('SPAWNING LIVE PREVIEW') || uppercaseLog.includes('[PREVIEW]')) {
+      hasPreviewStarted = true;
+      hasPackDone = true;
+    }
+    if (uppercaseLog.includes('LIVE APP READY') || uppercaseLog.includes('SERVER RUNNING ON PORT') || uppercaseLog.includes('LIVE PREVIEW PROCESS READY') || uppercaseLog.includes('SERVER RUNNING')) {
+      hasPreviewDone = true;
+    }
+  }
+
+  // Derive statuses
+  if (hasExtractDone) statuses.extract = 'done';
+  else if (hasSetupStarted || ['building', 'scanning'].includes(currentStatus)) statuses.extract = 'running';
+
+  if (hasTechDone) statuses.techDetect = 'done';
+  else if (statuses.extract === 'done') statuses.techDetect = 'running';
+
+  if (hasSastStarted || hasOsvStarted || hasTrivyStarted || hasPackStarted) statuses.install = 'done';
+  else if (hasTechDone || hasAuditDone) statuses.install = 'running';
+
+  if (hasSastDone) statuses.sast = 'done';
+  else if (hasSastStarted) statuses.sast = 'running';
+  else if (statuses.install === 'done') statuses.sast = 'running';
+
+  if (hasOsvDone) statuses.osv = 'done';
+  else if (hasOsvStarted) statuses.osv = 'running';
+  else if (statuses.sast === 'done') statuses.osv = 'running';
+
+  if (hasTrivyDone) statuses.trivy = 'done';
+  else if (hasTrivyStarted) statuses.trivy = 'running';
+  else if (statuses.osv === 'done') statuses.trivy = 'running';
+
+  if (hasPackDone) statuses.package = 'done';
+  else if (hasPackStarted) statuses.package = 'running';
+  else if (statuses.trivy === 'done') statuses.package = 'running';
+
+  if (currentStatus === 'deployed' || hasPreviewDone) statuses.preview = 'done';
+  else if (hasPreviewStarted || statuses.package === 'done') statuses.preview = 'running';
+
+  // Override stages on failure
+  if (currentStatus === 'failed') {
+    const order = ['extract', 'techDetect', 'install', 'sast', 'osv', 'trivy', 'package', 'preview'];
+    let foundActive = false;
+    for (const key of order) {
+      if (statuses[key] === 'running') {
+        statuses[key] = 'failed';
+        foundActive = true;
+        break;
+      }
+    }
+    if (!foundActive) {
+      for (const key of order) {
+        if (statuses[key] === 'pending') {
+          statuses[key] = 'failed';
+          break;
+        }
+      }
+    }
+  }
+
+  return statuses;
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 function DevOps() {
@@ -61,6 +214,43 @@ function DevOps() {
   const [previewPort, setPreviewPort] = useState('');
   const [portLoading, setPortLoading] = useState(false);
 
+  // Drag & drop upload state
+  const [isDragActive, setIsDragActive] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setIsDragActive(true);
+    } else if (e.type === "dragleave") {
+      setIsDragActive(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const file = e.dataTransfer.files[0];
+      if (file.name.toLowerCase().endsWith('.zip')) {
+        setSelectedFile(file);
+        if (!projectName) {
+          setProjectName(file.name.substring(0, file.name.lastIndexOf('.')) || file.name);
+        }
+      } else {
+        alert('Please drop a valid .zip file.');
+      }
+    }
+  };
+
+  const triggerFileInput = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  };
+
   // Target subfolder (e.g. backend)
   const [targetSubfolder, setTargetSubfolder] = useState('');
 
@@ -72,6 +262,7 @@ function DevOps() {
   const [activeDeploymentId, setActiveDeploymentId] = useState(null);
   const [activeJobStatus, setActiveJobStatus] = useState(null);
   const [activeJobTech, setActiveJobTech] = useState('');
+  const [activeJobArch, setActiveJobArch] = useState('');
   const [activeJobVulns, setActiveJobVulns] = useState(0);
   const [activeJobLogs, setActiveJobLogs] = useState([]);
   const [activeJobArtifactUrl, setActiveJobArtifactUrl] = useState(null);
@@ -83,7 +274,19 @@ function DevOps() {
   const [stoppingPreview, setStoppingPreview] = useState(false);
 
   const logsEndRef = useRef(null);
+  const consoleContainerRef = useRef(null);
   const socketRef = useRef(null);
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const [showEnvContent, setShowEnvContent] = useState({});
+  const [activeJobUpgrades, setActiveJobUpgrades] = useState([]);
+
+  // Interactive dependency upgrades states
+  const [upgradeMode, setUpgradeMode] = useState('automatic');
+  const [showInteractiveModal, setShowInteractiveModal] = useState(false);
+  const [interactiveUpgrades, setInteractiveUpgrades] = useState([]);
+  const [selectedUpgrades, setSelectedUpgrades] = useState([]);
+  const [countdownTime, setCountdownTime] = useState(10);
+  const [interactiveJobId, setInteractiveJobId] = useState(null);
 
   // ── Fetch deployments ──────────────────────────────────────────────────────
   const fetchDeployments = async () => {
@@ -112,22 +315,52 @@ function DevOps() {
 
   // ── WebSocket setup ────────────────────────────────────────────────────────
   useEffect(() => {
-    fetchDeployments();
-    fetchSuggestedPort();
+    const socket = io('http://localhost:5000');
+    socketRef.current = socket;
 
-    socketRef.current = io('http://localhost:5000');
+    const init = async () => {
+      await fetchSuggestedPort();
+      
+      // Fetch deployments to check if there is an active running job
+      try {
+        const res = await getDeployments();
+        const list = res.data;
+        setDeployments(list);
+        
+        const active = list.find(d => ['pending', 'building', 'scanning'].includes(d.status));
+        if (active) {
+          setActiveDeploymentId(active._id);
+          setActiveJobId(active.jobId);
+          setActiveJobStatus(active.status);
+          setActiveJobVulns(active.vulnerabilitiesFound || 0);
+          setActiveJobTech(active.techStackDetected || '');
+          setActiveJobArch(active.architectureDetected || '');
+          setActiveJobLogs(active.buildLogs || []);
+          setActiveJobUpgrades(active.recommendedUpgrades || []);
+          
+          socket.emit('subscribe:pipeline', { jobId: active.jobId });
+        }
+      } catch (err) {
+        setError('Failed to load deployments.');
+      } finally {
+        setLoading(false);
+      }
+    };
+    init();
 
-    socketRef.current.on('pipeline:log', (data) => {
+    socket.on('pipeline:log', (data) => {
       setActiveJobLogs((prev) => [...prev, data.log]);
-      // Detect framework from log line
       const match = data.log.match(/Detected Tech Stack \/ Framework: (\S+)/i);
       if (match) setActiveJobTech(match[1]);
+      const archMatch = data.log.match(/Detected Architecture: (\S+)/i);
+      if (archMatch) setActiveJobArch(archMatch[1]);
     });
 
-    socketRef.current.on('pipeline:complete', (data) => {
+    socket.on('pipeline:complete', (data) => {
       setActiveJobStatus(data.status);
       setActiveJobVulns(data.vulnerabilitiesFound);
       setActiveJobArtifactUrl(data.artifactUrl);
+      setActiveJobUpgrades(data.recommendedUpgrades || []);
       setUploading(false);
       fetchDeployments();
       if (data.status === 'deployed' && data.isGuiApp) {
@@ -135,7 +368,7 @@ function DevOps() {
       }
     });
 
-    socketRef.current.on('preview:ready', (data) => {
+    socket.on('preview:ready', (data) => {
       setPreviewReady(true);
       setPreviewRunning(true);
       setPreviewUrl(data.url);
@@ -145,20 +378,56 @@ function DevOps() {
       ]);
     });
 
-    socketRef.current.on('preview:stopped', () => {
+    socket.on('preview:stopped', () => {
       setPreviewRunning(false);
       setPreviewReady(false);
     });
 
+    socket.on('pipeline:interactive-upgrades', (data) => {
+      console.log('[Socket] Interactive upgrades required for job:', data.jobId);
+      setInteractiveJobId(data.jobId);
+      setInteractiveUpgrades(data.upgrades || []);
+      setSelectedUpgrades(data.upgrades || []);
+      setCountdownTime(10);
+      setShowInteractiveModal(true);
+    });
+
     return () => {
-      if (socketRef.current) socketRef.current.disconnect();
+      socket.disconnect();
     };
   }, []);
 
-  // ── Autoscroll logs ────────────────────────────────────────────────────────
+  // Countdown timer for interactive dependency upgrade choices
   useEffect(() => {
-    if (logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (!showInteractiveModal || countdownTime <= 0) {
+      if (showInteractiveModal && countdownTime === 0) {
+        handleApplyUpgrades(interactiveUpgrades);
+      }
+      return;
+    }
+    const timer = setInterval(() => {
+      setCountdownTime(prev => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [showInteractiveModal, countdownTime, interactiveUpgrades]);
+
+  const handleApplyUpgrades = (chosenUpgrades) => {
+    if (socketRef.current && interactiveJobId) {
+      socketRef.current.emit('pipeline:submit-upgrades', {
+        jobId: interactiveJobId,
+        selectedUpgrades: chosenUpgrades
+      });
+    }
+    setShowInteractiveModal(false);
+    setInteractiveJobId(null);
+    setInteractiveUpgrades([]);
+  };
+
+  // ── Autoscroll logs container only ──────────────────────────────────────────
+  useEffect(() => {
+    if (consoleContainerRef.current) {
+      const container = consoleContainerRef.current;
+      container.scrollTop = container.scrollHeight;
     }
   }, [activeJobLogs]);
 
@@ -182,6 +451,22 @@ function DevOps() {
   const updateEnvRow = (idx, field, value) =>
     setEnvFiles((prev) => prev.map((row, i) => (i === idx ? { ...row, [field]: value } : row)));
 
+  // ── History details selector ──────────────────────────────────────────────
+  const handleSelectDeployment = (d) => {
+    setActiveDeploymentId(d._id);
+    setActiveJobId(d.jobId);
+    setActiveJobStatus(d.status);
+    setActiveJobVulns(d.vulnerabilitiesFound || 0);
+    setActiveJobTech(d.techStackDetected || '');
+    setActiveJobArch(d.architectureDetected || '');
+    setActiveJobLogs(d.buildLogs || []);
+    setActiveJobUpgrades(d.recommendedUpgrades || []);
+    setPreviewPort(d.previewPort || '');
+    setPreviewUrl(d.previewPort ? `http://localhost:${d.previewPort}` : '');
+    setPreviewRunning(d.previewStatus === 'running');
+    setPreviewReady(d.previewStatus === 'running');
+  };
+
   // ── Upload submit ──────────────────────────────────────────────────────────
   const handleUploadSubmit = async (e) => {
     e.preventDefault();
@@ -197,6 +482,7 @@ function DevOps() {
     setActiveJobStatus('building');
     setActiveJobVulns(0);
     setActiveJobTech('');
+    setActiveJobUpgrades([]);
     setPreviewReady(false);
     setPreviewRunning(false);
     setPreviewUrl('');
@@ -213,6 +499,7 @@ function DevOps() {
     formData.append('previewPort', previewPort || '3001');
     formData.append('envFiles', JSON.stringify(filteredEnvFiles));
     formData.append('targetSubfolder', targetSubfolder);
+    formData.append('upgradeMode', upgradeMode);
 
     try {
       const res = await uploadDeploymentZip(formData);
@@ -334,6 +621,8 @@ function DevOps() {
   if (loading) return <p style={{ color: 'var(--text-secondary)' }}>Loading deployments...</p>;
   if (error) return <p style={{ color: 'var(--sev-critical)' }}>{error}</p>;
 
+  const currentStages = computeStagesFromLogs(activeJobLogs, activeJobStatus);
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -345,7 +634,7 @@ function DevOps() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', alignItems: 'start' }}>
 
         {/* ── Upload Card ──────────────────────────────────────────────── */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px', height: '620px', overflowY: 'auto', paddingRight: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <Upload size={20} style={{ color: 'var(--accent-blue)' }} />
             <h2 style={{ fontSize: '15px' }}>Upload & Configure Project</h2>
@@ -385,16 +674,46 @@ function DevOps() {
               </div>
             </div>
 
-            {/* ZIP file */}
+            {/* ZIP file Drag & Drop Upload Zone */}
             <div style={sectionStyle}>
               <label style={labelStyle}>ZIP Package</label>
-              <input
-                type="file"
-                accept=".zip"
-                onChange={handleFileChange}
-                required
-                style={{ ...inputStyle, cursor: 'pointer' }}
-              />
+              <div 
+                className={`upload-zone ${isDragActive ? 'active' : ''}`}
+                onDragEnter={handleDrag}
+                onDragOver={handleDrag}
+                onDragLeave={handleDrag}
+                onDrop={handleDrop}
+                onClick={triggerFileInput}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".zip"
+                  onChange={handleFileChange}
+                  style={{ display: 'none' }}
+                  required={!selectedFile}
+                />
+                <Upload size={28} style={{ color: selectedFile ? 'var(--accent-emerald)' : 'var(--text-muted)', marginBottom: '4px' }} />
+                {selectedFile ? (
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)' }}>
+                      {selectedFile.name}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                      {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)' }}>
+                      Drag and drop your project ZIP here
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                      or click to browse local files (max size 100MB)
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Build subdirectory path (Vercel/Railway logic) */}
@@ -459,6 +778,24 @@ function DevOps() {
                       onChange={(e) => updateEnvRow(idx, 'path', e.target.value)}
                       style={{ ...inputStyle, fontFamily: 'var(--font-mono)', fontSize: '12px' }}
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowEnvContent(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                      title={showEnvContent[idx] ? "Mask secrets" : "Show secrets"}
+                      style={{
+                        background: 'rgba(255,255,255,0.05)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 'var(--radius-sm)',
+                        color: 'var(--text-muted)',
+                        padding: '8px',
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                      }}
+                    >
+                      {showEnvContent[idx] ? <EyeOff size={13} /> : <Eye size={13} />}
+                    </button>
                     {envFiles.length > 1 && (
                       <button
                         type="button"
@@ -469,7 +806,7 @@ function DevOps() {
                           border: '1px solid rgba(239,68,68,0.3)',
                           borderRadius: 'var(--radius-sm)',
                           color: 'var(--sev-critical)',
-                          padding: '6px',
+                          padding: '8px',
                           cursor: 'pointer',
                           flexShrink: 0,
                           display: 'flex',
@@ -491,10 +828,40 @@ function DevOps() {
                       fontSize: '11px',
                       resize: 'vertical',
                       minHeight: '64px',
+                      WebkitTextSecurity: showEnvContent[idx] ? 'none' : 'disc'
                     }}
                   />
                 </div>
               ))}
+            </div>
+
+            {/* Dependency Upgrade Mode Toggle */}
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>Dependency Upgrade Mode</label>
+              <div style={{ display: 'flex', gap: '20px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12.5px', cursor: 'pointer', color: 'var(--text-primary)' }}>
+                  <input 
+                    type="radio" 
+                    name="upgradeMode" 
+                    value="automatic" 
+                    checked={upgradeMode === 'automatic'}
+                    onChange={() => setUpgradeMode('automatic')}
+                    style={{ accentColor: 'var(--accent-cyan)' }}
+                  />
+                  Automatic
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12.5px', cursor: 'pointer', color: 'var(--text-primary)' }}>
+                  <input 
+                    type="radio" 
+                    name="upgradeMode" 
+                    value="semi-automatic" 
+                    checked={upgradeMode === 'semi-automatic'}
+                    onChange={() => setUpgradeMode('semi-automatic')}
+                    style={{ accentColor: 'var(--accent-cyan)' }}
+                  />
+                  Semi-Automatic (Interactive)
+                </label>
+              </div>
             </div>
 
             {uploadError && <p style={{ color: 'var(--sev-critical)', fontSize: '12px', margin: 0 }}>{uploadError}</p>}
@@ -526,7 +893,7 @@ function DevOps() {
         </div>
 
         {/* ── Live Pipeline Console ──────────────────────────────────────── */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px', minHeight: '420px', position: 'relative' }}>
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '620px', overflowY: 'auto', paddingRight: '12px', position: 'relative' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <Terminal size={20} style={{ color: 'var(--accent-cyan)' }} />
@@ -546,6 +913,7 @@ function DevOps() {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', background: 'rgba(255,255,255,0.02)', padding: '10px 14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)', fontSize: '12px' }}>
                 <div><span style={{ color: 'var(--text-muted)' }}>Status:</span> <span style={{ fontWeight: 600 }}>{activeJobStatus.toUpperCase()}</span></div>
                 {activeJobTech && <div><span style={{ color: 'var(--text-muted)' }}>Stack:</span> <span style={{ fontWeight: 600, color: 'var(--accent-purple)' }}>{activeJobTech.toUpperCase()}</span></div>}
+                {activeJobArch && <div><span style={{ color: 'var(--text-muted)' }}>Architecture:</span> <span style={{ fontWeight: 600, color: 'var(--accent-cyan)' }}>{activeJobArch.toUpperCase()}</span></div>}
                 <div><span style={{ color: 'var(--text-muted)' }}>Alerts:</span> <span style={{ fontWeight: 600, color: activeJobVulns > 0 ? 'var(--sev-critical)' : 'var(--sev-low)' }}>{activeJobVulns}</span></div>
                 {previewRunning && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
@@ -556,20 +924,87 @@ function DevOps() {
                 )}
               </div>
 
+              {/* Stepper checklist stages */}
+              <div className="pipeline-stages-container">
+                <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  Pipeline Stages Completion Tracker
+                </div>
+                <div className="pipeline-stages-grid">
+                  {PIPELINE_STAGES.map((stage) => {
+                    const status = currentStages[stage.id];
+                    let icon = null;
+                    let classSuffix = 'pending';
+                    
+                    if (status === 'running') {
+                      icon = <div className="stage-icon-spinner" />;
+                      classSuffix = 'running';
+                    } else if (status === 'done') {
+                      icon = <CheckCircle size={14} style={{ color: 'var(--accent-emerald)' }} />;
+                      classSuffix = 'done';
+                    } else if (status === 'failed') {
+                      icon = <AlertOctagon size={14} style={{ color: 'var(--sev-critical)' }} />;
+                      classSuffix = 'failed';
+                    } else {
+                      icon = <div style={{ width: 14, height: 14, borderRadius: '50%', border: '1px solid var(--text-muted)' }} />;
+                      classSuffix = 'pending';
+                    }
+
+                    return (
+                      <div key={stage.id} className={`pipeline-stage-item ${classSuffix}`}>
+                        {icon}
+                        <span style={{ fontSize: '11.5px', fontWeight: status === 'running' ? 'bold' : '500', color: status === 'running' ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                          {stage.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Toolbar with Log Title and Expand/Collapse Button */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Build & Scan Log Output</span>
+                <button
+                  type="button"
+                  onClick={() => setLogsExpanded(prev => !prev)}
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)',
+                    padding: '4px 10px',
+                    fontSize: '11px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    transition: 'all 0.2s'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  {logsExpanded ? 'Collapse Console' : 'Expand Console'}
+                </button>
+              </div>
+
               {/* Console log window */}
-              <div style={{
-                background: '#020617',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 'var(--radius-md)',
-                padding: '14px',
-                fontFamily: 'var(--font-mono)',
-                fontSize: '11px',
-                color: '#34d399',
-                height: '220px',
-                overflowY: 'auto',
-                whiteSpace: 'pre-wrap',
-                boxShadow: 'inset 0 2px 10px rgba(0,0,0,0.8)',
-              }}>
+              <div
+                ref={consoleContainerRef}
+                style={{
+                  background: '#020617',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '14px',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '11px',
+                  color: '#34d399',
+                  height: logsExpanded ? '380px' : '220px',
+                  overflowY: 'auto',
+                  whiteSpace: 'pre-wrap',
+                  boxShadow: 'inset 0 2px 10px rgba(0,0,0,0.8)',
+                  transition: 'height 0.2s ease-in-out'
+                }}
+              >
                 {activeJobLogs.length === 0 ? (
                   <p style={{ color: 'var(--text-muted)' }}>Awaiting log outputs...</p>
                 ) : (
@@ -590,6 +1025,8 @@ function DevOps() {
                 )}
                 <div ref={logsEndRef} />
               </div>
+
+
 
               {/* ── Success + Live Preview panel ── */}
               {activeJobStatus === 'deployed' && (
@@ -631,47 +1068,33 @@ function DevOps() {
                   {/* Live preview panel */}
                   {previewReady && (
                     <div style={{
-                      display: 'flex', alignItems: 'center', gap: '10px',
-                      background: 'rgba(167,139,250,0.08)', padding: '10px',
-                      borderRadius: 'var(--radius-md)', border: '1px solid rgba(167,139,250,0.25)',
+                      display: 'flex', flexDirection: 'column', gap: '10px',
+                      background: 'rgba(0, 194, 168, 0.06)', padding: '14px',
+                      borderRadius: 'var(--radius-md)', border: '1px solid rgba(0, 194, 168, 0.25)',
                     }}>
-                      <Globe size={18} style={{ color: '#a78bfa', flexShrink: 0 }} />
-                      <div style={{ flex: 1, fontSize: '12px' }}>
-                        <span style={{ fontWeight: 600 }}>Live Preview: </span>
-                        <a
-                          href={previewUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: '#a78bfa', textDecoration: 'underline' }}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Globe size={18} style={{ color: 'var(--accent-teal)', flexShrink: 0 }} />
+                        <div style={{ flex: 1, fontSize: '12.5px', color: 'var(--text-primary)' }}>
+                          <span style={{ fontWeight: 600 }}>Docker Sandbox Active (Port: {previewPort})</span>
+                        </div>
+                        <button
+                          onClick={handleStopPreview}
+                          disabled={stoppingPreview}
+                          title="Stop the isolated sandbox"
+                          style={{
+                            background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+                            borderRadius: 'var(--radius-sm)', color: 'var(--sev-critical)',
+                            padding: '5px 10px', fontSize: '11px', fontWeight: 600,
+                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+                            opacity: stoppingPreview ? 0.6 : 1,
+                          }}
                         >
-                          {previewUrl}
-                        </a>
+                          <Square size={10} fill="currentColor" /> {stoppingPreview ? 'Stopping…' : 'Stop Sandbox'}
+                        </button>
                       </div>
-                      <button
-                        onClick={() => window.open(previewUrl, '_blank')}
-                        style={{
-                          background: 'rgba(167,139,250,0.2)', border: '1px solid rgba(167,139,250,0.4)',
-                          borderRadius: 'var(--radius-sm)', color: '#a78bfa',
-                          padding: '5px 10px', fontSize: '11px', fontWeight: 600,
-                          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
-                        }}
-                      >
-                        <ExternalLink size={11} /> Open
-                      </button>
-                      <button
-                        onClick={handleStopPreview}
-                        disabled={stoppingPreview}
-                        title="Stop the live preview process"
-                        style={{
-                          background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
-                          borderRadius: 'var(--radius-sm)', color: 'var(--sev-critical)',
-                          padding: '5px 10px', fontSize: '11px', fontWeight: 600,
-                          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
-                          opacity: stoppingPreview ? 0.6 : 1,
-                        }}
-                      >
-                        <Square size={10} fill="currentColor" /> {stoppingPreview ? 'Stopping…' : 'Stop'}
-                      </button>
+                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.4', background: 'rgba(0,0,0,0.02)', padding: '10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+                        ⚠️ <strong>Network Isolation Note:</strong> The preview runs in an isolated container sandbox on the server. The port <code>{previewPort}</code> is internal to the container host and is not directly exposable to your local browser via localhost. Please use the <strong>Get ZIP</strong> button above to download the compiled build and run it locally.
+                      </div>
                     </div>
                   )}
 
@@ -698,15 +1121,63 @@ function DevOps() {
         </div>
       </div>
 
+      {/* ── Smart Stable Upgrades Alert Card (Full Width) ── */}
+      {activeJobUpgrades && activeJobUpgrades.length > 0 && (
+        <div className="card" style={{
+          background: 'rgba(0, 194, 168, 0.05)',
+          border: '1px solid rgba(0, 194, 168, 0.2)',
+          borderRadius: 'var(--radius-md)',
+          padding: '16px 20px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '10px',
+          marginTop: '0px',
+          marginBottom: '10px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, color: 'var(--accent-teal)', fontSize: '14px' }}>
+            <Cpu size={16} /> Smart Stable Dependency Upgrades
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+            We detected the following upgradable packages in your project workspace. Audited for deprecations and API compatibility:
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '10px', marginTop: '4px' }}>
+            {activeJobUpgrades.map((upgrade, idx) => (
+              <div key={idx} style={{
+                background: 'var(--bg-base)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '4px'
+              }}>
+                <div style={{ fontWeight: 700, fontSize: '12px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={upgrade.package}>
+                  {upgrade.package}
+                </div>
+                <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                  Manager: <span style={{ textTransform: 'uppercase' }}>{upgrade.manager}</span>
+                </div>
+                <div style={{ fontSize: '11px', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ color: 'var(--sev-high)', fontWeight: '500' }}>{upgrade.current}</span>
+                  <span style={{ color: 'var(--text-muted)' }}>➔</span>
+                  <span style={{ color: 'var(--sev-low)', fontWeight: 'bold' }}>{upgrade.latest}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Deployment History Table ────────────────────────────────────────── */}
       <div>
         <h3 className="section-heading" style={{ margin: '12px 0 14px' }}>Deployment History</h3>
-        <div className="card" style={{ padding: '0', overflow: 'hidden' }}>
+        <div className="card" style={{ padding: '0', height: '400px', overflowY: 'auto' }}>
           <table>
             <thead>
               <tr>
                 <th>Project Name</th>
                 <th>Tech Stack</th>
+                <th>Architecture</th>
                 <th>Status</th>
                 <th>Vulnerabilities</th>
                 <th>Preview Port</th>
@@ -717,14 +1188,27 @@ function DevOps() {
             <tbody>
               {deployments.length === 0 ? (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     <EmptyState message="No sandbox builds tracked in registry." />
                   </td>
                 </tr>
               ) : (
-                deployments.map((d) => (
-                  <tr key={d._id}>
-                    <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{d.projectName}</td>
+                deployments.map((d) => {
+                  const isCurrentActive = d._id === activeDeploymentId;
+                  return (
+                    <tr 
+                      key={d._id}
+                      onClick={() => handleSelectDeployment(d)}
+                      style={{ 
+                        cursor: 'pointer',
+                        background: isCurrentActive ? 'rgba(6,182,212,0.04)' : 'transparent',
+                        borderLeft: isCurrentActive ? '3px solid var(--accent-cyan)' : 'none',
+                        transition: 'background 0.2s'
+                      }}
+                      onMouseEnter={(e) => { if (!isCurrentActive) e.currentTarget.style.background = 'rgba(255,255,255,0.01)'; }}
+                      onMouseLeave={(e) => { if (!isCurrentActive) e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{d.projectName}</td>
                     <td>
                       <span style={{
                         display: 'inline-flex', alignItems: 'center', gap: '5px',
@@ -733,6 +1217,15 @@ function DevOps() {
                       }}>
                         {d.techStackDetected && <Cpu size={12} />}
                         {d.techStackDetected || 'unknown'}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '5px',
+                        fontSize: '11px', textTransform: 'uppercase', fontWeight: 600,
+                        color: d.architectureDetected === 'microservice' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                      }}>
+                        {d.architectureDetected || 'monolithic'}
                       </span>
                     </td>
                     <td><StatusBadge status={d.status} /></td>
@@ -759,19 +1252,16 @@ function DevOps() {
                               <>
                                 {d.previewStatus === 'running' ? (
                                   <>
-                                    <a
-                                      href={`http://localhost:${d.previewPort}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
+                                    <span
                                       style={{
-                                        background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.3)',
-                                        borderRadius: 'var(--radius-sm)', color: '#a78bfa',
+                                        background: 'rgba(0, 194, 168, 0.1)', border: '1px solid rgba(0, 194, 168, 0.3)',
+                                        borderRadius: 'var(--radius-sm)', color: 'var(--accent-teal)',
                                         padding: '4px 8px', fontSize: '11px', fontWeight: 600,
-                                        textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px'
+                                        display: 'inline-flex', alignItems: 'center', gap: '4px'
                                       }}
                                     >
-                                      <ExternalLink size={11} /> Open
-                                    </a>
+                                      <Globe size={11} /> Sandbox Active
+                                    </span>
                                     <button
                                       onClick={() => handleHistoryStop(d._id)}
                                       style={{
@@ -788,13 +1278,13 @@ function DevOps() {
                                   <button
                                     onClick={() => handleHistoryStart(d._id, d.jobId, d.previewPort || 3001)}
                                     style={{
-                                      background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)',
-                                      borderRadius: 'var(--radius-sm)', color: 'var(--sev-low)',
+                                      background: 'rgba(0, 194, 168, 0.1)', border: '1px solid rgba(0, 194, 168, 0.3)',
+                                      borderRadius: 'var(--radius-sm)', color: 'var(--accent-teal)',
                                       padding: '4px 8px', fontSize: '11px', fontWeight: 600,
                                       cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px'
                                     }}
                                   >
-                                    <Globe size={11} /> Start Preview
+                                    <Globe size={11} /> Start Sandbox
                                   </button>
                                 )}
                               </>
@@ -843,12 +1333,102 @@ function DevOps() {
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* ── Interactive Dependency Upgrades Modal Overlay ── */}
+      {showInteractiveModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(2, 6, 23, 0.85)', backdropFilter: 'blur(8px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000, padding: '20px'
+        }}>
+          <div className="card" style={{
+            maxWidth: '500px', width: '100%', padding: '24px',
+            background: 'var(--bg-secondary)', border: '1px solid rgba(6, 182, 212, 0.3)',
+            boxShadow: '0 10px 30px rgba(0,0,0,0.5)', borderRadius: 'var(--radius-lg)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <h3 style={{ margin: 0, color: 'var(--text-primary)', fontSize: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Cpu size={18} color="var(--accent-cyan)" /> Semi-Automatic Upgrades
+              </h3>
+              <span style={{
+                background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)',
+                color: '#f87171', fontSize: '12px', fontWeight: 'bold', padding: '2px 8px', borderRadius: '99px'
+              }}>
+                Resuming in {countdownTime}s
+              </span>
+            </div>
+            <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '16px', lineHeight: '1.5' }}>
+              Select which package versions you want to upgrade in your source files. Leaving versions unchecked keeps the current version.
+            </p>
+            
+            <div style={{ maxHeight: '200px', overflowY: 'auto', marginBottom: '20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {interactiveUpgrades.map((upgrade, index) => {
+                const isChecked = selectedUpgrades.some(u => u.package === upgrade.package);
+                return (
+                  <label key={index} style={{
+                    display: 'flex', alignItems: 'center', gap: '12px',
+                    background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-sm)', padding: '10px 12px', cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}>
+                    <input 
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={() => {
+                        if (isChecked) {
+                          setSelectedUpgrades(prev => prev.filter(u => u.package !== upgrade.package));
+                        } else {
+                          setSelectedUpgrades(prev => [...prev, upgrade]);
+                        }
+                      }}
+                      style={{ accentColor: 'var(--accent-cyan)' }}
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: '12.5px', color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={upgrade.package}>
+                        {upgrade.package}
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                        {upgrade.current} ➔ <span style={{ color: 'var(--sev-low)', fontWeight: 'bold' }}>{upgrade.latest}</span>
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => handleApplyUpgrades([])}
+                style={{
+                  background: 'transparent', border: '1px solid var(--border-active)',
+                  color: 'var(--text-muted)', borderRadius: 'var(--radius-sm)',
+                  padding: '8px 16px', fontSize: '13px', cursor: 'pointer'
+                }}
+              >
+                Skip Upgrades
+              </button>
+              <button
+                onClick={() => handleApplyUpgrades(selectedUpgrades)}
+                style={{
+                  background: 'var(--accent-cyan)', border: 'none',
+                  color: '#000', fontWeight: 'bold', borderRadius: 'var(--radius-sm)',
+                  padding: '8px 16px', fontSize: '13px', cursor: 'pointer'
+                }}
+              >
+                Apply Upgrades
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

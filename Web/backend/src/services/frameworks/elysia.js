@@ -26,36 +26,73 @@ module.exports = {
   previewImage: 'oven/bun:latest',
   runCommand: 'bun install',
   getPreviewCommand: (workDir) => {
-    // Prioritize TypeScript entry points (Bun handles TS natively)
-    const tsCandidates = ['src/index.ts', 'index.ts', 'src/app.ts', 'app.ts'];
-    for (const c of tsCandidates) {
-      if (fs.existsSync(path.join(workDir, c))) {
-        return { cmd: 'bun', args: ['run', c], env: { NODE_ENV: 'production' } };
-      }
-    }
-    // Try package.json scripts
     try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(workDir, 'package.json'), 'utf8'));
-      if (pkg.scripts && pkg.scripts.start) {
-        return { cmd: 'bun', args: ['run', 'start'], env: { NODE_ENV: 'production' } };
+      const pkgPath = path.join(workDir, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        
+        // 1. Check for startup scripts in order of preference
+        if (pkg.scripts) {
+          const scriptsPriority = ['start', 'start:prod', 'preview', 'dev'];
+          for (const s of scriptsPriority) {
+            if (pkg.scripts[s]) {
+              return { cmd: 'bun', args: ['run', s], env: { NODE_ENV: 'production' } };
+            }
+          }
+        }
+        
+        // 2. Check the "main" entry point from package.json
+        if (pkg.main && fs.existsSync(path.join(workDir, pkg.main))) {
+          return { cmd: 'bun', args: ['run', pkg.main], env: { NODE_ENV: 'production' } };
+        }
       }
     } catch (_) {}
-    // JS fallbacks
-    const jsCandidates = ['index.js', 'server.js', 'src/index.js'];
-    for (const c of jsCandidates) {
+
+    // 3. Scan common candidate entry points including TypeScript / Bun native files, compiled outputs, and standard JS paths
+    const candidates = [
+      'src/index.ts', 'src/index.js', 'src/index.mjs', 'src/index.cjs',
+      'index.ts', 'index.js', 'index.mjs', 'index.cjs',
+      'src/server.ts', 'src/server.js', 'src/server.mjs', 'src/server.cjs',
+      'src/app.ts', 'src/app.js', 'src/app.mjs', 'src/app.cjs',
+      'server.ts', 'server.js', 'server.mjs', 'server.cjs',
+      'app.ts', 'app.js', 'app.mjs', 'app.cjs',
+      'dist/index.js', 'dist/server.js', 'dist/app.js',
+      'bin/www'
+    ];
+    for (const c of candidates) {
       if (fs.existsSync(path.join(workDir, c))) {
         return { cmd: 'bun', args: ['run', c], env: { NODE_ENV: 'production' } };
       }
     }
+
+    // Default fallback
     return { cmd: 'bun', args: ['run', 'src/index.ts'], env: { NODE_ENV: 'production' } };
   },
   getConfig: (targetDir) => {
-    // Check if bun.lockb or bunfig.toml exist to confirm Bun is preferred
     const hasBunLock = fs.existsSync(path.join(targetDir, 'bun.lockb'));
     const hasBunfig = fs.existsSync(path.join(targetDir, 'bunfig.toml'));
+    let installCmd = 'bun install';
+    let fallbackInstallCmd = 'bun install || npm install';
+
+    try {
+      const pkgPath = path.join(targetDir, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        // If a build script is present (e.g. compiling/bundling), run it during compilation
+        if (pkg.scripts && pkg.scripts.build) {
+          installCmd = 'bun install && bun run build';
+          fallbackInstallCmd = '(bun install && bun run build) || (npm install && npm run build)';
+        }
+      }
+    } catch (_) {}
+
     if (hasBunLock || hasBunfig) {
-      return { buildImage: 'oven/bun:latest', previewImage: 'oven/bun:latest', runCommand: 'bun install' };
+      return { buildImage: 'oven/bun:latest', previewImage: 'oven/bun:latest', runCommand: installCmd };
     }
-    return { buildImage: 'oven/bun:latest', previewImage: 'oven/bun:latest', runCommand: 'bun install || npm install' };
+    return { buildImage: 'oven/bun:latest', previewImage: 'oven/bun:latest', runCommand: fallbackInstallCmd };
+  },
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
   }
 };

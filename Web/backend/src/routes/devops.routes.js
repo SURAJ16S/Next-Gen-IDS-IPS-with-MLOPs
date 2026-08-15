@@ -15,6 +15,8 @@ const {
   listFixtures,
   generateFixture,
   downloadPdfReport,
+  getFixtureReviews,
+  createFixtureReview,
 } = require('../controllers/devops.controller');
 const { protect } = require('../middleware/auth.middleware');
 
@@ -23,6 +25,8 @@ router.get('/suggest-port', protect, getSuggestedPort);
 router.get('/previews', protect, getActivePreviews);
 router.get('/fixtures', protect, listFixtures);
 router.post('/fixtures/generate', protect, generateFixture);
+router.get('/fixtures/:frameworkId/reviews', protect, getFixtureReviews);
+router.post('/fixtures/:frameworkId/reviews', protect, createFixtureReview);
 
 // Deployment CRUD
 router.get('/', protect, getDeployments);

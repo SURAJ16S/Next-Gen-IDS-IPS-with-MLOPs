@@ -64,5 +64,9 @@ module.exports = {
       return false;
     };
     return detectPythonGui(targetDir);
+  },
+  detectArchitecture: (targetDir) => {
+    const { detectGeneralArchitecture } = require('../framework-detector.service');
+    return detectGeneralArchitecture(targetDir);
   }
 };
