@@ -7,6 +7,7 @@ import {
   downloadDeploymentArtifact,
   downloadDeploymentPdfReport,
   suggestDeploymentPort,
+  changeDeploymentPort,
   stopDeploymentPreview,
   startDeploymentPreview,
   deleteDeployment,
@@ -21,7 +22,7 @@ import { io } from 'socket.io-client';
 import {
   Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu,
   Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff,
-  RefreshCw, Search, Lock, Unlock, GitBranch, Star
+  RefreshCw, Search, Lock, Unlock, GitBranch, Star, Settings
 } from 'lucide-react';
 
 const Github = (props) => (
@@ -327,6 +328,11 @@ function DevOps() {
   const [previewRunning, setPreviewRunning] = useState(false);
   const [stoppingPreview, setStoppingPreview] = useState(false);
 
+  // Edit port states
+  const [isEditingPort, setIsEditingPort] = useState(false);
+  const [editPortValue, setEditPortValue] = useState('');
+  const [isRebuildingPort, setIsRebuildingPort] = useState(false);
+
   const logsEndRef = useRef(null);
   const consoleContainerRef = useRef(null);
   const socketRef = useRef(null);
@@ -341,6 +347,37 @@ function DevOps() {
   const [selectedUpgrades, setSelectedUpgrades] = useState([]);
   const [countdownTime, setCountdownTime] = useState(10);
   const [interactiveJobId, setInteractiveJobId] = useState(null);
+
+  // Real-time environmental validation to detect preview port mismatches
+  const getEnvWarnings = () => {
+    const warnings = [];
+    const port = previewPort || '3001';
+
+    envFiles.forEach((file, fileIdx) => {
+      if (!file.content) return;
+      const lines = file.content.split('\n');
+      lines.forEach((line) => {
+        const trimmedLine = line.trim();
+        if (trimmedLine.startsWith('#') || !trimmedLine) return;
+        
+        const parts = trimmedLine.split('=');
+        if (parts.length >= 2) {
+          const key = parts[0].trim();
+          const val = parts.slice(1).join('=').trim();
+
+          if (val.includes('localhost:') || val.includes('127.0.0.1:')) {
+            const match = val.match(/(?:localhost|127\.0\.0\.1):(\d+)/);
+            if (match && String(match[1]) !== String(port)) {
+              warnings.push(
+                `"${key}" in "${file.path || `File #${fileIdx + 1}`}" points to port ${match[1]}, which does not match your preview port (${port}).`
+              );
+            }
+          }
+        }
+      });
+    });
+    return warnings;
+  };
 
   // ── Fetch deployments ──────────────────────────────────────────────────────
   const fetchDeployments = async () => {
@@ -795,6 +832,44 @@ function DevOps() {
     }
   };
 
+  // ── Update Port & Rebuild Sandbox ──────────────────────────────────────────
+  const handleUpdatePort = async (e) => {
+    if (e) e.preventDefault();
+    if (!activeDeploymentId) return;
+    if (!editPortValue || isNaN(editPortValue)) {
+      alert('Please enter a valid port number.');
+      return;
+    }
+    
+    setIsRebuildingPort(true);
+    setPreviewReady(false);
+    setPreviewRunning(false);
+    setActiveJobStatus('building');
+    setActiveJobLogs([
+      '[PREVIEW] Port change requested.',
+      `[PREVIEW] New target port: ${editPortValue}`,
+      '[PREVIEW] Updating environment variables and config files...',
+      '[PREVIEW] Rebuilding isolated container sandbox in background...'
+    ]);
+
+    try {
+      await changeDeploymentPort(activeDeploymentId, Number(editPortValue));
+      setIsEditingPort(false);
+      setPreviewPort(String(editPortValue));
+      
+      if (activeJobId && socketRef.current) {
+        socketRef.current.emit('subscribe:pipeline', { jobId: activeJobId });
+      }
+      
+      fetchDeployments();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to update preview port.');
+      setActiveJobStatus('failed');
+    } finally {
+      setIsRebuildingPort(false);
+    }
+  };
+
   // ── Delete Deployment ──────────────────────────────────────────────────────
   const handleDeleteDeployment = async (deploymentId, projectName) => {
     if (!window.confirm(`Are you sure you want to delete "${projectName}" and clean up all files on disk?`)) {
@@ -1120,6 +1195,9 @@ function DevOps() {
                         <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: 0 }}>
                           Specify paths relative to repo root, e.g. <code>backend/.env</code> or <code>.env</code>. Leave empty to skip.
                         </p>
+                        <div style={{ fontSize: '11.5px', color: 'var(--accent-cyan)', background: 'rgba(6,182,212,0.04)', border: '1px solid rgba(6,182,212,0.15)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginTop: '4px', lineHeight: '1.4' }}>
+                          💡 <strong>Deployment Hint:</strong> Client/CORS variables (e.g. <code>VITE_API_URL</code>, <code>CLIENT_URL</code>) must point to your exposed Preview Port (currently <code>{previewPort || '3001'}</code>). Set them to <code>http://localhost:{previewPort || '3001'}</code> to match the sandbox environment.
+                        </div>
 
                         {envFiles.map((row, idx) => (
                           <div key={idx} style={{
@@ -1194,33 +1272,81 @@ function DevOps() {
                             />
                           </div>
                         ))}
+
+                        {/* Environment Mismatch Warnings (Personal validation) */}
+                        {getEnvWarnings().length > 0 && (
+                          <div style={{
+                            background: 'rgba(234, 179, 8, 0.08)',
+                            border: '1px solid rgba(234, 179, 8, 0.25)',
+                            borderRadius: 'var(--radius-md)',
+                            padding: '12px 14px',
+                            fontSize: '12px',
+                            color: '#eab308',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '6px',
+                            marginTop: '10px'
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700 }}>
+                              <span>⚠️</span> Port Mismatch Detected
+                            </div>
+                            <ul style={{ margin: 0, paddingLeft: '18px', listStyleType: 'disc', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                              {getEnvWarnings().map((w, idx) => (
+                                <li key={idx}>{w}</li>
+                              ))}
+                            </ul>
+                            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                              <strong>Recommendation:</strong> In monorepo/sandbox deployments, backend servers listen on your preview port (<code>{previewPort || '3001'}</code>). Update client/CORS environment variables to target <code>http://localhost:{previewPort || '3001'}</code> to prevent connection failures.
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {/* Dependency Upgrade Mode Toggle */}
                       <div style={{ marginBottom: '14px' }}>
                         <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>Dependency Upgrade Mode</label>
-                        <div style={{ display: 'flex', gap: '20px' }}>
-                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12.5px', color: 'var(--text-primary)', cursor: 'pointer' }}>
                             <input
                               type="radio"
                               name="gh-upgrade-mode"
                               value="automatic"
                               checked={upgradeMode === 'automatic'}
                               onChange={() => setUpgradeMode('automatic')}
-                              style={{ cursor: 'pointer' }}
+                              style={{ cursor: 'pointer', marginTop: '3px' }}
                             />
-                            Automatic Stable Upgrade
+                            <div>
+                              <strong style={{ color: 'var(--accent-cyan)' }}>Automatic (Recommended)</strong>
+                              <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Audits and upgrades outdated dependencies to latest stable versions to resolve security vulnerabilities automatically.</span>
+                            </div>
                           </label>
-                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12.5px', color: 'var(--text-primary)', cursor: 'pointer' }}>
                             <input
                               type="radio"
                               name="gh-upgrade-mode"
                               value="semi-automatic"
                               checked={upgradeMode === 'semi-automatic'}
                               onChange={() => setUpgradeMode('semi-automatic')}
-                              style={{ cursor: 'pointer' }}
+                              style={{ cursor: 'pointer', marginTop: '3px' }}
                             />
-                            Semi-Automatic Approval
+                            <div>
+                              <strong>Semi-Automatic (Interactive)</strong>
+                              <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Pauses compilation for 10 seconds to prompt you for version selection.</span>
+                            </div>
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12.5px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                            <input
+                              type="radio"
+                              name="gh-upgrade-mode"
+                              value="disabled"
+                              checked={upgradeMode === 'disabled'}
+                              onChange={() => setUpgradeMode('disabled')}
+                              style={{ cursor: 'pointer', marginTop: '3px' }}
+                            />
+                            <div>
+                              <strong>Disabled (Troubleshoot)</strong>
+                              <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Bypasses security patching. Select this fallback if auto-remediation upgrades trigger TypeScript compiler errors.</span>
+                            </div>
                           </label>
                         </div>
                       </div>
@@ -1369,6 +1495,9 @@ function DevOps() {
               <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: 0 }}>
                 Specify paths relative to your ZIP root, e.g. <code>backend/.env</code> or <code>.env</code>. Leave empty to skip.
               </p>
+              <div style={{ fontSize: '11.5px', color: 'var(--accent-cyan)', background: 'rgba(6,182,212,0.04)', border: '1px solid rgba(6,182,212,0.15)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginTop: '4px', lineHeight: '1.4' }}>
+                💡 <strong>Deployment Hint:</strong> Client/CORS variables (e.g. <code>VITE_API_URL</code>, <code>CLIENT_URL</code>) must point to your exposed Preview Port (currently <code>{previewPort || '3001'}</code>). Set them to <code>http://localhost:{previewPort || '3001'}</code> to match the sandbox environment.
+              </div>
 
               {envFiles.map((row, idx) => (
                 <div key={idx} style={{
@@ -1443,33 +1572,81 @@ function DevOps() {
                   />
                 </div>
               ))}
+
+              {/* Environment Mismatch Warnings (Personal validation) */}
+              {getEnvWarnings().length > 0 && (
+                <div style={{
+                  background: 'rgba(234, 179, 8, 0.08)',
+                  border: '1px solid rgba(234, 179, 8, 0.25)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '12px 14px',
+                  fontSize: '12px',
+                  color: '#eab308',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
+                  marginTop: '10px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700 }}>
+                    <span>⚠️</span> Port Mismatch Detected
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: '18px', listStyleType: 'disc', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    {getEnvWarnings().map((w, idx) => (
+                      <li key={idx}>{w}</li>
+                    ))}
+                  </ul>
+                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                    <strong>Recommendation:</strong> In monorepo/sandbox deployments, backend servers listen on your preview port (<code>{previewPort || '3001'}</code>). Update client/CORS environment variables to target <code>http://localhost:{previewPort || '3001'}</code> to prevent connection failures.
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Dependency Upgrade Mode Toggle */}
             <div style={{ marginBottom: '14px' }}>
               <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>Dependency Upgrade Mode</label>
-              <div style={{ display: 'flex', gap: '20px' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12.5px', cursor: 'pointer', color: 'var(--text-primary)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12.5px', color: 'var(--text-primary)', cursor: 'pointer' }}>
                   <input 
                     type="radio" 
                     name="upgradeMode" 
                     value="automatic" 
                     checked={upgradeMode === 'automatic'}
                     onChange={() => setUpgradeMode('automatic')}
-                    style={{ accentColor: 'var(--accent-cyan)' }}
+                    style={{ accentColor: 'var(--accent-cyan)', marginTop: '3px' }}
                   />
-                  Automatic
+                  <div>
+                    <strong style={{ color: 'var(--accent-cyan)' }}>Automatic (Recommended)</strong>
+                    <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Audits and upgrades outdated dependencies to latest stable versions to resolve security vulnerabilities automatically.</span>
+                  </div>
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12.5px', cursor: 'pointer', color: 'var(--text-primary)' }}>
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12.5px', color: 'var(--text-primary)', cursor: 'pointer' }}>
                   <input 
                     type="radio" 
                     name="upgradeMode" 
                     value="semi-automatic" 
                     checked={upgradeMode === 'semi-automatic'}
                     onChange={() => setUpgradeMode('semi-automatic')}
-                    style={{ accentColor: 'var(--accent-cyan)' }}
+                    style={{ accentColor: 'var(--accent-cyan)', marginTop: '3px' }}
                   />
-                  Semi-Automatic (Interactive)
+                  <div>
+                    <strong>Semi-Automatic (Interactive)</strong>
+                    <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Pauses compilation for 10 seconds to prompt you for version selection.</span>
+                  </div>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12.5px', color: 'var(--text-primary)', cursor: 'pointer' }}>
+                  <input 
+                    type="radio" 
+                    name="upgradeMode" 
+                    value="disabled" 
+                    checked={upgradeMode === 'disabled'}
+                    onChange={() => setUpgradeMode('disabled')}
+                    style={{ accentColor: 'var(--accent-cyan)', marginTop: '3px' }}
+                  />
+                  <div>
+                    <strong>Disabled (Troubleshoot)</strong>
+                    <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Bypasses security patching. Select this fallback if auto-remediation upgrades trigger TypeScript compiler errors.</span>
+                  </div>
                 </label>
               </div>
             </div>
@@ -1708,6 +1885,25 @@ function DevOps() {
                         <div style={{ flex: 1, fontSize: '12.5px', color: 'var(--text-primary)' }}>
                           <span style={{ fontWeight: 600 }}>Docker Sandbox Active (Port: {previewPort})</span>
                         </div>
+                        
+                        {!isEditingPort && !isRebuildingPort && (
+                          <button
+                            onClick={() => {
+                              setEditPortValue(String(previewPort));
+                              setIsEditingPort(true);
+                            }}
+                            title="Change sandbox preview port"
+                            style={{
+                              background: 'rgba(34,211,238,0.1)', border: '1px solid rgba(34,211,238,0.3)',
+                              borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)',
+                              padding: '5px 10px', fontSize: '11px', fontWeight: 600,
+                              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+                            }}
+                          >
+                            <Settings size={11} /> Edit Port
+                          </button>
+                        )}
+
                         <button
                           onClick={handleStopPreview}
                           disabled={stoppingPreview}
@@ -1723,6 +1919,119 @@ function DevOps() {
                           <Square size={10} fill="currentColor" /> {stoppingPreview ? 'Stopping…' : 'Stop Sandbox'}
                         </button>
                       </div>
+
+                      {isEditingPort && (
+                        <form onSubmit={handleUpdatePort} style={{
+                          background: 'rgba(251, 191, 36, 0.03)',
+                          border: '1px solid rgba(251, 191, 36, 0.2)',
+                          borderRadius: 'var(--radius-sm)',
+                          padding: '12px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '10px',
+                          marginTop: '6px'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <label style={{ fontSize: '12.5px', color: 'var(--text-primary)', fontWeight: 600 }}>New Port:</label>
+                            <input
+                              type="number"
+                              min="1024"
+                              max="65535"
+                              value={editPortValue}
+                              onChange={e => setEditPortValue(e.target.value)}
+                              style={{
+                                background: 'var(--bg-base)',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: 'var(--radius-sm)',
+                                color: 'var(--text-primary)',
+                                padding: '4px 8px',
+                                width: '90px',
+                                fontSize: '13px',
+                                textAlign: 'center',
+                                fontFamily: 'var(--font-mono)'
+                              }}
+                            />
+                            <button
+                              type="submit"
+                              disabled={isRebuildingPort}
+                              style={{
+                                background: 'var(--accent-cyan)',
+                                border: 'none',
+                                color: '#000',
+                                fontWeight: 'bold',
+                                borderRadius: 'var(--radius-sm)',
+                                padding: '6px 12px',
+                                fontSize: '12px',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '5px'
+                              }}
+                            >
+                              {isRebuildingPort ? 'Saving...' : 'Save & Rebuild'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setIsEditingPort(false)}
+                              style={{
+                                background: 'transparent',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: 'var(--radius-sm)',
+                                color: 'var(--text-secondary)',
+                                padding: '6px 12px',
+                                fontSize: '12px',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          <div style={{
+                            fontSize: '11px',
+                            color: '#fbbf24',
+                            lineHeight: '1.4',
+                            background: 'rgba(251, 191, 36, 0.05)',
+                            padding: '8px 10px',
+                            borderRadius: 'var(--radius-sm)'
+                          }}>
+                            ⚠️ <strong>Please Note:</strong> Changing the port requires stopping the active sandbox container, updating all environment files (.env) in the workspace directory, and fully rebuilding the container. <strong>This process will take a few minutes to re-compile.</strong>
+                          </div>
+                        </form>
+                      )}
+
+                      {isRebuildingPort && (
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          background: 'rgba(6, 182, 212, 0.06)',
+                          border: '1px solid rgba(6, 182, 212, 0.2)',
+                          padding: '12px 14px',
+                          borderRadius: 'var(--radius-md)',
+                          marginTop: '6px'
+                        }}>
+                          <style>{`
+                            @keyframes rotate-clock {
+                              0% { transform: rotate(0deg); }
+                              100% { transform: rotate(360deg); }
+                            }
+                            .clock-hand-anim {
+                              animation: rotate-clock 2s linear infinite;
+                              transform-origin: 12px 12px;
+                            }
+                          `}</style>
+                          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                            <circle cx="12" cy="12" r="10" />
+                            <line x1="12" y1="12" x2="12" y2="7" className="clock-hand-anim" />
+                            <line x1="12" y1="12" x2="16" y2="12" className="clock-hand-anim" style={{ animationDuration: '8s' }} />
+                          </svg>
+                          <div style={{ fontSize: '12px', color: 'var(--text-primary)', lineHeight: '1.4' }}>
+                            <span style={{ fontWeight: 600, color: 'var(--accent-cyan)', display: 'block' }}>Rebuilding Sandbox Container...</span>
+                            Updating environment variables and re-compiling client assets in the background.
+                          </div>
+                        </div>
+                      )}
+
                       <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.4', background: 'rgba(0,0,0,0.02)', padding: '10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
                         ⚠️ <strong>Network Isolation Note:</strong> The preview runs in an isolated container sandbox on the server. The port <code>{previewPort}</code> is internal to the container host and is not directly exposable to your local browser via localhost. Please use the <strong>Get ZIP</strong> button above to download the compiled build and run it locally.
                       </div>
@@ -1731,8 +2040,145 @@ function DevOps() {
 
                   {/* Preview stopped notice */}
                   {activeJobStatus === 'deployed' && !previewRunning && previewUrl && (
-                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', padding: '6px 10px' }}>
-                      Preview process was stopped. Port {previewPort} is now free.
+                    <div style={{
+                      display: 'flex', flexDirection: 'column', gap: '10px',
+                      background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-subtle)',
+                      borderRadius: 'var(--radius-md)', padding: '12px 14px'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{ flex: 1, fontSize: '12px', color: 'var(--text-muted)' }}>
+                          Preview process is stopped. Allocated port: <strong>{previewPort}</strong>.
+                        </div>
+                        
+                        {!isEditingPort && !isRebuildingPort && (
+                          <button
+                            onClick={() => {
+                              setEditPortValue(String(previewPort));
+                              setIsEditingPort(true);
+                            }}
+                            style={{
+                              background: 'rgba(34,211,238,0.1)', border: '1px solid rgba(34,211,238,0.3)',
+                              borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)',
+                              padding: '4px 8px', fontSize: '11px', fontWeight: 600,
+                              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px'
+                            }}
+                          >
+                            <Settings size={11} /> Change Port
+                          </button>
+                        )}
+                      </div>
+
+                      {isEditingPort && (
+                        <form onSubmit={handleUpdatePort} style={{
+                          background: 'rgba(251, 191, 36, 0.03)',
+                          border: '1px solid rgba(251, 191, 36, 0.2)',
+                          borderRadius: 'var(--radius-sm)',
+                          padding: '12px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '10px',
+                          marginTop: '4px'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <label style={{ fontSize: '12.5px', color: 'var(--text-primary)', fontWeight: 600 }}>New Port:</label>
+                            <input
+                              type="number"
+                              min="1024"
+                              max="65535"
+                              value={editPortValue}
+                              onChange={e => setEditPortValue(e.target.value)}
+                              style={{
+                                background: 'var(--bg-base)',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: 'var(--radius-sm)',
+                                color: 'var(--text-primary)',
+                                padding: '4px 8px',
+                                width: '90px',
+                                fontSize: '13px',
+                                textAlign: 'center',
+                                fontFamily: 'var(--font-mono)'
+                              }}
+                            />
+                            <button
+                              type="submit"
+                              disabled={isRebuildingPort}
+                              style={{
+                                background: 'var(--accent-cyan)',
+                                border: 'none',
+                                color: '#000',
+                                fontWeight: 'bold',
+                                borderRadius: 'var(--radius-sm)',
+                                padding: '6px 12px',
+                                fontSize: '12px',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '5px'
+                              }}
+                            >
+                              {isRebuildingPort ? 'Saving...' : 'Save & Rebuild'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setIsEditingPort(false)}
+                              style={{
+                                background: 'transparent',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: 'var(--radius-sm)',
+                                color: 'var(--text-secondary)',
+                                padding: '6px 12px',
+                                fontSize: '12px',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          <div style={{
+                            fontSize: '11px',
+                            color: '#fbbf24',
+                            lineHeight: '1.4',
+                            background: 'rgba(251, 191, 36, 0.05)',
+                            padding: '8px 10px',
+                            borderRadius: 'var(--radius-sm)'
+                          }}>
+                            ⚠️ <strong>Please Note:</strong> Changing the port requires stopping the active sandbox container, updating all environment files (.env) in the workspace directory, and fully rebuilding the container. <strong>This process will take a few minutes to re-compile.</strong>
+                          </div>
+                        </form>
+                      )}
+
+                      {isRebuildingPort && (
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          background: 'rgba(6, 182, 212, 0.06)',
+                          border: '1px solid rgba(6, 182, 212, 0.2)',
+                          padding: '12px 14px',
+                          borderRadius: 'var(--radius-md)',
+                          marginTop: '4px'
+                        }}>
+                          <style>{`
+                            @keyframes rotate-clock {
+                              0% { transform: rotate(0deg); }
+                              100% { transform: rotate(360deg); }
+                            }
+                            .clock-hand-anim {
+                              animation: rotate-clock 2s linear infinite;
+                              transform-origin: 12px 12px;
+                            }
+                          `}</style>
+                          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent-cyan)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                            <circle cx="12" cy="12" r="10" />
+                            <line x1="12" y1="12" x2="12" y2="7" className="clock-hand-anim" />
+                            <line x1="12" y1="12" x2="16" y2="12" className="clock-hand-anim" style={{ animationDuration: '8s' }} />
+                          </svg>
+                          <div style={{ fontSize: '12px', color: 'var(--text-primary)', lineHeight: '1.4' }}>
+                            <span style={{ fontWeight: 600, color: 'var(--accent-cyan)', display: 'block' }}>Rebuilding Sandbox Container...</span>
+                            Updating environment variables and re-compiling client assets in the background.
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

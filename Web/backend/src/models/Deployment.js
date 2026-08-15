@@ -72,7 +72,7 @@ const deploymentSchema = new mongoose.Schema(
         status:  { type: String }
       }
     ],
-    upgradeMode: { type: String, enum: ['automatic', 'semi-automatic'], default: 'automatic' },
+    upgradeMode: { type: String, enum: ['automatic', 'semi-automatic', 'disabled'], default: 'automatic' },
   },
   { 
     timestamps: true,

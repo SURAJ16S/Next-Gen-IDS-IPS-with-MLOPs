@@ -277,8 +277,10 @@ const getReplacementString = (ext, varName) => {
     return `std::env::var("${varName}").unwrap_or_default()`;
   } else if (ext === '.properties' || ext === '.yml' || ext === '.yaml') {
     return `\${${varName}}`;
+  } else if (ext === '.ts' || ext === '.tsx') {
+    return `(process.env.${varName} as string)`;
   } else {
-    // default to JS/TS
+    // default to JS
     return `process.env.${varName}`;
   }
 };

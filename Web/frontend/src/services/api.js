@@ -55,6 +55,7 @@ export const suggestDeploymentPort = () => api.get('/devops/suggest-port');
 export const getActivePreviews = () => api.get('/devops/previews');
 export const stopDeploymentPreview = (id) => api.post(`/devops/${id}/stop-preview`);
 export const startDeploymentPreview = (id) => api.post(`/devops/${id}/start-preview`);
+export const changeDeploymentPort = (id, previewPort) => api.post(`/devops/${id}/change-port`, { previewPort });
 export const deleteDeployment = (id) => api.delete(`/devops/${id}`);
 
 // GitHub OAuth

@@ -17,6 +17,7 @@ const {
   downloadPdfReport,
   getFixtureReviews,
   createFixtureReview,
+  changeDeploymentPort,
 } = require('../controllers/devops.controller');
 const {
   getGithubAuthUrl,
@@ -63,5 +64,6 @@ router.get('/:id/artifact', protect, downloadArtifact);
 router.get('/:id/pdf-report', protect, downloadPdfReport);
 router.post('/:id/stop-preview', protect, stopDeploymentPreview);
 router.post('/:id/start-preview', protect, startDeploymentPreview);
+router.post('/:id/change-port', protect, changeDeploymentPort);
 
 module.exports = router;

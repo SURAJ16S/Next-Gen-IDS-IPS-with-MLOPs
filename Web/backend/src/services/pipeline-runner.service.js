@@ -204,6 +204,10 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
     const targetBuildDir = detection.targetDir;
     logToJob(deploymentId, jobId, `Detected Tech Stack / Framework: ${detection.framework.toUpperCase()}`);
     logToJob(deploymentId, jobId, `Detected Architecture: ${(detection.architecture || 'monolithic').toUpperCase()}`);
+    
+    if (detection.mobileDetected) {
+      logToJob(deploymentId, jobId, `[⚠️ WARNING] Mobile client folder / target detected in this repository (e.g. React Native / Expo). Please note that the gVisor sandbox container preview only compiles and serves Web and Server components. Mobile components cannot be previewed in the browser and must be built/tested locally.`);
+    }
     await Deployment.findByIdAndUpdate(deploymentId, {
       techStackDetected: detection.framework,
       architectureDetected: detection.architecture || 'monolithic',
@@ -237,72 +241,76 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
     }
 
     // ── Step 2.5: Run Smart Dependency Audit ─────────────────────────────────
-    logToJob(deploymentId, jobId, 'Auditing package dependencies for deprecations & stable upgrades...');
-    try {
-      const { auditDependencies } = require('./dependency-updater.service');
-      recommendedUpgrades = await auditDependencies(targetBuildDir);
-      
-      if (recommendedUpgrades && recommendedUpgrades.length > 0) {
-        logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] Found ${recommendedUpgrades.length} recommended stable upgrade(s).`);
-        await Deployment.findByIdAndUpdate(deploymentId, { recommendedUpgrades });
+    if (upgradeMode === 'disabled') {
+      logToJob(deploymentId, jobId, '[DEPENDENCY-AUDIT] Package upgrades are disabled. Compiling with original package.json versions.');
+    } else {
+      logToJob(deploymentId, jobId, 'Auditing package dependencies for deprecations & stable upgrades...');
+      try {
+        const { auditDependencies } = require('./dependency-updater.service');
+        recommendedUpgrades = await auditDependencies(targetBuildDir);
+        
+        if (recommendedUpgrades && recommendedUpgrades.length > 0) {
+          logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] Found ${recommendedUpgrades.length} recommended stable upgrade(s).`);
+          await Deployment.findByIdAndUpdate(deploymentId, { recommendedUpgrades });
 
-        let upgradesToApply = recommendedUpgrades; // Default: apply all
-        if (upgradeMode === 'semi-automatic') {
-          logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] [INTERACTIVE] Pipeline paused for 10 seconds. Prompting user to select versions...`);
-          const { waitForUserSelection } = require('./interaction-manager.service');
-          upgradesToApply = await waitForUserSelection(jobId, recommendedUpgrades, 10000);
-          logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] Resuming pipeline. Applying ${upgradesToApply.length} chosen upgrade(s).`);
-        }
-
-        if (upgradesToApply.length > 0) {
-          logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] Rewriting dependency files with new versions...`);
-          for (const item of upgradesToApply) {
-            try {
-              if (item.manager === 'npm') {
-                const pJsonPath = path.join(targetBuildDir, 'package.json');
-                if (fs.existsSync(pJsonPath)) {
-                  const pJson = JSON.parse(fs.readFileSync(pJsonPath, 'utf8'));
-                  if (pJson.dependencies && pJson.dependencies[item.package]) {
-                    pJson.dependencies[item.package] = `^${item.latest}`;
-                  } else if (pJson.devDependencies && pJson.devDependencies[item.package]) {
-                    pJson.devDependencies[item.package] = `^${item.latest}`;
-                  }
-                  fs.writeFileSync(pJsonPath, JSON.stringify(pJson, null, 2), 'utf8');
-                  logToJob(deploymentId, jobId, `  - Upgraded npm package: ${item.package} ➔ ^${item.latest}`);
-                }
-              } else if (item.manager === 'composer') {
-                const cJsonPath = path.join(targetBuildDir, 'composer.json');
-                if (fs.existsSync(cJsonPath)) {
-                  const cJson = JSON.parse(fs.readFileSync(cJsonPath, 'utf8'));
-                  if (cJson.require && cJson.require[item.package]) {
-                    cJson.require[item.package] = `^${item.latest}`;
-                  } else if (cJson['require-dev'] && cJson['require-dev'][item.package]) {
-                    cJson['require-dev'][item.package] = `^${item.latest}`;
-                  }
-                  fs.writeFileSync(cJsonPath, JSON.stringify(cJson, null, 2), 'utf8');
-                  logToJob(deploymentId, jobId, `  - Upgraded composer package: ${item.package} ➔ ^${item.latest}`);
-                }
-              } else if (item.manager === 'pip') {
-                const reqsPath = path.join(targetBuildDir, 'requirements.txt');
-                if (fs.existsSync(reqsPath)) {
-                  let content = fs.readFileSync(reqsPath, 'utf8');
-                  const regex = new RegExp(`^(${item.package})\\s*(==|>=|<=)\\s*([^\\r\\n;]+)`, 'im');
-                  content = content.replace(regex, `$1==${item.latest}`);
-                  fs.writeFileSync(reqsPath, content, 'utf8');
-                  logToJob(deploymentId, jobId, `  - Upgraded pip package: ${item.package} ➔ ==${item.latest}`);
-                }
-              }
-            } catch (err) {
-              logToJob(deploymentId, jobId, `  [!] Failed to rewrite version for ${item.package}: ${err.message}`);
-            }
+          let upgradesToApply = recommendedUpgrades; // Default: apply all
+          if (upgradeMode === 'semi-automatic') {
+            logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] [INTERACTIVE] Pipeline paused for 10 seconds. Prompting user to select versions...`);
+            const { waitForUserSelection } = require('./interaction-manager.service');
+            upgradesToApply = await waitForUserSelection(jobId, recommendedUpgrades, 10000);
+            logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] Resuming pipeline. Applying ${upgradesToApply.length} chosen upgrade(s).`);
           }
-          logToJob(deploymentId, jobId, '[+] Dependency file rewrites complete.');
+
+          if (upgradesToApply.length > 0) {
+            logToJob(deploymentId, jobId, `[DEPENDENCY-AUDIT] Rewriting dependency files with new versions...`);
+            for (const item of upgradesToApply) {
+              try {
+                if (item.manager === 'npm') {
+                  const pJsonPath = path.join(targetBuildDir, 'package.json');
+                  if (fs.existsSync(pJsonPath)) {
+                    const pJson = JSON.parse(fs.readFileSync(pJsonPath, 'utf8'));
+                    if (pJson.dependencies && pJson.dependencies[item.package]) {
+                      pJson.dependencies[item.package] = `^${item.latest}`;
+                    } else if (pJson.devDependencies && pJson.devDependencies[item.package]) {
+                      pJson.devDependencies[item.package] = `^${item.latest}`;
+                    }
+                    fs.writeFileSync(pJsonPath, JSON.stringify(pJson, null, 2), 'utf8');
+                    logToJob(deploymentId, jobId, `  - Upgraded npm package: ${item.package} ➔ ^${item.latest}`);
+                  }
+                } else if (item.manager === 'composer') {
+                  const cJsonPath = path.join(targetBuildDir, 'composer.json');
+                  if (fs.existsSync(cJsonPath)) {
+                    const cJson = JSON.parse(fs.readFileSync(cJsonPath, 'utf8'));
+                    if (cJson.require && cJson.require[item.package]) {
+                      cJson.require[item.package] = `^${item.latest}`;
+                    } else if (cJson['require-dev'] && cJson['require-dev'][item.package]) {
+                      cJson['require-dev'][item.package] = `^${item.latest}`;
+                    }
+                    fs.writeFileSync(cJsonPath, JSON.stringify(cJson, null, 2), 'utf8');
+                    logToJob(deploymentId, jobId, `  - Upgraded composer package: ${item.package} ➔ ^${item.latest}`);
+                  }
+                } else if (item.manager === 'pip') {
+                  const reqsPath = path.join(targetBuildDir, 'requirements.txt');
+                  if (fs.existsSync(reqsPath)) {
+                    let content = fs.readFileSync(reqsPath, 'utf8');
+                    const regex = new RegExp(`^(${item.package})\\s*(==|>=|<=)\\s*([^\\r\\n;]+)`, 'im');
+                    content = content.replace(regex, `$1==${item.latest}`);
+                    fs.writeFileSync(reqsPath, content, 'utf8');
+                    logToJob(deploymentId, jobId, `  - Upgraded pip package: ${item.package} ➔ ==${item.latest}`);
+                  }
+                }
+              } catch (err) {
+                logToJob(deploymentId, jobId, `  [!] Failed to rewrite version for ${item.package}: ${err.message}`);
+              }
+            }
+            logToJob(deploymentId, jobId, '[+] Dependency file rewrites complete.');
+          }
+        } else {
+          logToJob(deploymentId, jobId, '[DEPENDENCY-AUDIT] All dependencies are fully up-to-date with stable releases.');
         }
-      } else {
-        logToJob(deploymentId, jobId, '[DEPENDENCY-AUDIT] All dependencies are fully up-to-date with stable releases.');
+      } catch (auditErr) {
+        logToJob(deploymentId, jobId, `[!] Failed to audit dependencies: ${auditErr.message}`);
       }
-    } catch (auditErr) {
-      logToJob(deploymentId, jobId, `[!] Failed to audit dependencies: ${auditErr.message}`);
     }
 
     // ── Step 3: Write .env files (with Smart Port/URL Normalization) ──────────
@@ -349,9 +357,10 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
 
       // Known URL-type variable names that point to "frontend" or "client" services
       const FRONTEND_URL_VARS = new Set([
-        'FRONTEND_URL', 'CLIENT_URL', 'APP_URL', 'CORS_ORIGIN', 'ALLOWED_ORIGIN',
+        'FRONTEND_URL', 'CLIENT_URL', 'APP_URL', 'CORS_ORIGIN', 'ALLOWED_ORIGIN', 'ALLOWED_ORIGINS',
         'REACT_APP_URL', 'VUE_APP_URL', 'NEXT_PUBLIC_URL', 'VITE_APP_URL',
         'FRONTEND_BASE_URL', 'CLIENT_BASE_URL', 'WEB_URL', 'WEBAPP_URL',
+        'CORS_ORIGINS', 'ACCESS_CONTROL_ALLOW_ORIGIN',
       ]);
       // Known port variable names
       const PORT_VARS = new Set(['PORT', 'SERVER_PORT', 'APP_PORT', 'HTTP_PORT']);
@@ -369,8 +378,8 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
         const changes = [];
 
         // Determine if this .env is for a server/backend (not a pure client .env)
-        // by checking if PORT or SERVER_PORT is defined
-        const isServerEnv = PORT_VARS.has('PORT') || Object.keys(parsedVars).some(k => PORT_VARS.has(k));
+        // by checking if PORT or SERVER_PORT is defined in the parsed vars
+        const isServerEnv = Object.keys(parsedVars).some(k => PORT_VARS.has(k));
 
         for (const line of lines) {
           const trimmed = line.trim();
@@ -397,28 +406,15 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
           }
 
           // 2. Smart URL normalization for frontend/client URL vars
-          if (FRONTEND_URL_VARS.has(key)) {
+          const isClientVar = key.startsWith('VITE_') || key.startsWith('REACT_APP_') || key.startsWith('NEXT_PUBLIC_') || key.startsWith('PUBLIC_');
+          if (FRONTEND_URL_VARS.has(key) || isClientVar) {
             // Check if value is a localhost URL with a specific port
-            const localhostMatch = val.match(/^https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)(\/.*)?$/);
+            const localhostMatch = val.match(/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(\/.*)?$/);
             if (localhostMatch) {
-              const embeddedPort = localhostMatch[1];
-              const urlPath = localhostMatch[2] || '';
-
-              // Is this var actually used in the server source code?
-              const usedInCode = isVarUsedInSourceCode(key, path.dirname(envDir));
-
-              if (usedInCode) {
-                // Var is used in code — we can't safely remove it. Update the port to
-                // the preview port so CORS/redirects at least point to the same server.
-                const newUrl = `http://localhost:${previewPort}${urlPath}`;
-                normalizedLines.push(`${key}=${newUrl}`);
-                changes.push(`  ↪ [URL-REWRITE] ${key}: "${val}" → "${newUrl}" (var used in code; port updated to preview port)`);
-              } else {
-                // Var not used in code — it's safe to comment out or keep as-is with a note
-                normalizedLines.push(`# [DevOps] ${key} was set to a local frontend URL. Preview runs on port ${previewPort}.`);
-                normalizedLines.push(`${key}=http://localhost:${previewPort}${urlPath}`);
-                changes.push(`  ↪ [URL-WARN] ${key}: "${val}" → commented (not referenced in server code; frontend may not exist at this port in preview)`);
-              }
+              const urlPath = localhostMatch[1] || '';
+              const newUrl = `http://localhost:${previewPort}${urlPath}`;
+              normalizedLines.push(`${key}=${newUrl}`);
+              changes.push(`  ↪ [URL-REWRITE] ${key}: "${val}" → "${newUrl}" (auto-healed to target sandbox port)`);
               continue;
             }
           }
@@ -441,7 +437,39 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
           normalizedLines.push(line);
         }
 
-        const normalizedContent = normalizedLines.join('\n');
+        let normalizedContent = normalizedLines.join('\n');
+
+        // Auto-inject sandbox CORS whitelist vars into server .env files so backend CORS
+        // middleware always accepts requests from the sandbox preview port (http://localhost:<port>).
+        // This is critical for MERN monorepos running via the internal reverse proxy.
+        if (isServerEnv) {
+          const sandboxOrigin = `http://localhost:${previewPort}`;
+          const corsVarsToInject = ['CLIENT_URL', 'FRONTEND_URL', 'CORS_ORIGIN', 'ALLOWED_ORIGIN'];
+          const existingKeys = new Set(Object.keys(parsedVars));
+          const injectedKeys = [];
+
+          for (const corsVar of corsVarsToInject) {
+            if (!existingKeys.has(corsVar)) {
+              normalizedContent += `\n${corsVar}=${sandboxOrigin}`;
+              injectedKeys.push(corsVar);
+            } else {
+              // Key exists but may not include the sandbox origin — ensure it does
+              const existingVal = parsedVars[corsVar] || '';
+              if (!existingVal.includes(`localhost:${previewPort}`)) {
+                normalizedContent = normalizedContent.replace(
+                  new RegExp(`(^|\\n)${corsVar}=.*`),
+                  `$1${corsVar}=${sandboxOrigin}`
+                );
+                injectedKeys.push(`${corsVar} (overridden)`);
+              }
+            }
+          }
+
+          if (injectedKeys.length > 0) {
+            logToJob(deploymentId, jobId, `[ENV] Auto-injected CORS whitelist vars for sandbox: ${injectedKeys.join(', ')} → ${sandboxOrigin}`);
+          }
+        }
+
         fs.mkdirSync(envDir, { recursive: true });
         fs.writeFileSync(envAbsPath, normalizedContent, 'utf8');
         logToJob(deploymentId, jobId, `[ENV] Written: ${envEntry.path}`);

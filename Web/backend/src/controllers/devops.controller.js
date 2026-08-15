@@ -521,6 +521,124 @@ const createFixtureReview = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/devops/:id/change-port
+ * Changes the preview port of an existing deployment, rewrites the DB and disk .env files,
+ * stops the active container, and rebuilds/re-spawns it with the new configuration.
+ */
+const changeDeploymentPort = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { previewPort } = req.body;
+    if (!previewPort || isNaN(previewPort)) {
+      return res.status(400).json({ message: 'Invalid preview port.' });
+    }
+
+    const deployment = await Deployment.findById(id);
+    if (!deployment) {
+      return res.status(404).json({ message: 'Deployment not found.' });
+    }
+
+    const oldPort = deployment.previewPort;
+    const newPort = Number(previewPort);
+
+    // Stop current preview if running
+    const { stopPreview, spawnPreview } = require('../services/process-manager.service');
+    await stopPreview(deployment.jobId);
+
+    // Update DB
+    deployment.previewPort = newPort;
+
+    // Update .env files in the DB and on disk
+    const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+    const extractDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId);
+
+    if (fs.existsSync(extractDir)) {
+      // 1. Rewrite envFiles in DB
+      if (deployment.envFiles && deployment.envFiles.length > 0) {
+        deployment.envFiles = deployment.envFiles.map(envFile => {
+          let content = envFile.content || '';
+          
+          // Replace port variable values
+          content = content.replace(/(PORT|SERVER_PORT|APP_PORT|HTTP_PORT)=\d+/gi, `$1=${newPort}`);
+          
+          // Replace local URLs referring to the old port
+          if (oldPort) {
+            const oldPortRegex = new RegExp(`(localhost|127\\.0\\.0\\.1):${oldPort}`, 'gi');
+            content = content.replace(oldPortRegex, `$1:${newPort}`);
+          }
+          
+          // Also apply our standard URL normalization for the new port
+          const lines = content.split(/\r?\n/);
+          const normalizedLines = lines.map(line => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return line;
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx < 1) return line;
+            const key = trimmed.slice(0, eqIdx).trim();
+            const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+            
+            const FRONTEND_URL_VARS = new Set([
+              'FRONTEND_URL', 'CLIENT_URL', 'APP_URL', 'CORS_ORIGIN', 'ALLOWED_ORIGIN', 'ALLOWED_ORIGINS',
+              'REACT_APP_URL', 'VUE_APP_URL', 'NEXT_PUBLIC_URL', 'VITE_APP_URL',
+              'FRONTEND_BASE_URL', 'CLIENT_BASE_URL', 'WEB_URL', 'WEBAPP_URL',
+              'CORS_ORIGINS', 'ACCESS_CONTROL_ALLOW_ORIGIN'
+            ]);
+            
+            const isClientVar = key.startsWith('VITE_') || key.startsWith('REACT_APP_') || key.startsWith('NEXT_PUBLIC_') || key.startsWith('PUBLIC_');
+            if (FRONTEND_URL_VARS.has(key) || isClientVar) {
+              const localhostMatch = val.match(/^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(\/.*)?$/);
+              if (localhostMatch) {
+                const urlPath = localhostMatch[1] || '';
+                return `${key}=http://localhost:${newPort}${urlPath}`;
+              }
+            }
+            return line;
+          });
+          
+          return {
+            path: envFile.path,
+            content: normalizedLines.join('\n')
+          };
+        });
+      }
+
+      // 2. Rewrite env files on disk
+      if (deployment.envFiles && deployment.envFiles.length > 0) {
+        for (const envFile of deployment.envFiles) {
+          const envAbsPath = path.resolve(extractDir, envFile.path.replace(/^\/+/, ''));
+          if (fs.existsSync(envAbsPath)) {
+            fs.writeFileSync(envAbsPath, envFile.content || '', 'utf8');
+          }
+        }
+      }
+    }
+
+    await deployment.save();
+
+    // 3. Trigger rebuild and restart the preview with the new configuration
+    const { detectFramework } = require('../services/framework-detector.service');
+    const targetSubfolder = deployment.targetSubfolder || '';
+    const detection = detectFramework(extractDir, targetSubfolder);
+    const targetBuildDir = detection.targetDir;
+
+    // Trigger preview (compiles client/server in background)
+    spawnPreview(deployment.jobId, deployment._id, targetBuildDir, detection.framework, newPort)
+      .catch(err => {
+        console.error(`Failed to restart preview for job ${deployment.jobId}:`, err);
+      });
+
+    res.json({ 
+      message: 'Port updated successfully. Rebuilding and restarting preview...', 
+      port: newPort,
+      deployment 
+    });
+  } catch (error) {
+    console.error('Error changing port:', error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getDeployments,
   createDeployment,
@@ -538,4 +656,5 @@ module.exports = {
   downloadPdfReport,
   getFixtureReviews,
   createFixtureReview,
+  changeDeploymentPort,
 };
