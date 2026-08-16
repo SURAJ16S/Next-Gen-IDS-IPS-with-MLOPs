@@ -718,7 +718,7 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
     // ── Step 7: Package artifact ZIP ─────────────────────────────────────────
     logToJob(deploymentId, jobId, 'Packaging build artifact ZIP...');
     const artifactZipPath = path.join(ARTIFACTS_BASE_DIR, `${jobId}-artifact.zip`);
-    await zipDirectory(targetBuildDir, artifactZipPath, ['node_modules', '.git', '.security-reports']);
+    await zipDirectory(targetBuildDir, artifactZipPath, ['node_modules', '.git', '.security-reports', 'venv', '.venv']);
     logToJob(deploymentId, jobId, `Artifact ready at DevOps/artifacts/${jobId}-artifact.zip`);
 
     deploymentStatus = 'deployed';
