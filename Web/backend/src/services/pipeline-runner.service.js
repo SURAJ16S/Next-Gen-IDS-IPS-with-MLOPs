@@ -54,12 +54,16 @@ const ensureDockerImage = async (imageName, deploymentId, jobId) => {
 
 const deleteFolderRecursive = (dirPath) => {
   if (!fs.existsSync(dirPath)) return;
-  fs.readdirSync(dirPath).forEach((file) => {
-    const curPath = path.join(dirPath, file);
-    if (fs.statSync(curPath).isDirectory()) deleteFolderRecursive(curPath);
-    else fs.unlinkSync(curPath);
-  });
-  fs.rmdirSync(dirPath);
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch (_) {
+    // Fallback: retry after a short delay to let OS release file handles
+    setTimeout(() => {
+      try {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+      } catch (_) {}
+    }, 2000);
+  }
 };
 
 const zipDirectory = (sourceDir, outPath, excludePatterns = []) => {
@@ -198,6 +202,20 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
     }
 
     logToJob(deploymentId, jobId, 'ZIP extraction completed.');
+
+    // Write environment files (.env) configured in UI to workspace
+    if (envFiles && envFiles.length > 0) {
+      logToJob(deploymentId, jobId, 'Writing environment files (.env) to workspace...');
+      for (const file of envFiles) {
+        const envPath = path.join(extractDir, file.path.replace(/^\/+/, ''));
+        try {
+          fs.mkdirSync(path.dirname(envPath), { recursive: true });
+          fs.writeFileSync(envPath, file.content || '', 'utf8');
+        } catch (envErr) {
+          logToJob(deploymentId, jobId, `[⚠️ WARNING] Failed to write environment file ${file.path}: ${envErr.message}`);
+        }
+      }
+    }
 
     // ── Step 2: Detect framework & target directory ──────────────────────────
     detection = detectFramework(extractDir, targetSubfolder);

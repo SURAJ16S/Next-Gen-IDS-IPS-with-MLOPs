@@ -26,23 +26,12 @@ module.exports = {
     return false;
   },
   buildImage: 'node:20-alpine',
-  runCommand: 'npm install && npm run build',
+  runCommand: 'npm install',
   getPreviewCommand: (workDir) => {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(workDir, 'package.json'), 'utf8'));
-      if (pkg.scripts && pkg.scripts.preview) {
-        return { cmd: 'npm', args: ['run', 'preview'], env: { NODE_ENV: 'production' } };
-      }
-      if (pkg.scripts && pkg.scripts.start) {
-        return { cmd: 'npm', args: ['run', 'start'], env: { NODE_ENV: 'production' } };
-      }
-    } catch (_) {}
-    // Preact CLI builds to "build/" directory by default
-    const buildDir = fs.existsSync(path.join(workDir, 'build')) ? 'build' : 'dist';
-    return { cmd: 'npx', args: ['serve', '-s', buildDir, '-l', '${PORT:-3000}'], env: { NODE_ENV: 'production' } };
+    return { cmd: 'node', args: ['server.js'], env: { NODE_ENV: 'production' } };
   },
   getConfig: (targetDir) => ({
     buildImage: 'node:20-alpine',
-    runCommand: 'npm install && npm run build'
+    runCommand: 'npm install'
   })
 };

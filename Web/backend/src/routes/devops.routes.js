@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const {
   getDeployments,
+  executeDeploymentDbQuery,
   createDeployment,
   updateDeploymentStatus,
   uploadZip,
@@ -65,5 +66,6 @@ router.get('/:id/pdf-report', protect, downloadPdfReport);
 router.post('/:id/stop-preview', protect, stopDeploymentPreview);
 router.post('/:id/start-preview', protect, startDeploymentPreview);
 router.post('/:id/change-port', protect, changeDeploymentPort);
+router.post('/:id/run-query', protect, executeDeploymentDbQuery);
 
 module.exports = router;

@@ -561,22 +561,249 @@ http.createServer((req, res) => {
     },
     preact: {
       'package.json': JSON.stringify({
-        name: 'preact-app',
+        name: 'preact-fullstack-app',
         version: '1.0.0',
-        scripts: { build: 'echo "preact dist"' },
-        dependencies: { preact: '^10.22.0' }
+        main: 'server.js',
+        scripts: {
+          start: 'node server.js'
+        },
+        dependencies: {
+          express: '^4.19.2',
+          mysql2: '^3.9.7',
+          dotenv: '^16.4.5'
+        }
       }, null, 2),
-      'dist': {
+      '.env': `
+# Preact DevOps MySQL Config
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=preview_db
+DB_USERNAME=root
+DB_PASSWORD=
+PORT=3001
+      `,
+      'schema.sql': `
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(255) NOT NULL,
+  password VARCHAR(255) NOT NULL
+);
+
+INSERT INTO users (username, password) VALUES ('preact_user', 'preact_pass');
+      `,
+      'server.js': `
+const express = require('express');
+const mysql = require('mysql2');
+const path = require('path');
+require('dotenv').config();
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+const dbHost = process.env.DB_HOST || '127.0.0.1';
+const dbPort = process.env.DB_PORT || 3306;
+const dbUser = process.env.DB_USERNAME || 'root';
+const dbPassword = process.env.DB_PASSWORD || '';
+const dbName = process.env.DB_DATABASE || 'preview_db';
+
+console.log(\`[DB] Connecting to MySQL at \${dbHost}:\${dbPort} [User: \${dbUser}, DB: \${dbName}]...\\n\`);
+
+const connection = mysql.createConnection({
+  host: dbHost,
+  port: dbPort,
+  user: dbUser,
+  password: dbPassword,
+  database: dbName
+});
+
+connection.connect((err) => {
+  if (err) {
+    console.error('[DB] Connection failed:', err.message);
+  } else {
+    console.log('[DB] Connection to MySQL database successful!');
+  }
+});
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ success: false, message: 'Username and password are required.' });
+  }
+
+  connection.query(
+    'SELECT * FROM users WHERE username = ? AND password = ?',
+    [username, password],
+    (err, results) => {
+      if (err) {
+        console.error('[DB] Query error:', err.message);
+        return res.status(500).json({ success: false, message: 'Database error occurred.' });
+      }
+
+      if (results.length > 0) {
+        return res.json({ success: true, message: 'Login successful! Welcome to Preact Sandbox Dashboard.' });
+      } else {
+        return res.status(401).json({ success: false, message: 'Invalid credentials. Please try again.' });
+      }
+    }
+  );
+});
+
+app.listen(port, '0.0.0.0', () => {
+  console.log(\`[SERVER] Preact full-stack app listening on port \${port}\`);
+});
+      `,
+      'public': {
         'index.html': `
-          <!DOCTYPE html>
-          <html>
-          <head><style>body { background:#020617; color:#f8fafc; font-family:sans-serif; display:flex; justify-content:center; align-items:center; height:100vh; margin:0; }</style></head>
-          <body>
-            <div style="background:#0f172a; border:1px solid #0284c7; padding:40px; border-radius:16px;">
-              <h1 style="color:#38bdf8; margin-top:0;">Preact Static Bundle Active</h1>
-            </div>
-          </body>
-          </html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Preact DevOps Sandbox Login</title>
+  <style>
+    :root {
+      --bg: #020617;
+      --card-bg: rgba(15, 23, 42, 0.8);
+      --border: rgba(255, 255, 255, 0.08);
+      --accent: #38bdf8;
+      --text: #f8fafc;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .container {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      padding: 40px;
+      border-radius: 16px;
+      width: 320px;
+      box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    h2 {
+      margin: 0;
+      font-size: 24px;
+      text-align: center;
+      color: #38bdf8;
+      font-weight: 700;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #94a3b8;
+      text-align: center;
+      margin-top: -8px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #cbd5e1;
+    }
+    input {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      padding: 12px;
+      border-radius: 8px;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus {
+      border-color: var(--accent);
+    }
+    button {
+      background: var(--accent);
+      border: none;
+      color: #0f172a;
+      padding: 12px;
+      border-radius: 8px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      margin-top: 8px;
+    }
+    button:hover {
+      opacity: 0.9;
+    }
+    #status {
+      font-size: 13px;
+      text-align: center;
+      min-height: 20px;
+    }
+    .success { color: #34d399; }
+    .error { color: #f87171; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Preact Sandbox</h2>
+    <div class="subtitle">Full-Stack Database Authentication</div>
+    
+    <form id="loginForm">
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" placeholder="Enter username" required value="preact_user">
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="Enter password" required value="preact_pass">
+      </div>
+      <button type="submit">Log In</button>
+    </form>
+    
+    <div id="status"></div>
+  </div>
+
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const statusDiv = document.getElementById('status');
+      statusDiv.innerHTML = 'Authenticating...';
+      statusDiv.className = '';
+      
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      
+      try {
+        const response = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          statusDiv.innerHTML = '✅ ' + data.message;
+          statusDiv.className = 'success';
+        } else {
+          statusDiv.innerHTML = '❌ ' + data.message;
+          statusDiv.className = 'error';
+        }
+      } catch (err) {
+        statusDiv.innerHTML = '❌ Database connection offline.';
+        statusDiv.className = 'error';
+      }
+    });
+  </script>
+</body>
+</html>
         `
       }
     },

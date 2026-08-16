@@ -56,6 +56,7 @@ export const getActivePreviews = () => api.get('/devops/previews');
 export const stopDeploymentPreview = (id) => api.post(`/devops/${id}/stop-preview`);
 export const startDeploymentPreview = (id) => api.post(`/devops/${id}/start-preview`);
 export const changeDeploymentPort = (id, previewPort) => api.post(`/devops/${id}/change-port`, { previewPort });
+export const executeDeploymentDbQuery = (id, query, dbType) => api.post(`/devops/${id}/run-query`, { query, dbType });
 export const deleteDeployment = (id) => api.delete(`/devops/${id}`);
 
 // GitHub OAuth

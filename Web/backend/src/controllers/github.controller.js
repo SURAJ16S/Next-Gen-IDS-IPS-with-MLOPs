@@ -161,7 +161,7 @@ const getGithubRepos = async (req, res) => {
 
 // ─── 5. Import a repo (clone → zip → pipeline) ───────────────────────────────
 const importGithubRepo = async (req, res) => {
-  const { repoFullName, branch = 'main', projectName, previewPort: rawPort, sessionId = '', envFiles: rawEnv = '[]', targetSubfolder = '', upgradeMode = 'automatic' } = req.body;
+  const { repoFullName, branch = 'main', projectName, previewPort: rawPort, sessionId = '', envFiles: rawEnv = '[]', targetSubfolder = '', upgradeMode = 'automatic', useTempDb = true, dbInitScript = '', dbInitType = 'none' } = req.body;
 
   if (!repoFullName) {
     return res.status(400).json({ message: 'repoFullName is required.' });
@@ -200,6 +200,9 @@ const importGithubRepo = async (req, res) => {
       envFiles,
       targetSubfolder,
       upgradeMode,
+      useTempDb: useTempDb === true || useTempDb === 'true',
+      dbInitScript,
+      dbInitType,
       deploymentType: 'github',
     });
 

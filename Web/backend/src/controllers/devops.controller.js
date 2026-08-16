@@ -73,6 +73,9 @@ const uploadZip = (req, res) => {
 
       const targetSubfolder = req.body.targetSubfolder || '';
       const upgradeMode = req.body.upgradeMode || 'automatic';
+      const useTempDb = req.body.useTempDb === 'true' || req.body.useTempDb === true;
+      const dbInitScript = req.body.dbInitScript || '';
+      const dbInitType = req.body.dbInitType || 'none';
 
       // Create deployment record in MongoDB
       const deployment = await Deployment.create({
@@ -86,6 +89,9 @@ const uploadZip = (req, res) => {
         envFiles,
         targetSubfolder,
         upgradeMode,
+        useTempDb,
+        dbInitScript,
+        dbInitType,
         deploymentType: 'zip',
       });
 
@@ -346,8 +352,24 @@ const FIXTURES_LIST = [
   { id: 'static', name: 'Static Assets', type: 'Emerging', description: 'Tailwind/glassmorphic responsive static HTML/CSS template.' }
 ];
 
-const listFixtures = (req, res) => {
-  res.json(FIXTURES_LIST);
+const listFixtures = async (req, res) => {
+  try {
+    const enrichedList = await Promise.all(FIXTURES_LIST.map(async (fixture) => {
+      const reviews = await FixtureReview.find({ frameworkId: fixture.id });
+      const reviewCount = reviews.length;
+      const averageRating = reviewCount > 0 
+        ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviewCount).toFixed(1)
+        : 0;
+      return {
+        ...fixture,
+        reviewCount,
+        averageRating: Number(averageRating)
+      };
+    }));
+    res.json(enrichedList);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };
 
 const generateFixture = async (req, res) => {
@@ -374,6 +396,7 @@ const generateFixture = async (req, res) => {
       previewStatus: 'none',
       envFiles: [],
       targetSubfolder: '',
+      useTempDb: true,
     });
 
     // Run pipeline in background
@@ -639,7 +662,101 @@ const changeDeploymentPort = async (req, res) => {
   }
 };
 
+
+const executeDeploymentDbQuery = async (req, res) => {
+  const { id } = req.params;
+  const { query, dbType } = req.body;
+  
+  console.log(`[QUERY RUNNER] Running query against DB ${dbType} for deployment ${id}`);
+  
+  try {
+    const deployment = await Deployment.findById(id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    
+    const jobId = deployment.jobId;
+    const dbContainerName = `devops-db-${dbType}-${jobId}`;
+
+    const Docker = require('dockerode');
+    const activeDocker = new Docker();
+    const container = activeDocker.getContainer(dbContainerName);
+    
+    try {
+      const inspect = await container.inspect();
+      if (!inspect.State.Running) {
+        return res.status(400).json({ message: 'Database container is not running. Please start the preview first!' });
+      }
+    } catch (_) {
+      return res.status(400).json({ message: 'Database container does not exist or is offline. Please start the preview first!' });
+    }
+
+    const runExecWithTimeout = async (cmd, timeoutMs = 15000) => {
+      return new Promise(async (resolve, reject) => {
+        let resolved = false;
+        let timer;
+        try {
+          const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+          const stream = await exec.start();
+          let output = '';
+          
+          timer = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              try { stream.destroy(); } catch (_) {}
+              resolve(output);
+            }
+          }, timeoutMs);
+
+          stream.on('data', (chunk) => { output += chunk.toString(); });
+          stream.on('end', () => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timer);
+              resolve(output);
+            }
+          });
+          stream.on('error', () => {
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timer);
+              resolve(output);
+            }
+          });
+        } catch (err) {
+          if (!resolved) {
+            resolved = true;
+            if (timer) clearTimeout(timer);
+            reject(err);
+          }
+        }
+      });
+    };
+
+    const dbName = 'preview_db';
+    let output = '';
+
+    const delimiter = '__DB_QUERY_EOF__';
+    if (dbType === 'mysql') {
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\nmysql -u root -D "${dbName}" < /tmp/run.sql`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else if (dbType === 'postgres') {
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\npsql -U postgres -d "${dbName}" < /tmp/run.sql`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else if (dbType === 'mongodb') {
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.js\n${query}\n${delimiter}\nmongosh "${dbName}" --quiet /tmp/run.js`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else {
+      return res.status(400).json({ message: `Unsupported database type: ${dbType}` });
+    }
+
+    res.json({ output });
+  } catch (error) {
+    console.error('Error running DB query:', error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
+  executeDeploymentDbQuery,
   getDeployments,
   createDeployment,
   updateDeploymentStatus,

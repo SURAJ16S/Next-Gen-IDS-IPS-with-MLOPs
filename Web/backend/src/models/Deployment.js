@@ -73,6 +73,9 @@ const deploymentSchema = new mongoose.Schema(
       }
     ],
     upgradeMode: { type: String, enum: ['automatic', 'semi-automatic', 'disabled'], default: 'automatic' },
+    useTempDb: { type: Boolean, default: true },
+    dbInitScript: { type: String, default: '' },
+    dbInitType: { type: String, enum: ['mysql', 'postgres', 'mongodb', 'none'], default: 'none' },
   },
   { 
     timestamps: true,

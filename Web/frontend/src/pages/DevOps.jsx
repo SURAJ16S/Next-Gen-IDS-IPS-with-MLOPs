@@ -17,10 +17,11 @@ import {
   importGithubRepo,
   unlinkGithub,
   getGithubBranches,
+  executeDeploymentDbQuery,
 } from '../services/api';
 import { io } from 'socket.io-client';
 import {
-  Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu,
+  Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu, Check, Database,
   Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff,
   RefreshCw, Search, Lock, Unlock, GitBranch, Star, Settings
 } from 'lucide-react';
@@ -227,6 +228,75 @@ const computeStagesFromLogs = (logs, currentStatus) => {
 
 const MAX_FILE_SIZE = 300 * 1024 * 1024; // 300 MB
 
+const highlightCode = (code, type) => {
+  if (!code) return '';
+  
+  // Tokenize using regex to extract strings, comments, words, numbers, and whitespaces
+  const tokenRegex = /(\/\*[\s\S]*?\*\/|\/\/.*|--.*|"[^"]*"|'[^']*'|[a-zA-Z_]+|[0-9]+|[\s]+|[^\s\w])/g;
+  const tokens = code.match(tokenRegex) || [code];
+
+  const sqlKeywords = new Set([
+    'CREATE', 'TABLE', 'IF', 'NOT', 'EXISTS', 'PRIMARY', 'KEY', 'AUTO_INCREMENT',
+    'INSERT', 'INTO', 'VALUES', 'SELECT', 'UPDATE', 'DELETE', 'VARCHAR', 'INT',
+    'NULL', 'DEFAULT', 'FROM', 'WHERE', 'AND', 'OR', 'JOIN', 'ON', 'AS', 'DATABASE',
+    'USE', 'SHOW', 'TABLES', 'DATABASES'
+  ]);
+
+  const mongoKeywords = new Set([
+    'db', 'insertOne', 'insertMany', 'updateOne', 'updateMany', 'deleteOne',
+    'deleteMany', 'find', 'aggregate', 'users', 'threats'
+  ]);
+
+  return tokens.map(token => {
+    // Escape HTML
+    let escaped = token
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    if (type === 'mongodb') {
+      if (mongoKeywords.has(token)) {
+        if (token === 'db') {
+          return `<span style="color: #60a5fa; font-weight: bold;">${escaped}</span>`;
+        }
+        return `<span style="color: #f43f5e; font-weight: 600;">${escaped}</span>`;
+      }
+      if (token.startsWith('//')) {
+        return `<span style="color: #64748b; font-style: italic;">${escaped}</span>`;
+      }
+      if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+        return `<span style="color: #34d399;">${escaped}</span>`;
+      }
+      if (/^\d+$/.test(token)) {
+        return `<span style="color: #fbbf24;">${escaped}</span>`;
+      }
+    } else {
+      // SQL Mode
+      if (sqlKeywords.has(token.toUpperCase())) {
+        return `<span style="color: #60a5fa; font-weight: bold;">${escaped}</span>`;
+      }
+      if (token.startsWith('/*') && token.endsWith('*/')) {
+        return `<span style="color: #64748b; font-style: italic;">${escaped}</span>`;
+      }
+      if (token.startsWith('--')) {
+        return `<span style="color: #64748b; font-style: italic;">${escaped}</span>`;
+      }
+      if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+        return `<span style="color: #34d399;">${escaped}</span>`;
+      }
+    }
+    return escaped;
+  }).join('');
+};
+
+const handleTextareaScroll = (e) => {
+  const preElement = e.target.nextSibling;
+  if (preElement) {
+    preElement.scrollTop = e.target.scrollTop;
+    preElement.scrollLeft = e.target.scrollLeft;
+  }
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 function DevOps() {
@@ -261,6 +331,14 @@ function DevOps() {
   // Custom port
   const [previewPort, setPreviewPort] = useState('');
   const [portLoading, setPortLoading] = useState(false);
+  const [useTempDb, setUseTempDb] = useState(true);
+  const [enableDbInit, setEnableDbInit] = useState(false);
+  const [dbInitType, setDbInitType] = useState('mysql');
+  const [dbInitScript, setDbInitScript] = useState('');
+  const [isPipelineLogCollapsed, setIsPipelineLogCollapsed] = useState(false);
+  const [terminalQuery, setTerminalQuery] = useState('');
+  const [terminalOutput, setTerminalOutput] = useState('');
+  const [runningQuery, setRunningQuery] = useState(false);
 
   // Drag & drop upload state
   const [isDragActive, setIsDragActive] = useState(false);
@@ -626,6 +704,9 @@ function DevOps() {
         envFiles:       JSON.stringify(envFiles.filter(r => r.path.trim() && r.content.trim())),
         targetSubfolder,
         upgradeMode,
+        useTempDb,
+        dbInitScript: enableDbInit ? dbInitScript : '',
+        dbInitType: enableDbInit ? dbInitType : 'none',
       });
       const { jobId, deploymentId } = res.data;
       setActiveJobId(jobId);
@@ -758,6 +839,9 @@ function DevOps() {
     formData.append('envFiles', JSON.stringify(filteredEnvFiles));
     formData.append('targetSubfolder', targetSubfolder);
     formData.append('upgradeMode', upgradeMode);
+    formData.append('useTempDb', String(useTempDb));
+    formData.append('dbInitScript', enableDbInit ? dbInitScript : '');
+    formData.append('dbInitType', enableDbInit ? dbInitType : 'none');
 
     try {
       const res = await uploadDeploymentZip(formData, (progressEvent) => {
@@ -786,6 +870,22 @@ function DevOps() {
   };
 
   // ── Stop live preview ──────────────────────────────────────────────────────
+  
+  const handleRunTerminalQuery = async (activeDbVal) => {
+    if (!terminalQuery.trim() || !activeDeploymentId) return;
+    setRunningQuery(true);
+    setTerminalOutput('Executing query inside database container...');
+    
+    try {
+      const res = await executeDeploymentDbQuery(activeDeploymentId, terminalQuery, activeDbVal || 'mysql');
+      setTerminalOutput(res.data.output || '(No output returned. Query ran successfully.)');
+    } catch (err) {
+      setTerminalOutput(`Error: ${err.response?.data?.message || err.message}`);
+    } finally {
+      setRunningQuery(false);
+    }
+  };
+  
   const handleStopPreview = async () => {
     if (!activeDeploymentId) return;
     setStoppingPreview(true);
@@ -931,10 +1031,10 @@ function DevOps() {
         <p className="page-subtitle">Compile, secure-gate, and run application source containers dynamically — no Docker Desktop required</p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '7fr 3fr', gap: '24px', alignItems: 'start' }}>
 
         {/* ── Upload Card ──────────────────────────────────────────────── */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px', height: '620px', overflowY: 'auto', paddingRight: '12px' }}>
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px', height: '1250px', overflowY: 'auto', paddingRight: '12px' }}>
 
           {/* ── Card title row ─────────────────────────────────────────── */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -1195,6 +1295,55 @@ function DevOps() {
                         <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: 0 }}>
                           Specify paths relative to repo root, e.g. <code>backend/.env</code> or <code>.env</code>. Leave empty to skip.
                         </p>
+                        {/* Preset Buttons for env configuration */}
+                        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', marginTop: '6px', marginBottom: '4px' }}>
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600 }}>Load Config Presets:</span>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# React / Node Config\nPORT=3001\nMONGODB_URI=mongodb://localhost:27017/preview_db\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            ⚡ JS / MERN
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# Node.js + MySQL Config\nPORT=3001\nDB_HOST=127.0.0.1\nDB_PORT=3306\nDB_DATABASE=preview_db\nDB_USERNAME=root\nDB_PASSWORD=\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            ⚛️ Node.js + MySQL
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# PHP / Laravel Config\nDB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_PORT=3306\nDB_DATABASE=preview_db\nDB_USERNAME=root\nDB_PASSWORD=\n# PHP serves on port 8000 internally' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            🐘 PHP / Laravel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# Java Spring Boot Config\nSPRING_DATASOURCE_URL=jdbc:mysql://localhost:3306/preview_db\nSPRING_DATASOURCE_USERNAME=root\nSPRING_DATASOURCE_PASSWORD=\nSPRING_JPA_HIBERNATE_DDL_AUTO=update\n# Spring Boot serves on port 8080 internally' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            ☕ Java Spring Boot
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# Python Django / Flask Config\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_NAME=preview_db\nDB_USER=postgres\nDB_PASSWORD=' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            🐍 Python (Django)
+                          </button>
+                        </div>
                         <div style={{ fontSize: '11.5px', color: 'var(--accent-cyan)', background: 'rgba(6,182,212,0.04)', border: '1px solid rgba(6,182,212,0.15)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginTop: '4px', lineHeight: '1.4' }}>
                           💡 <strong>Deployment Hint:</strong> Client/CORS variables (e.g. <code>VITE_API_URL</code>, <code>CLIENT_URL</code>) must point to your exposed Preview Port (currently <code>{previewPort || '3001'}</code>). Set them to <code>http://localhost:{previewPort || '3001'}</code> to match the sandbox environment.
                         </div>
@@ -1257,7 +1406,7 @@ function DevOps() {
                               )}
                             </div>
                             <textarea
-                              rows={3}
+                              rows={8}
                               placeholder={'PORT=3001\nMONGO_URI=mongodb://localhost:27017/mydb\nJWT_SECRET=my_secret'}
                               value={row.content}
                               onChange={(e) => updateEnvRow(idx, 'content', e.target.value)}
@@ -1266,7 +1415,7 @@ function DevOps() {
                                 fontFamily: 'var(--font-mono)',
                                 fontSize: '11px',
                                 resize: 'vertical',
-                                minHeight: '64px',
+                                minHeight: '160px',
                                 WebkitTextSecurity: showEnvContent[idx] ? 'none' : 'disc'
                               }}
                             />
@@ -1466,6 +1615,173 @@ function DevOps() {
 
             {/* .env files section */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+               {/* Temporary DB Container Provisioning Toggle */}
+               <div style={{
+                 display: 'flex',
+                 alignItems: 'flex-start',
+                 gap: '10px',
+                 background: 'rgba(6, 182, 212, 0.03)',
+                 border: '1px solid rgba(6, 182, 212, 0.12)',
+                 borderRadius: 'var(--radius-sm)',
+                 padding: '10px',
+                 marginTop: '5px',
+                 marginBottom: '8px'
+               }}>
+                 <input
+                   type="checkbox"
+                   id="useTempDbGit"
+                   checked={useTempDb}
+                   onChange={(e) => setUseTempDb(e.target.checked)}
+                   style={{ cursor: 'pointer', width: '15px', height: '15px', accentColor: 'var(--accent-cyan)', marginTop: '2px' }}
+                 />
+                 <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                   <label htmlFor="useTempDbGit" style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>
+                     Provision Temporary Database Containers
+                   </label>
+                   <span style={{ fontSize: '10.5px', color: 'var(--text-muted)', lineHeight: '1.3' }}>
+                     Automatically spin up isolated MySQL/PostgreSQL/MongoDB containers. Uncheck if you connect directly to a cloud database (e.g. Atlas, Neon) or external service.
+                   </span>
+                 </div>
+               </div>
+
+               {/* Custom Database Seeding Script Accordion */}
+               <div style={{
+                 background: 'rgba(255, 255, 255, 0.02)',
+                 border: '1px solid var(--border-subtle)',
+                 borderRadius: 'var(--radius-md)',
+                 padding: '12px',
+                 marginTop: '5px',
+                 marginBottom: '10px'
+               }}>
+                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }} onClick={() => setEnableDbInit(!enableDbInit)}>
+                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                     <input
+                       type="checkbox"
+                       checked={enableDbInit}
+                       onChange={(e) => setEnableDbInit(e.target.checked)}
+                       onClick={(e) => e.stopPropagation()}
+                       style={{ width: '14px', height: '14px', accentColor: 'var(--accent-cyan)' }}
+                     />
+                     <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                       Enable Custom Database Initialization Script
+                     </span>
+                   </div>
+                   <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{enableDbInit ? '▼' : '▶'}</span>
+                 </div>
+
+                 {enableDbInit && (
+                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.06)', paddingTop: '10px' }}>
+                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                       <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Database Type:</span>
+                       <select
+                         value={dbInitType}
+                         onChange={(e) => setDbInitType(e.target.value)}
+                         style={{
+                           background: '#040815',
+                           border: '1px solid var(--border-subtle)',
+                           borderRadius: 'var(--radius-sm)',
+                           color: '#ffffff',
+                           fontSize: '11.5px',
+                           padding: '4px 10px',
+                           outline: 'none'
+                         }}
+                       >
+                         <option value="mysql" style={{ background: '#040815', color: '#ffffff' }}>MySQL (SQL)</option>
+                         <option value="postgres" style={{ background: '#040815', color: '#ffffff' }}>PostgreSQL (SQL)</option>
+                         <option value="mongodb" style={{ background: '#040815', color: '#ffffff' }}>MongoDB (NoSQL)</option>
+                       </select>
+
+                       <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
+                         <button
+                           type="button"
+                           onClick={() => {
+                             if (dbInitType === 'mongodb') {
+                               setDbInitScript(`db.users.insertOne({ username: "admin", password: "admin123" });\ndb.threats.insertMany([\n  { id: "ALT-101", type: "SQL Injection", severity: "High" },\n  { id: "ALT-102", type: "Brute Force SSH", severity: "Critical" }\n]);`);
+                             } else {
+                               setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  username VARCHAR(255) NOT NULL,\n  password VARCHAR(255) NOT NULL\n);\n\nINSERT INTO users (username, password) VALUES ('admin', 'admin123');`);
+                             }
+                           }}
+                           style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.25)', borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)', padding: '2px 6px', fontSize: '10px', cursor: 'pointer' }}
+                         >
+                           💡 Load Preset
+                         </button>
+                         <button
+                           type="button"
+                           onClick={() => setDbInitScript('')}
+                           style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.25)', borderRadius: 'var(--radius-sm)', color: '#f87171', padding: '2px 6px', fontSize: '10px', cursor: 'pointer' }}
+                         >
+                           Clear
+                         </button>
+                       </div>
+                     </div>
+
+                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                       <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                         Initialization Script / Commands:
+                       </label>
+                       <div style={{ position: 'relative', width: '100%', minHeight: '130px' }}>
+                         <textarea
+                           value={dbInitScript}
+                           onChange={(e) => setDbInitScript(e.target.value)}
+                           onScroll={handleTextareaScroll}
+                           placeholder={
+                             dbInitType === 'mongodb'
+                               ? `// Enter MongoDB query sequence:\ndb.users.insertOne({ username: "admin", password: "admin123" });`
+                               : `/* Enter SQL command sequence: */\nCREATE TABLE IF NOT EXISTS users (...);\nINSERT INTO users ...;`
+                           }
+                           rows={6}
+                           style={{
+                             width: '100%',
+                             height: '130px',
+                             background: 'transparent',
+                             border: '1px solid var(--border-subtle)',
+                             borderRadius: 'var(--radius-sm)',
+                             color: 'transparent',
+                             caretColor: '#ffffff',
+                             fontFamily: 'var(--font-mono), monospace',
+                             fontSize: '11.5px',
+                             padding: '10px',
+                             outline: 'none',
+                             resize: 'vertical',
+                             position: 'relative',
+                             zIndex: 2,
+                             whiteSpace: 'pre-wrap',
+                             wordBreak: 'break-all',
+                             lineHeight: '1.5',
+                             boxSizing: 'border-box'
+                           }}
+                         />
+                         <pre
+                           dangerouslySetInnerHTML={{ __html: highlightCode(dbInitScript, dbInitType) || `<span style="color: var(--text-muted); font-style: italic;">${dbInitType === 'mongodb' ? '// Enter MongoDB queries...' : '/* Enter SQL commands... */'}</span>` }}
+                           style={{
+                             position: 'absolute',
+                             top: 0,
+                             left: 0,
+                             width: '100%',
+                             height: '100%',
+                             background: '#020617',
+                             border: '1px solid transparent',
+                             borderRadius: 'var(--radius-sm)',
+                             fontFamily: 'var(--font-mono), monospace',
+                             fontSize: '11.5px',
+                             padding: '10px',
+                             margin: 0,
+                             pointerEvents: 'none',
+                             whiteSpace: 'pre-wrap',
+                             wordBreak: 'break-all',
+                             overflow: 'hidden',
+                             zIndex: 1,
+                             lineHeight: '1.5',
+                             boxSizing: 'border-box',
+                             textAlign: 'left',
+                             color: '#ffffff'
+                           }}
+                         />
+                       </div>
+                     </div>
+                   </div>
+                 )}
+               </div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <FileText size={13} style={{ color: 'var(--accent-cyan)' }} />
@@ -1495,6 +1811,55 @@ function DevOps() {
               <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: 0 }}>
                 Specify paths relative to your ZIP root, e.g. <code>backend/.env</code> or <code>.env</code>. Leave empty to skip.
               </p>
+              {/* Preset Buttons for env configuration */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px', marginTop: '6px', marginBottom: '4px' }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600 }}>Load Config Presets:</span>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# React / Node Config\nPORT=3001\nMONGODB_URI=mongodb://localhost:27017/preview_db\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  ⚡ JS / MERN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# Node.js + MySQL Config\nPORT=3001\nDB_HOST=127.0.0.1\nDB_PORT=3306\nDB_DATABASE=preview_db\nDB_USERNAME=root\nDB_PASSWORD=\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  ⚛️ Node.js + MySQL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# PHP / Laravel Config\nDB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_PORT=3306\nDB_DATABASE=preview_db\nDB_USERNAME=root\nDB_PASSWORD=\n# PHP serves on port 8000 internally' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  🐘 PHP / Laravel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# Java Spring Boot Config\nSPRING_DATASOURCE_URL=jdbc:mysql://localhost:3306/preview_db\nSPRING_DATASOURCE_USERNAME=root\nSPRING_DATASOURCE_PASSWORD=\nSPRING_JPA_HIBERNATE_DDL_AUTO=update\n# Spring Boot serves on port 8080 internally' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  ☕ Java Spring Boot
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# Python Django / Flask Config\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_NAME=preview_db\nDB_USER=postgres\nDB_PASSWORD=' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  🐍 Python (Django)
+                </button>
+              </div>
               <div style={{ fontSize: '11.5px', color: 'var(--accent-cyan)', background: 'rgba(6,182,212,0.04)', border: '1px solid rgba(6,182,212,0.15)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginTop: '4px', lineHeight: '1.4' }}>
                 💡 <strong>Deployment Hint:</strong> Client/CORS variables (e.g. <code>VITE_API_URL</code>, <code>CLIENT_URL</code>) must point to your exposed Preview Port (currently <code>{previewPort || '3001'}</code>). Set them to <code>http://localhost:{previewPort || '3001'}</code> to match the sandbox environment.
               </div>
@@ -1566,7 +1931,7 @@ function DevOps() {
                       fontFamily: 'var(--font-mono)',
                       fontSize: '11px',
                       resize: 'vertical',
-                      minHeight: '64px',
+                      minHeight: '160px',
                       WebkitTextSecurity: showEnvContent[idx] ? 'none' : 'disc'
                     }}
                   />
@@ -1701,14 +2066,53 @@ function DevOps() {
         </div>
 
         {/* ── Live Pipeline Console ──────────────────────────────────────── */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '620px', overflowY: 'auto', paddingRight: '12px', position: 'relative' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div className="card" style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: isPipelineLogCollapsed ? '0' : '16px',
+          height: isPipelineLogCollapsed ? 'auto' : '1250px',
+          overflowY: isPipelineLogCollapsed ? 'visible' : 'auto',
+          paddingRight: '12px',
+          position: 'relative',
+          transition: 'height 0.2s ease-in-out'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isPipelineLogCollapsed ? '0' : '4px' }}>
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
+              onClick={() => setIsPipelineLogCollapsed(!isPipelineLogCollapsed)}
+              title={isPipelineLogCollapsed ? "Expand Console" : "Collapse Console"}
+            >
               <Terminal size={20} style={{ color: 'var(--accent-cyan)' }} />
               <h2 style={{ fontSize: '15px' }}>Pipeline Log Stream</h2>
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginLeft: '4px' }}>
+                {isPipelineLogCollapsed ? '▶' : '▼'}
+              </span>
             </div>
-            {activeJobStatus && <StatusBadge status={activeJobStatus} />}
-          </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              {activeJobStatus && <StatusBadge status={activeJobStatus} />}
+              <button
+                type="button"
+                onClick={() => setIsPipelineLogCollapsed(!isPipelineLogCollapsed)}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-secondary)',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                  padding: '3px 8px',
+                  borderRadius: 'var(--radius-sm)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px'
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+              >
+                {isPipelineLogCollapsed ? 'Expand' : 'Collapse'}
+              </button>
+            </div>
+          </div>{!isPipelineLogCollapsed && (
+            <>
 
           {!activeJobStatus ? (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
@@ -2037,6 +2441,158 @@ function DevOps() {
                       </div>
                     </div>
                   )}
+                  {/* Sandbox Database Terminal Panel */}
+                  {previewReady && activeDeploymentId && (() => {
+                    const activeDep = deployments.find(d => d._id === activeDeploymentId);
+                    if (!activeDep || !activeDep.dbInitType || activeDep.dbInitType === 'none') return null;
+                    const dbLabel = activeDep.dbInitType === 'mysql' ? 'MySQL (SQL)' : activeDep.dbInitType === 'postgres' ? 'PostgreSQL (SQL)' : 'MongoDB (NoSQL)';
+                    return (
+                      <div style={{
+                        display: 'flex', flexDirection: 'column', gap: '12px',
+                        background: 'rgba(6, 182, 212, 0.02)', padding: '14px',
+                        borderRadius: 'var(--radius-md)', border: '1px solid rgba(6, 182, 212, 0.25)',
+                        marginTop: '12px'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <Database size={18} style={{ color: 'var(--accent-cyan)', flexShrink: 0 }} />
+                          <div style={{ flex: 1, fontSize: '13px', color: 'var(--text-primary)', fontWeight: 600 }}>
+                            🗄️ Sandbox Database Query Terminal ({dbLabel})
+                          </div>
+                          
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (activeDep.dbInitType === 'mongodb') {
+                                  setTerminalQuery('db.users.find().toArray();');
+                                } else {
+                                  setTerminalQuery('SELECT * FROM users;');
+                                }
+                              }}
+                              style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '2px 6px', fontSize: '10px', cursor: 'pointer' }}
+                            >
+                              🔍 View Users
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setTerminalQuery('')}
+                              style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.25)', borderRadius: 'var(--radius-sm)', color: '#f87171', padding: '2px 6px', fontSize: '10px', cursor: 'pointer' }}
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <div style={{ position: 'relative', width: '100%', minHeight: '180px' }}>
+                            <textarea
+                              value={terminalQuery}
+                              onChange={(e) => setTerminalQuery(e.target.value)}
+                              onScroll={handleTextareaScroll}
+                              placeholder={
+                                activeDep.dbInitType === 'mongodb'
+                                  ? '// Enter MongoDB queries (e.g. db.users.find())\\ndb.users.find().toArray();'
+                                  : '/* Enter SQL queries (e.g. SELECT * FROM users;) */\\nSELECT * FROM users;'
+                              }
+                              rows={4}
+                              style={{
+                                width: '100%',
+                                height: '180px',
+                                background: 'transparent',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: 'var(--radius-sm)',
+                                color: 'transparent',
+                                caretColor: '#ffffff',
+                                fontFamily: 'var(--font-mono), monospace',
+                                fontSize: '11.5px',
+                                padding: '10px',
+                                outline: 'none',
+                                resize: 'vertical',
+                                position: 'relative',
+                                zIndex: 2,
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-all',
+                                lineHeight: '1.5',
+                                boxSizing: 'border-box'
+                              }}
+                            />
+                            <pre
+                              dangerouslySetInnerHTML={{ __html: highlightCode(terminalQuery, activeDep.dbInitType) || `<span style="color: var(--text-muted); font-style: italic;">${activeDep.dbInitType === 'mongodb' ? '// Enter MongoDB queries...' : '/* Enter SQL queries... */'}</span>` }}
+                              style={{
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                width: '100%',
+                                height: '100%',
+                                background: '#020617',
+                                border: '1px solid transparent',
+                                borderRadius: 'var(--radius-sm)',
+                                fontFamily: 'var(--font-mono), monospace',
+                                fontSize: '11.5px',
+                                padding: '10px',
+                                margin: 0,
+                                pointerEvents: 'none',
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-all',
+                                overflow: 'hidden',
+                                zIndex: 1,
+                                lineHeight: '1.5',
+                                boxSizing: 'border-box',
+                                textAlign: 'left',
+                                color: '#ffffff'
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '10px' }}>
+                          <button
+                            type="button"
+                            onClick={() => handleRunTerminalQuery(activeDep.dbInitType)}
+                            disabled={runningQuery || !terminalQuery.trim()}
+                            style={{
+                              background: 'var(--accent-cyan)',
+                              border: 'none',
+                              borderRadius: 'var(--radius-sm)',
+                              color: '#000000',
+                              padding: '6px 16px',
+                              fontWeight: 700,
+                              fontSize: '12px',
+                              cursor: (runningQuery || !terminalQuery.trim()) ? 'not-allowed' : 'pointer',
+                              opacity: (runningQuery || !terminalQuery.trim()) ? 0.6 : 1,
+                              marginLeft: 'auto'
+                            }}
+                          >
+                            {runningQuery ? 'Running...' : 'Run Query'}
+                          </button>
+                        </div>
+
+                        {terminalOutput && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
+                            <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 600 }}>Execution Output:</span>
+                            <pre style={{
+                              background: '#020617',
+                              border: '1px solid var(--border-subtle)',
+                              borderRadius: 'var(--radius-sm)',
+                              color: '#34d399',
+                              fontFamily: 'var(--font-mono), monospace',
+                              fontSize: '11.5px',
+                              padding: '10px',
+                              margin: 0,
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-all',
+                              maxHeight: '180px',
+                              overflowY: 'auto',
+                              textAlign: 'left'
+                            }}>
+                              {terminalOutput}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+  
 
                   {/* Preview stopped notice */}
                   {activeJobStatus === 'deployed' && !previewRunning && previewUrl && (
@@ -2194,6 +2750,8 @@ function DevOps() {
                 </div>
               )}
             </div>
+          )}
+            </>
           )}
         </div>
       </div>
