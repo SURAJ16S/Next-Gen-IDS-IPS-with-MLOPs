@@ -19,11 +19,26 @@ const generateOtp = () =>
 
 const registerUser = async (req, res) => {
   try {
-    const { firstName, lastName, username, dob, mobile, email, password, role } = req.body;
+    const { firstName, lastName, username, dob, mobile, email, password, role, githubRegToken, githubUsername } = req.body;
 
     const userExists = await User.findOne({ $or: [{ email }, { username }] });
     if (userExists) {
       return res.status(400).json({ message: 'User with this email or username already exists' });
+    }
+
+    let extraFields = {};
+    if (githubRegToken) {
+      try {
+        const decoded = jwt.verify(githubRegToken, process.env.JWT_SECRET);
+        if (decoded.email === email && decoded.githubUsername === githubUsername) {
+          extraFields.githubUsername = githubUsername;
+          extraFields.githubAccessToken = decoded.githubAccessToken;
+        } else {
+          return res.status(400).json({ message: 'GitHub verification token mismatch.' });
+        }
+      } catch (err) {
+        return res.status(400).json({ message: 'Invalid or expired GitHub registration token.' });
+      }
     }
 
     const user = await User.create({
@@ -35,6 +50,7 @@ const registerUser = async (req, res) => {
       email,
       password,
       role: role || 'viewer',
+      ...extraFields
     });
 
     res.status(201).json({
@@ -199,4 +215,193 @@ const getMe = async (req, res) => {
   }
 };
 
-module.exports = { registerUser, loginUser, forgotPassword, verifyOtp, resetPassword, getMe };
+const githubLoginRedirect = (req, res) => {
+  const { GITHUB_CLIENT_ID, GITHUB_CALLBACK_URL } = process.env;
+  const state = jwt.sign({ action: 'login' }, process.env.JWT_SECRET, { expiresIn: '15m' });
+  const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: GITHUB_CALLBACK_URL,
+    scope: 'repo read:user user:email',
+    allow_signup: 'true',
+    state,
+    // Force GitHub account picker so user can switch between accounts
+    prompt: 'select_account',
+  });
+  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+};
+
+const githubLoginCallback = async (req, res) => {
+  const axios = require('axios');
+  const crypto = require('crypto');
+  const { code } = req.query;
+  const { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, FRONTEND_URL, GITHUB_CALLBACK_URL } = process.env;
+  const authCallbackUrl = GITHUB_CALLBACK_URL;
+
+  if (!code) {
+    return res.redirect(`${FRONTEND_URL}/login?error=no_code`);
+  }
+
+  try {
+    const tokenRes = await axios.post(
+      'https://github.com/login/oauth/access_token',
+      {
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: authCallbackUrl,
+      },
+      { headers: { Accept: 'application/json' } }
+    );
+
+    const { access_token, error } = tokenRes.data;
+    if (error || !access_token) {
+      return res.redirect(`${FRONTEND_URL}/login?error=token_failed`);
+    }
+
+    const userRes = await axios.get('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'IDPS-Auth' },
+    });
+    const ghUser = userRes.data;
+
+    let email = ghUser.email;
+    if (!email) {
+      try {
+        const emailsRes = await axios.get('https://api.github.com/user/emails', {
+          headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'IDPS-Auth' },
+        });
+        const primaryEmail = emailsRes.data.find(e => e.primary && e.verified);
+        if (primaryEmail) email = primaryEmail.email;
+      } catch (_) {}
+    }
+    if (!email) email = `${ghUser.login}@github.com`;
+
+    // 1. First, search if a user is already linked with this GitHub username
+    let user = await User.findOne({ githubUsername: ghUser.login });
+
+    if (!user) {
+      // 2. If not linked by githubUsername, search by email
+      user = await User.findOne({ email });
+
+      if (user) {
+        // 3. User exists by email but isn't linked to this GitHub account yet.
+        // Generate a secure, short-lived JWT token containing linking details.
+        const linkToken = jwt.sign(
+          {
+            email,
+            githubUsername: ghUser.login,
+            githubAccessToken: access_token,
+          },
+          process.env.JWT_SECRET,
+          { expiresIn: '15m' }
+        );
+
+        return res.redirect(
+          `${FRONTEND_URL}/login?action=link_github&email=${encodeURIComponent(email)}&githubUsername=${encodeURIComponent(ghUser.login)}&linkToken=${linkToken}`
+        );
+      } else {
+        // 4. No account exists. Register as a new user.
+        const nameParts = (ghUser.name || ghUser.login).split(' ');
+        const firstName = nameParts[0] || ghUser.login;
+        const lastName = nameParts.slice(1).join(' ') || ' ';
+        
+        user = await User.create({
+          firstName,
+          lastName,
+          username: ghUser.login + Math.floor(100 + Math.random() * 900),
+          email,
+          dob: new Date('2000-01-01'),
+          mobile: '0000000000',
+          password: crypto.randomBytes(16).toString('hex'),
+          role: 'viewer',
+          githubAccessToken: access_token,
+          githubUsername: ghUser.login,
+        });
+      }
+    } else {
+      // User is already linked. Update the access token.
+      user.githubAccessToken = access_token;
+      await user.save();
+    }
+
+    const token = generateToken(user._id);
+    const userJSON = encodeURIComponent(JSON.stringify({
+      _id: user._id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+    }));
+
+    res.redirect(`${FRONTEND_URL}/login?token=${token}&user=${userJSON}`);
+  } catch (err) {
+    console.error('GitHub OAuth error:', err.message);
+    res.redirect(`${FRONTEND_URL}/login?error=server_error`);
+  }
+};
+
+// ─── Link GitHub Account ──────────────────────────────────────────────────────
+
+const linkGithubAccount = async (req, res) => {
+  try {
+    const { email, password, linkToken } = req.body;
+
+    if (!email || !password || !linkToken) {
+      return res.status(400).json({ message: 'Email, password, and linkToken are required.' });
+    }
+
+    // Verify linkToken
+    let decoded;
+    try {
+      decoded = jwt.verify(linkToken, process.env.JWT_SECRET);
+    } catch (err) {
+      return res.status(400).json({ message: 'Invalid or expired link token. Please restart the process.' });
+    }
+
+    if (decoded.email !== email) {
+      return res.status(400).json({ message: 'Token email mismatch.' });
+    }
+
+    // Find the user
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    // Verify password
+    const isMatch = await user.matchPassword(password);
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Invalid password.' });
+    }
+
+    // Update GitHub fields
+    user.githubUsername = decoded.githubUsername;
+    user.githubAccessToken = decoded.githubAccessToken;
+    await user.save();
+
+    res.json({
+      _id: user._id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      token: generateToken(user._id),
+    });
+  } catch (error) {
+    console.error('LINK GITHUB ERROR:', error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = {
+  registerUser,
+  loginUser,
+  forgotPassword,
+  verifyOtp,
+  resetPassword,
+  getMe,
+  githubLoginRedirect,
+  githubLoginCallback,
+  linkGithubAccount,
+};

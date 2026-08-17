@@ -72,21 +72,35 @@ const analyzeLogsAndDiagnose = (logsText) => {
 
   // 7. Generic TypeScript compile errors (e.g., TS2769, TS7016, etc.)
   if (/error TS\d{4}:/i.test(logsText)) {
-    const tsErrors = [...logsText.matchAll(/error (TS\d{4}):\s*([^\r\n]+)/gi)];
+    const tsErrors = [...logsText.matchAll(/([^\s\r\n(:]+)(?:\((\d+),\d+\)|:(\d+):(?:\d+))?\s*[:-]\s*error (TS\d{4}):\s*([^\r\n]+)/gi)];
     if (tsErrors.length > 0) {
-      const uniqueCodes = [...new Set(tsErrors.map(m => m[1]))];
-      const solutionsMap = {
-        'TS2769': "No overload matches this call. This usually happens when passing query filters or model parameters that don't match your Mongoose database schema or function types. Check your schemas or cast the query parameter object as `any`.",
-        'TS7016': "Could not find a declaration file for module. This happens when a package (like 'date-fns') has type resolution conflicts under your current moduleResolution configurations. Try setting `\"noImplicitAny\": false` or `\"skipLibCheck\": true` in your tsconfig.json, or install the `@types/<package>` definition.",
-        'TS2307': "Cannot find module or its corresponding type declarations. Make sure the package is listed in your package.json dependencies and npm install completed successfully.",
-        'TS5108': "Option 'moduleResolution=node10' has been removed. Delete this setting from your tsconfig.json or upgrade it to 'node16' or 'nodenext'."
-      };
-      
-      uniqueCodes.forEach(code => {
-        diagnoses.push({
-          error: `TypeScript Compiler Error (${code})`,
-          solution: solutionsMap[code] || `TypeScript compiler encountered type verification errors during build. Code: ${code}. You can fix the types locally, or add \`"noEmitOnError": false\` and \`"strict": false\` to your tsconfig.json to allow compilation with warnings.`
-        });
+      const addedCodes = new Set();
+      tsErrors.slice(0, 5).forEach(m => {
+        const filePath = m[1];
+        const line = m[2] || m[3] || 'unknown';
+        const code = m[4];
+        const details = m[5];
+        
+        const solutionsMap = {
+          'TS2769': "No overload matches this call. This usually happens when passing query filters or model parameters that don't match your Mongoose database schema or function types. Check your schemas or cast the query parameter object as `any`.",
+          'TS7016': "Could not find a declaration file for module. This happens when a package has type resolution conflicts. Try setting `\"noImplicitAny\": false` or `\"skipLibCheck\": true` in your tsconfig.json, or install the `@types/<package>` definition.",
+          'TS2307': "Cannot find module or its corresponding type declarations. Make sure the package is listed in your package.json dependencies and npm install completed successfully.",
+          'TS5108': "Option 'moduleResolution=node10' has been removed. Delete this setting from your tsconfig.json or upgrade it to 'node16' or 'nodenext'."
+        };
+
+        const uniqueKey = `${code}_${filePath}_${line}`;
+        if (!addedCodes.has(uniqueKey)) {
+          addedCodes.add(uniqueKey);
+          
+          const fileBase = filePath.split(/[/\\]/).pop() || filePath;
+          const genericAdvice = 'Fix the type verification issue in this file, or set `"noEmitOnError": false` and `"strict": false` inside your tsconfig.json to allow compilation with warnings.';
+          const baseSolution = solutionsMap[code] || genericAdvice;
+
+          diagnoses.push({
+            error: `TypeScript Compiler Error (${code}) in ${fileBase}:${line}`,
+            solution: `File: ${filePath}\nLine: ${line}\nError: ${details}\n\n👉 Fix recommendation: ${baseSolution}\n\n💡 Troubleshoot Note: If this code compiles successfully on your local machine, the issue may have been introduced by automatic package upgrades resolving vulnerabilities. Try setting 'Dependency Upgrade Mode' to 'Disabled (Troubleshoot)' in the DevOps configuration panel to compile using your original package.json versions.`
+          });
+        }
       });
     }
   }

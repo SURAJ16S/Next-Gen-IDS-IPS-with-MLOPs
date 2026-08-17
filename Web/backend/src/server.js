@@ -77,4 +77,10 @@ server.listen(PORT, () => {
   console.log(`\n🚀 Server running on port ${PORT}`);
   console.log(`🔒 Helmet security headers: enabled`);
   console.log(`📡 Environment: ${process.env.NODE_ENV}`);
+  try {
+    const { startPruningScheduler } = require('./services/pruning.service');
+    startPruningScheduler();
+  } catch (err) {
+    console.error('Failed to start pruning scheduler:', err);
+  }
 });

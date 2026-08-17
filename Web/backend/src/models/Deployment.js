@@ -55,6 +55,7 @@ const deploymentSchema = new mongoose.Schema(
     previewStatus: { type: String, enum: ['running', 'stopped', 'none'], default: 'none' },
     targetSubfolder: { type: String },
     isGuiApp: { type: Boolean, default: false },
+    deploymentType: { type: String, enum: ['zip', 'github'], default: 'zip' },
     // Environment file configuration submitted at upload time
     envFiles: [
       {
@@ -71,7 +72,15 @@ const deploymentSchema = new mongoose.Schema(
         status:  { type: String }
       }
     ],
-    upgradeMode: { type: String, enum: ['automatic', 'semi-automatic'], default: 'automatic' },
+    upgradeMode: { type: String, enum: ['automatic', 'semi-automatic', 'disabled'], default: 'automatic' },
+    useTempDb: { type: Boolean, default: true },
+    dbInitScript: { type: String, default: '' },
+    dbInitType: { type: String, enum: ['mysql', 'postgres', 'mongodb', 'sqlite', 'mariadb', 'mssql', 'oracle', 'cassandra', 'redis', 'none'], default: 'none' },
+    enableSmartSeeding: { type: Boolean, default: false },
+    detectedTables: { type: mongoose.Schema.Types.Mixed, default: [] },
+    isPruned: { type: Boolean, default: false },
+    lastPreviewedAt: { type: Date },
+    execPermission: { type: String, enum: ['ask', 'always', 'never'], default: 'ask' },
   },
   { 
     timestamps: true,

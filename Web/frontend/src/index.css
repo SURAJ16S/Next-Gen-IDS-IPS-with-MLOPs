@@ -272,3 +272,10 @@ tbody tr:last-child td { border-bottom: none; }
 .terminal-window::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.3);
 }
+
+/* ─── Floating Animation for Agent ──────────────────── */
+@keyframes floating {
+  0% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+  100% { transform: translateY(0); }
+}

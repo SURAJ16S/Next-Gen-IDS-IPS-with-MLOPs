@@ -1,5 +1,6 @@
 const { spawn, exec } = require('child_process');
 const net = require('net');
+const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const Docker = require('dockerode');
@@ -7,6 +8,53 @@ const Deployment = require('../models/Deployment');
 const { getIO } = require('../websocket/socket');
 const { detectFramework } = require('./framework-detector.service');
 const { analyzeLogsAndDiagnose } = require('./diagnostics.service');
+
+const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+const BUILDS_BASE_DIR = path.join(WORKSPACE_DIR, 'DevOps', 'builds');
+
+/**
+ * Polls http://localhost:{port}/ until the server returns any response (≤599)
+ * or until the timeout expires. Logs each attempt to the deployment.
+ * @returns {Promise<{ok: boolean, status: number|null, durationMs: number}>}
+ */
+const waitForHttpReady = (port, deploymentId, jobId, opts = {}) => {
+  const maxWaitMs  = opts.maxWaitMs  || 1_200_000; // 20 min
+  const intervalMs = opts.intervalMs || 3_000;     // poll every 3 s
+  const start      = Date.now();
+  let attempt      = 0;
+
+  return new Promise((resolve) => {
+    const poll = () => {
+      attempt++;
+      const elapsed = Date.now() - start;
+      const req = http.get(`http://localhost:${port}/`, { timeout: 5_000 }, (res) => {
+        const durationMs = Date.now() - start;
+        const isHtml = (res.headers['content-type'] || '').includes('text/html');
+        const ok = res.statusCode < 400 || isHtml;
+        logPreview(deploymentId, jobId,
+          `[HEALTH] ✅ App responded — HTTP ${res.statusCode} in ${durationMs}ms (attempt #${attempt})`
+        );
+        resolve({ ok: true, status: res.statusCode, durationMs });
+      });
+      req.on('error', () => {
+        const elapsed = Date.now() - start;
+        if (elapsed >= maxWaitMs) {
+          logPreview(deploymentId, jobId,
+            `[HEALTH] ❌ Timeout after ${Math.round(elapsed / 1000)}s — app never responded on port ${port}.`
+          );
+          resolve({ ok: false, status: null, durationMs: elapsed });
+        } else {
+          logPreview(deploymentId, jobId,
+            `[HEALTH] ⏳ Waiting for app on port ${port}… (${Math.round(elapsed / 1000)}s elapsed, attempt #${attempt})`
+          );
+          setTimeout(poll, intervalMs);
+        }
+      });
+      req.on('timeout', () => req.destroy());
+    };
+    poll();
+  });
+};
 
 // Dynamically list our modular framework modules
 const mern = require('./frameworks/mern');
@@ -153,6 +201,9 @@ const getDockerInstance = async () => {
 // In-memory registry: jobId -> { process/container, port, deploymentId, type: 'process' | 'container' }
 const runningPreviews = new Map();
 
+// Track currently allocated or reserving ports globally to prevent race conditions during concurrent builds
+const allocatedPorts = new Set();
+
 // Ports permanently reserved by this project (never suggest these)
 const RESERVED_PORTS = new Set([3000, 5000, 5173, 8080, 27017, 5432]);
 
@@ -176,9 +227,24 @@ const isPortAvailable = (port) => {
 const suggestPort = async () => {
   for (let port = 3001; port <= 3999; port++) {
     if (RESERVED_PORTS.has(port)) continue;
-    if (runningPreviews.has(port)) continue; // already allocated
+    if (allocatedPorts.has(port)) continue;
+    
+    // Check if port is already active in running previews
+    let active = false;
+    for (const entry of runningPreviews.values()) {
+      if (entry && entry.port === port) {
+        active = true;
+        break;
+      }
+    }
+    if (active) continue;
+
     const available = await isPortAvailable(port);
-    if (available) return port;
+    if (available) {
+      // Pre-reserve the port immediately to prevent concurrent pipeline runs from grabbing it
+      allocatedPorts.add(port);
+      return port;
+    }
   }
   return null; // all ports busy
 };
@@ -197,7 +263,13 @@ const getPreviewCommand = async (framework, workDir) => {
 const logPreview = async (deploymentId, jobId, message) => {
   const formattedLog = `[${new Date().toISOString()}] ${message}`;
   console.log(`[Preview ${jobId}] ${message}`);
-  await Deployment.findByIdAndUpdate(deploymentId, { $push: { buildLogs: formattedLog } });
+  try {
+    const logDir = path.join(BUILDS_BASE_DIR, jobId);
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, 'pipeline.log'), formattedLog + '\n', 'utf8');
+  } catch (err) {
+    console.error('Failed to write preview log to file:', err.message);
+  }
   try {
     const io = getIO();
     io.to(`pipeline:${jobId}`).emit('pipeline:log', { jobId, log: formattedLog });
@@ -208,7 +280,13 @@ const logPreview = async (deploymentId, jobId, message) => {
  * Helper to parse a .env file from the workspace directory.
  */
 const parseEnvFile = (workDir) => {
-  const envPath = path.join(workDir, '.env');
+  let envPath = path.join(workDir, '.env');
+  if (!fs.existsSync(envPath)) {
+    const parentEnvPath = path.join(workDir, '..', '.env');
+    if (fs.existsSync(parentEnvPath)) {
+      envPath = parentEnvPath;
+    }
+  }
   const env = {};
   if (fs.existsSync(envPath)) {
     try {
@@ -309,6 +387,7 @@ const spawnHostPreview = async (jobId, deploymentId, workDir, framework, port) =
   });
 
   child.on('close', async (code) => {
+    allocatedPorts.delete(port);
     runningPreviews.delete(jobId);
     await logPreview(deploymentId, jobId, `[PREVIEW] Host process exited with code ${code}.`);
     await Deployment.findByIdAndUpdate(deploymentId, { previewStatus: 'stopped', previewPid: null });
@@ -324,14 +403,26 @@ const spawnHostPreview = async (jobId, deploymentId, workDir, framework, port) =
     previewStatus: 'running',
   });
 
-  try {
-    const io = getIO();
-    io.to(`pipeline:${jobId}`).emit('preview:ready', {
-      jobId,
-      port,
-      url: `http://localhost:${port}`,
-    });
-  } catch (_) {}
+  // Wait for the app to actually serve HTTP before declaring it live
+  const health = await waitForHttpReady(port, deploymentId, jobId);
+  if (health.ok) {
+    await Deployment.findByIdAndUpdate(deploymentId, { status: 'deployed' });
+    try {
+      const io = getIO();
+      io.to(`pipeline:${jobId}`).emit('preview:ready', {
+        jobId,
+        port,
+        url: `http://localhost:${port}`,
+      });
+    } catch (_) {}
+  } else {
+    await logPreview(deploymentId, jobId, `[PREVIEW] ❌ App failed health check — marking as failed.`);
+    await Deployment.findByIdAndUpdate(deploymentId, { status: 'failed', previewStatus: 'stopped' });
+    try {
+      const io = getIO();
+      io.to(`pipeline:${jobId}`).emit('preview:stopped', { jobId });
+    } catch (_) {}
+  }
 };
 
 /**
@@ -351,6 +442,165 @@ const ensureDockerImage = async (activeDocker, imageName, deploymentId, jobId) =
   }
 };
 
+const detectRequiredDatabases = (envVars) => {
+  const dbs = [];
+  const envString = JSON.stringify(envVars).toLowerCase();
+
+  // 1. MySQL Detection
+  const hasMysql = envString.includes('mysql://') || 
+                   (envVars.DB_CONNECTION && envVars.DB_CONNECTION.toLowerCase() === 'mysql') ||
+                   Object.keys(envVars).some(k => k.toUpperCase().includes('MYSQL'));
+  if (hasMysql) {
+    dbs.push({
+      type: 'mysql',
+      image: 'mysql:8.0',
+      port: 3306,
+      env: ['MYSQL_ALLOW_EMPTY_PASSWORD=yes', 'MYSQL_DATABASE=preview_db']
+    });
+  }
+
+  // 2. PostgreSQL Detection
+  const hasPostgres = envString.includes('postgres://') || 
+                      envString.includes('postgresql://') || 
+                      (envVars.DB_CONNECTION && (envVars.DB_CONNECTION.toLowerCase() === 'pgsql' || envVars.DB_CONNECTION.toLowerCase() === 'postgres')) ||
+                      Object.keys(envVars).some(k => k.toUpperCase().includes('POSTGRES'));
+  if (hasPostgres) {
+    dbs.push({
+      type: 'postgres',
+      image: 'postgres:15-alpine',
+      port: 5432,
+      env: ['POSTGRES_HOST_AUTH_METHOD=trust', 'POSTGRES_DB=preview_db']
+    });
+  }
+
+  // 3. MongoDB Detection
+  const hasMongo = envString.includes('mongodb://') || 
+                   envString.includes('mongodb+srv://') ||
+                   Object.keys(envVars).some(k => k.toUpperCase().includes('MONGO'));
+  if (hasMongo) {
+    dbs.push({
+      type: 'mongodb',
+      image: 'mongo:6.0',
+      port: 27017
+    });
+  }
+
+  // 4. Redis Detection
+  const hasRedis = envString.includes('redis://') || 
+                   Object.keys(envVars).some(k => k.toUpperCase().includes('REDIS'));
+  if (hasRedis) {
+    dbs.push({
+      type: 'redis',
+      image: 'redis:7.0-alpine',
+      port: 6379
+    });
+  }
+
+  // 5. Qdrant Detection
+  const hasQdrant = Object.keys(envVars).some(k => k.toUpperCase().includes('QDRANT')) || envString.includes('qdrant');
+  if (hasQdrant) {
+    dbs.push({
+      type: 'qdrant',
+      image: 'qdrant/qdrant:latest',
+      port: 6333
+    });
+  }
+
+  // 6. Chroma Detection
+  const hasChroma = Object.keys(envVars).some(k => k.toUpperCase().includes('CHROMA')) || envString.includes('chroma');
+  if (hasChroma) {
+    dbs.push({
+      type: 'chroma',
+      image: 'chromadb/chroma:latest',
+      port: 8000
+    });
+  }
+
+  return dbs;
+};
+
+const patchPhpConfigs = (workDir, jobId) => {
+  const recPatch = (dir) => {
+    if (!fs.existsSync(dir)) return;
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+      const fullPath = path.join(dir, file);
+      if (fs.statSync(fullPath).isDirectory()) {
+        if (file !== 'node_modules' && file !== 'vendor' && file !== '.git') {
+          recPatch(fullPath);
+        }
+      } else if (file.endsWith('.php')) {
+        try {
+          let content = fs.readFileSync(fullPath, 'utf8');
+          let modified = false;
+          if (content.includes('localhost') || content.includes('127.0.0.1')) {
+            content = content.replace(/(['"])localhost\1/g, `$1devops-db-mysql-${jobId}$2`);
+            content = content.replace(/(['"])127\.0\.0\.1\1/g, `$1devops-db-mysql-${jobId}$2`);
+            modified = true;
+          }
+          if (modified) {
+            fs.writeFileSync(fullPath, content, 'utf8');
+          }
+        } catch (_) {}
+      }
+    }
+  };
+  recPatch(workDir);
+};
+
+const detectDbNameFromPhp = (workDir) => {
+  let detected = null;
+  const recDetect = (dir) => {
+    if (!fs.existsSync(dir) || detected) return;
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+      if (detected) return;
+      const fullPath = path.join(dir, file);
+      if (fs.statSync(fullPath).isDirectory()) {
+        if (file !== 'node_modules' && file !== 'vendor' && file !== '.git') {
+          recDetect(fullPath);
+        }
+      } else if (file.endsWith('.php')) {
+        try {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const match = content.match(/dbname=([a-zA-Z0-9_-]+)/i) || 
+                        content.match(/['"]DB_DATABASE['"]\s*,\s*['"]([a-zA-Z0-9_-]+)['"]/i) ||
+                        content.match(/['"]database['"]\s*=>\s*['"]([a-zA-Z0-9_-]+)['"]/i);
+          if (match && match[1]) {
+            detected = match[1];
+            return;
+          }
+        } catch (_) {}
+      }
+    }
+  };
+  recDetect(workDir);
+  return detected;
+};
+
+const cleanupDockerResources = async (activeDocker, jobId) => {
+  const dbTypes = ['mysql', 'postgres', 'mongodb', 'redis', 'qdrant', 'chroma'];
+  for (const dbType of dbTypes) {
+    const dbContainerName = `devops-db-${dbType}-${jobId}`;
+    try {
+      const dbContainer = activeDocker.getContainer(dbContainerName);
+      await dbContainer.stop().catch(() => {});
+      await dbContainer.remove().catch(() => {});
+    } catch (_) {}
+  }
+  const containerName = `devops-preview-${jobId}`;
+  try {
+    const appContainer = activeDocker.getContainer(containerName);
+    await appContainer.stop().catch(() => {});
+    await appContainer.remove().catch(() => {});
+  } catch (_) {}
+  const networkName = `devops-net-${jobId}`;
+  try {
+    const network = activeDocker.getNetwork(networkName);
+    await network.remove().catch(() => {});
+  } catch (_) {}
+};
+
 /**
  * Spawns the compiled app on the given port (using container mode if Docker is available, or host mode as fallback).
  */
@@ -368,12 +618,35 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
     const { cmd, args } = await getPreviewCommand(framework, workDir);
     const finalArgs = resolvePortPlaceholder(args, port);
 
-    // Pre-emptively stop and remove any conflicting preview container of the same name.
+    // Auto-patch database connection hostnames and detect target DB name for PHP applications
+    let detectedDbName = 'preview_db';
+    const deployment = await Deployment.findById(deploymentId);
+    const useTempDb = deployment ? deployment.useTempDb !== false : true;
+
+    if (framework === 'php') {
+      if (useTempDb) {
+        patchPhpConfigs(workDir, jobId);
+      }
+      const parsedDb = detectDbNameFromPhp(workDir);
+      if (parsedDb) {
+        detectedDbName = parsedDb;
+        await logPreview(deploymentId, jobId, `[PREVIEW] Detected database schema name from PHP configuration: ${detectedDbName}`);
+      }
+    }
+
+    // Pre-emptively stop and remove any conflicting preview container of the same name or port.
     // Wrap in try/catch to make it completely crash-safe (prevents unhandled modem 404s)
     try {
-      const conflictingContainer = activeDocker.getContainer(containerName);
-      await conflictingContainer.stop().catch(() => {});
-      await conflictingContainer.remove().catch(() => {});
+      const containers = await activeDocker.listContainers({ all: true });
+      for (const containerInfo of containers) {
+        const isPortMatch = containerInfo.Ports && containerInfo.Ports.some(p => p.PublicPort === Number(port) || p.PrivatePort === Number(port));
+        const isNameMatch = containerInfo.Names && containerInfo.Names.some(name => name.includes(containerName));
+        if (isPortMatch || isNameMatch) {
+          const conflictingContainer = activeDocker.getContainer(containerInfo.Id);
+          await conflictingContainer.stop().catch(() => {});
+          await conflictingContainer.remove().catch(() => {});
+        }
+      }
     } catch (_) {}
 
     const bind = `${path.resolve(workDir)}:/workspace`;
@@ -420,13 +693,406 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
     // Build the startup command, chaining client build first if needed
     let containerCmd = [cmd, ...finalArgs];
     if (absClientPath && (framework === 'mern' || framework === 'express')) {
+      // Write the proxy file to the parent of absServerPath (which is /project on container, and workDir/.. on host)
+      try {
+        const parentDirHost = path.resolve(workDir, '..');
+        const proxyPathHost = path.join(parentDirHost, 'devops-proxy.js');
+        const proxyCode = `const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const net = require('net');
+
+const PREVIEW_PORT = process.env.PORT || 3001;
+const BACKEND_PORT = 5001;
+const CLIENT_DIST = path.resolve(__dirname, 'client/dist');
+const CLIENT_BUILD = path.resolve(__dirname, 'client/build');
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Requested-With,x-workspace-id,Cookie',
+  'Access-Control-Allow-Credentials': 'true'
+};
+
+const MIME_TYPES = {
+  '.html': 'text/html',
+  '.css': 'text/css',
+  '.js': 'text/javascript',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json'
+};
+
+// Build sanitized headers: strip Origin/Referer so backend CORS passes, spoof Host to backend port
+function buildBackendHeaders(req) {
+  const headers = Object.assign({}, req.headers);
+  delete headers['origin'];
+  delete headers['referer'];
+  headers['host'] = 'localhost:' + BACKEND_PORT;
+  return headers;
+}
+
+const server = http.createServer((req, res) => {
+  const url = req.url;
+
+  // Handle CORS preflight from browser before proxying
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
+
+  const isApiReq = url.startsWith('/api/') || url.startsWith('/socket.io/') || url.startsWith('/uploads/') || url.startsWith('/webhook') || url.startsWith('/razorpay');
+
+  if (isApiReq) {
+    const proxyReq = http.request({
+      host: 'localhost',
+      port: BACKEND_PORT,
+      path: req.url,
+      method: req.method,
+      headers: buildBackendHeaders(req)
+    }, (proxyRes) => {
+      const responseHeaders = Object.assign({}, proxyRes.headers, CORS_HEADERS);
+      res.writeHead(proxyRes.statusCode, responseHeaders);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+      res.writeHead(502, CORS_HEADERS);
+      res.end('Proxy Error: ' + err.message);
+    });
+
+    req.pipe(proxyReq);
+    return;
+  }
+
+  let staticPath = CLIENT_DIST;
+  if (!fs.existsSync(staticPath)) {
+    staticPath = CLIENT_BUILD;
+  }
+
+  let filePath = path.join(staticPath, url === '/' ? 'index.html' : url);
+  
+  if (!filePath.startsWith(staticPath)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+
+  fs.stat(filePath, (err, stats) => {
+    if (err || !stats.isFile()) {
+      filePath = path.join(staticPath, 'index.html');
+      fs.stat(filePath, (err2, stats2) => {
+        if (err2 || !stats2.isFile()) {
+          const proxyReq = http.request({
+            host: 'localhost',
+            port: BACKEND_PORT,
+            path: req.url,
+            method: req.method,
+            headers: req.headers
+          }, (proxyRes) => {
+            res.writeHead(proxyRes.statusCode, proxyRes.headers);
+            proxyRes.pipe(res);
+          });
+          proxyReq.on('error', (err) => {
+            res.writeHead(502);
+            res.end('Proxy Error: ' + err.message);
+          });
+          req.pipe(proxyReq);
+          return;
+        }
+        serveFile(filePath, res);
+      });
+      return;
+    }
+    serveFile(filePath, res);
+  });
+});
+
+function serveFile(filePath, res) {
+  const ext = path.extname(filePath).toLowerCase();
+  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+  res.writeHead(200, { 'Content-Type': contentType });
+  fs.createReadStream(filePath).pipe(res);
+}
+
+server.on('upgrade', (req, socket, head) => {
+  const proxySocket = net.connect(BACKEND_PORT, 'localhost', () => {
+    let rawHeaders = req.method + ' ' + req.url + ' HTTP/' + req.httpVersion + '\\r\\n';
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      rawHeaders += req.rawHeaders[i] + ': ' + req.rawHeaders[i+1] + '\\r\\n';
+    }
+    rawHeaders += '\\r\\n';
+    proxySocket.write(rawHeaders);
+    if (head && head.length > 0) {
+      proxySocket.write(head);
+    }
+    proxySocket.pipe(socket);
+    socket.pipe(proxySocket);
+  });
+  proxySocket.on('error', () => {
+    socket.end();
+  });
+});
+
+server.listen(PREVIEW_PORT, () => {
+  console.log('[DEVOPS PROXY] Listening on port ' + PREVIEW_PORT + ', proxying APIs to port ' + BACKEND_PORT);
+});`;
+        fs.writeFileSync(proxyPathHost, proxyCode, 'utf8');
+      } catch (err) {
+        await logPreview(deploymentId, jobId, `[PREVIEW] [WARNING] Failed to write devops-proxy.js: ${err.message}`);
+      }
+
       const serverStartCmd = [cmd, ...finalArgs].join(' ');
       containerCmd = [
         'sh', '-c',
-        `cd ${absClientPath} && npm install --prefer-offline --no-audit --no-fund --ignore-scripts --include=dev && npm run build && cd ${absServerPath} && ${serverStartCmd}`
+        `cd ${absClientPath} && npm install --prefer-offline --no-audit --no-fund --ignore-scripts --include=dev --legacy-peer-deps && npm run build && cd /project && PORT=${port} node devops-proxy.js & cd ${absServerPath} && PORT=5001 SERVER_PORT=5001 ${serverStartCmd}`
       ];
       await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo. Will build React client at ${absClientPath} before starting server at ${absServerPath}.`);
     }
+
+    // ── Database & Network Provisioning ─────────────────────────────────────────
+    const envFileVars = parseEnvFile(workDir);
+    const requiredDbs = useTempDb ? detectRequiredDatabases(envFileVars) : [];
+    
+    // Inject the user-selected database type from UI configuration to ensure it is always provisioned
+    const dbInitType = deployment ? deployment.dbInitType : 'none';
+    if (useTempDb && dbInitType && dbInitType !== 'none') {
+      const alreadyIncluded = requiredDbs.some(d => d.type === dbInitType);
+      if (!alreadyIncluded) {
+        if (dbInitType === 'mysql') {
+          requiredDbs.push({ type: 'mysql', image: 'mysql:8.0', port: 3306, env: ['MYSQL_ALLOW_EMPTY_PASSWORD=yes', 'MYSQL_DATABASE=preview_db'] });
+        } else if (dbInitType === 'postgres') {
+          requiredDbs.push({ type: 'postgres', image: 'postgres:15-alpine', port: 5432, env: ['POSTGRES_HOST_AUTH_METHOD=trust', 'POSTGRES_DB=preview_db'] });
+        } else if (dbInitType === 'mongodb') {
+          requiredDbs.push({ type: 'mongodb', image: 'mongo:6.0', port: 27017 });
+        }
+      }
+    }
+    
+    let networkName = 'bridge';
+    if (requiredDbs.length > 0) {
+      networkName = `devops-net-${jobId}`;
+      try {
+        // Create bridge network
+        try {
+          const existingNet = activeDocker.getNetwork(networkName);
+          await existingNet.inspect();
+        } catch (_) {
+          await activeDocker.createNetwork({ Name: networkName, Driver: 'bridge' });
+          await logPreview(deploymentId, jobId, `[PREVIEW] Created isolated database network: ${networkName}`);
+        }
+
+        // Spawn each database container
+        for (const db of requiredDbs) {
+          const dbContainerName = `devops-db-${db.type}-${jobId}`;
+          
+          try {
+            const oldDbContainer = activeDocker.getContainer(dbContainerName);
+            await oldDbContainer.stop().catch(() => {});
+            await oldDbContainer.remove().catch(() => {});
+          } catch (_) {}
+
+          await logPreview(deploymentId, jobId, `[PREVIEW] Launching database container: ${db.image} (${dbContainerName})`);
+          await ensureDockerImage(activeDocker, db.image, deploymentId, jobId);
+
+          let dbEnv = db.env || [];
+          if (db.type === 'mysql') {
+            dbEnv = [`MYSQL_ALLOW_EMPTY_PASSWORD=yes`, `MYSQL_DATABASE=${detectedDbName}`];
+          } else if (db.type === 'postgres') {
+            dbEnv = [`POSTGRES_HOST_AUTH_METHOD=trust`, `POSTGRES_DB=${detectedDbName}`];
+          }
+
+          const dbContainer = await activeDocker.createContainer({
+            Image: db.image,
+            name: dbContainerName,
+            Env: dbEnv,
+            HostConfig: {
+              NetworkMode: networkName,
+              NanoCPUs: 1000000000,
+              Memory: 536870912,
+              PidsLimit: 100
+            }
+          });
+          
+          await dbContainer.start();
+          await logPreview(deploymentId, jobId, `[PREVIEW] Database container is ready: ${dbContainerName}`);
+
+          // Run initialization script if provided in deployment settings
+          if (deployment && deployment.dbInitScript && deployment.dbInitScript.trim() !== '') {
+            await logPreview(deploymentId, jobId, `[PREVIEW] Running database initialization script...`);
+            
+            const runDbExec = async (cmd, timeoutMs = 15000) => {
+              return new Promise(async (resolve) => {
+                let resolved = false;
+                let timer;
+                try {
+                  const exec = await dbContainer.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+                  const stream = await exec.start();
+                  let output = '';
+                  
+                  timer = setTimeout(() => {
+                    if (!resolved) {
+                      resolved = true;
+                      try { stream.destroy(); } catch (_) {}
+                      resolve(output);
+                    }
+                  }, timeoutMs);
+
+                  stream.on('data', (chunk) => { output += chunk.toString(); });
+                  stream.on('end', () => {
+                    if (!resolved) {
+                      resolved = true;
+                      clearTimeout(timer);
+                      resolve(output);
+                    }
+                  });
+                  stream.on('error', () => {
+                    if (!resolved) {
+                      resolved = true;
+                      clearTimeout(timer);
+                      resolve(output);
+                    }
+                  });
+                } catch (err) {
+                  if (!resolved) {
+                    resolved = true;
+                    if (timer) clearTimeout(timer);
+                    resolve('');
+                  }
+                }
+              });
+            };
+
+            // Wait for database engine to accept connections (up to 15s)
+            let ready = false;
+            for (let i = 0; i < 15; i++) {
+              try {
+                let checkCmd = [];
+                if (db.type === 'mysql') {
+                  checkCmd = ['mysqladmin', 'ping', '-u', 'root'];
+                } else if (db.type === 'postgres') {
+                  checkCmd = ['pg_isready', '-U', 'postgres'];
+                } else if (db.type === 'mongodb') {
+                  checkCmd = ['mongosh', '--eval', "db.adminCommand('ping')"];
+                }
+                
+                if (checkCmd.length > 0) {
+                  const checkOut = await runDbExec(checkCmd, 5000);
+                  if (db.type === 'mysql' && checkOut.toLowerCase().includes('alive')) {
+                    ready = true;
+                    break;
+                  } else if (db.type === 'postgres' && checkOut.toLowerCase().includes('accepting connections')) {
+                    ready = true;
+                    break;
+                  } else if (db.type === 'mongodb' && checkOut.includes('ok')) {
+                    ready = true;
+                    break;
+                  }
+                }
+              } catch (_) {}
+              await new Promise(r => setTimeout(r, 1000));
+            }
+            
+            if (ready) {
+              try {
+                const initScript = deployment.dbInitScript;
+                let scriptFile = '';
+                if (db.type === 'mysql') {
+                  scriptFile = '/tmp/init.sql';
+                } else if (db.type === 'postgres') {
+                  scriptFile = '/tmp/init.sql';
+                } else if (db.type === 'mongodb') {
+                  scriptFile = '/tmp/init.js';
+                }
+                
+                if (scriptFile !== '') {
+                  // Write script to container file
+                  const delimiter = '__INIT_EOF__';
+                  let writeCmd = ['sh', '-c', `cat << '${delimiter}' > ${scriptFile}\n${initScript}\n${delimiter}`];
+                  await runDbExec(writeCmd, 10000);
+                  
+                  let runCmd = [];
+                  if (db.type === 'mysql') {
+                    runCmd = ['mysql', '-u', 'root', '-e', `CREATE DATABASE IF NOT EXISTS \`${detectedDbName}\`; USE \`${detectedDbName}\`; source ${scriptFile};`];
+                  } else if (db.type === 'postgres') {
+                    runCmd = ['psql', '-U', 'postgres', '-d', detectedDbName, '-f', scriptFile];
+                  } else if (db.type === 'mongodb') {
+                    runCmd = ['mongosh', detectedDbName, scriptFile];
+                  }
+                  
+                  const runOut = await runDbExec(runCmd, 15000);
+                  await logPreview(deploymentId, jobId, `[PREVIEW] Database initialization complete. Output:\n${runOut}`);
+                }
+              } catch (initErr) {
+                await logPreview(deploymentId, jobId, `[PREVIEW] [WARNING] Database initialization failed: ${initErr.message}`);
+              }
+            } else {
+              await logPreview(deploymentId, jobId, `[PREVIEW] [WARNING] Database server not ready in time. Skipping initialization script.`);
+            }
+          }
+        }
+      } catch (dbErr) {
+        await logPreview(deploymentId, jobId, `[PREVIEW] [WARNING] Failed to set up database container network: ${dbErr.message}. Falling back to host databases.`);
+        networkName = 'bridge';
+      }
+    }
+
+    const finalEnv = (() => {
+      const containerEnv = [
+        `PORT=${port}`,
+        `SERVER_PORT=${port}`,
+        `NODE_ENV=production`
+      ];
+      const FRONTEND_URL_VARS = new Set([
+        'FRONTEND_URL', 'CLIENT_URL', 'APP_URL', 'CORS_ORIGIN', 'ALLOWED_ORIGIN',
+        'REACT_APP_URL', 'VUE_APP_URL', 'NEXT_PUBLIC_URL', 'VITE_APP_URL',
+        'FRONTEND_BASE_URL', 'CLIENT_BASE_URL', 'WEB_URL', 'WEBAPP_URL',
+      ]);
+      
+      const dbHostMap = {};
+      for (const db of requiredDbs) {
+        dbHostMap[db.port] = `devops-db-${db.type}-${jobId}`;
+      }
+
+      for (const [key, value] of Object.entries(envFileVars)) {
+        if (key !== 'PORT' && key !== 'SERVER_PORT' && key !== 'NODE_ENV') {
+          let val = value;
+          const isClientVar = key.startsWith('VITE_') || key.startsWith('REACT_APP_') || key.startsWith('NEXT_PUBLIC_') || key.startsWith('PUBLIC_');
+          if (!FRONTEND_URL_VARS.has(key) && !isClientVar && typeof val === 'string') {
+            let rewritten = false;
+            for (const [dbPort, dbHost] of Object.entries(dbHostMap)) {
+              const regex = new RegExp(`(localhost|127\\.0\\.0\\.1|host\\.docker\\.internal):${dbPort}`, 'i');
+              if (regex.test(val)) {
+                val = val.replace(regex, `${dbHost}:${dbPort}`);
+                rewritten = true;
+              }
+            }
+            if (!rewritten && requiredDbs.length > 0) {
+              const isHostKey = key.toUpperCase().includes('HOST') || key.toUpperCase().includes('SERVER') || key.toUpperCase().includes('URL') || key.toUpperCase().includes('URI');
+              if (isHostKey && (val.toLowerCase() === 'localhost' || val === '127.0.0.1' || val.toLowerCase() === 'host.docker.internal')) {
+                val = `devops-db-${requiredDbs[0].type}-${jobId}`;
+                rewritten = true;
+              }
+            }
+            if (!rewritten) {
+              val = val.replace(/^(https?:\/\/|mongodb(?:\+srv)?:\/\/|postgres(?:ql)?:\/\/|mysql:\/\/|redis:\/\/)(?:localhost|127\.0\.0\.1)(:\d+)?(.*)?$/i, '$1host.docker.internal$2$3');
+            }
+          }
+          containerEnv.push(`${key}=${val}`);
+        }
+      }
+      return containerEnv;
+    })();
+
+    await logPreview(deploymentId, jobId, `[DOCKER-ENV-DEBUG] Generated Env: ${JSON.stringify(finalEnv)}`);
 
     activeDocker.createContainer({
       Image: previewImage,
@@ -437,34 +1103,16 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
         PortBindings: {
           [`${port}/tcp`]: [{ HostPort: String(port) }]
         },
-        ExtraHosts: ['host.docker.internal:host-gateway']
+        ExtraHosts: ['host.docker.internal:host-gateway'],
+        NetworkMode: networkName,
+        NanoCPUs: 1000000000,
+        Memory: 536870912,
+        PidsLimit: 100
       },
       ExposedPorts: {
         [`${port}/tcp`]: {}
       },
-      Env: (() => {
-        const envFileVars = parseEnvFile(workDir);
-        const containerEnv = [
-          `PORT=${port}`,
-          `SERVER_PORT=${port}`,
-          `NODE_ENV=production`
-        ];
-        const FRONTEND_URL_VARS = new Set([
-          'FRONTEND_URL', 'CLIENT_URL', 'APP_URL', 'CORS_ORIGIN', 'ALLOWED_ORIGIN',
-          'REACT_APP_URL', 'VUE_APP_URL', 'NEXT_PUBLIC_URL', 'VITE_APP_URL',
-          'FRONTEND_BASE_URL', 'CLIENT_BASE_URL', 'WEB_URL', 'WEBAPP_URL',
-        ]);
-        for (const [key, value] of Object.entries(envFileVars)) {
-          if (key !== 'PORT' && key !== 'SERVER_PORT' && key !== 'NODE_ENV') {
-            let val = value;
-            if (!FRONTEND_URL_VARS.has(key) && typeof val === 'string') {
-              val = val.replace(/^(https?:\/\/|mongodb(?:\+srv)?:\/\/|postgres(?:ql)?:\/\/|mysql:\/\/|redis:\/\/)(?:localhost|127\.0\.0\.1)(:\d+)?(.*)?$/i, '$1host.docker.internal$2$3');
-            }
-            containerEnv.push(`${key}=${val}`);
-          }
-        }
-        return containerEnv;
-      })(),
+      Env: finalEnv,
       WorkingDir: containerWorkDir
     }, async (err, container) => {
       if (err) {
@@ -509,18 +1157,31 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
           previewStatus: 'running',
         });
 
-        try {
-          const io = getIO();
-          io.to(`pipeline:${jobId}`).emit('preview:ready', {
-            jobId,
-            port,
-            url: `http://localhost:${port}`,
-          });
-        } catch (_) {}
+        // Wait for the containerised app to serve HTTP before declaring live
+        const health = await waitForHttpReady(port, deploymentId, jobId);
+        if (health.ok) {
+          await Deployment.findByIdAndUpdate(deploymentId, { status: 'deployed' });
+          try {
+            const io = getIO();
+            io.to(`pipeline:${jobId}`).emit('preview:ready', {
+              jobId,
+              port,
+              url: `http://localhost:${port}`,
+            });
+          } catch (_) {}
+        } else {
+          await logPreview(deploymentId, jobId, `[PREVIEW] ❌ App failed health check — marking as failed.`);
+          await Deployment.findByIdAndUpdate(deploymentId, { status: 'failed', previewStatus: 'stopped' });
+          try {
+            const io = getIO();
+            io.to(`pipeline:${jobId}`).emit('preview:stopped', { jobId });
+          } catch (_) {}
+        }
 
         // Wait for container to exit in the background.
         // Wrap everything in try-catches to be completely crash-safe.
         container.wait(async () => {
+          allocatedPorts.delete(port);
           runningPreviews.delete(jobId);
           await logPreview(deploymentId, jobId, `[PREVIEW] Preview container exited/stopped.`);
           await Deployment.findByIdAndUpdate(deploymentId, { previewStatus: 'stopped', previewPid: null });
@@ -528,6 +1189,12 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
             const io = getIO();
             io.to(`pipeline:${jobId}`).emit('preview:stopped', { jobId });
           } catch (_) {}
+
+          // Lifecycle garbage collection: clean up database containers and isolated network
+          const activeDocker = await getDockerInstance();
+          if (activeDocker) {
+            await cleanupDockerResources(activeDocker, jobId);
+          }
 
           // Run log diagnostics on container exit
           try {
@@ -571,23 +1238,19 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
 const stopPreview = async (jobId) => {
   const entry = runningPreviews.get(jobId);
   
+  // Lifecycle garbage collection: clean up database containers and isolated network immediately
+  const activeDocker = await getDockerInstance();
+  if (activeDocker) {
+    await cleanupDockerResources(activeDocker, jobId);
+  }
+
   // Graceful fallback: If it's not in our map but the database shows it running, update it in DB anyway
   if (!entry) {
     await Deployment.findOneAndUpdate({ jobId }, { previewStatus: 'stopped', previewPid: null });
-    
-    // Also proactively check if there is an orphaned Docker container and terminate it
-    const activeDocker = await getDockerInstance();
-    if (activeDocker) {
-      const containerName = `devops-preview-${jobId}`;
-      try {
-        const container = activeDocker.getContainer(containerName);
-        await container.stop().catch(() => {});
-      } catch (_) {}
-    }
     return true;
   }
 
-  if (entry.type === 'container') {
+  if (entry && entry.type === 'container') {
     await logPreview(entry.deploymentId, jobId, `[PREVIEW] Shutting down preview container...`);
     try {
       await entry.container.stop().catch(() => {});
@@ -613,6 +1276,9 @@ const stopPreview = async (jobId) => {
     }
   }
 
+  if (entry && entry.port) {
+    allocatedPorts.delete(entry.port);
+  }
   runningPreviews.delete(jobId);
   await Deployment.findOneAndUpdate({ jobId }, { previewStatus: 'stopped', previewPid: null });
   return true;

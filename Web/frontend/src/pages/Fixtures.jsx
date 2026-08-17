@@ -44,6 +44,20 @@ function Fixtures() {
   const logsEndRef = useRef(null);
   const socketRef = useRef(null);
 
+  const fetchFixtures = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await axios.get(`${API_BASE_URL}/devops/fixtures`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setFixtures(res.data);
+      return res.data;
+    } catch (err) {
+      setError('Failed to fetch test fixtures.');
+      return [];
+    }
+  };
+
   const fetchReviews = async (frameworkId) => {
     if (!frameworkId) return;
     setLoadingReviews(true);
@@ -73,6 +87,7 @@ function Fixtures() {
       );
       setNewReview({ reviewerName: '', status: 'Works', rating: 5, comment: '' });
       fetchReviews(selectedFixtureId);
+      fetchFixtures();
     } catch (err) {
       alert('Failed to submit review.');
     } finally {
@@ -95,16 +110,9 @@ function Fixtures() {
       const token = localStorage.getItem('token');
       
       // 1. Fetch available fixtures
-      try {
-        const res = await axios.get(`${API_BASE_URL}/devops/fixtures`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        setFixtures(res.data);
-        if (res.data.length > 0) {
-          setSelectedFixtureId(res.data[0].id);
-        }
-      } catch (err) {
-        setError('Failed to fetch test fixtures.');
+      const list = await fetchFixtures();
+      if (list.length > 0) {
+        setSelectedFixtureId(list[0].id);
       }
       
       // 2. Fetch deployments to check if there is an active running job
@@ -365,6 +373,22 @@ function Fixtures() {
                         }}>{f.id}</span>
                       </div>
                       <p style={{ color: 'var(--text-secondary)', fontSize: '12.5px', marginTop: '10px', lineHeight: '1.5' }}>{f.description}</p>
+                      
+                      {/* Reviews Summary Badge */}
+                      {f.reviewCount > 0 ? (
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '10px' }}>
+                          <span style={{ fontSize: '11.5px', color: '#f59e0b', fontWeight: 'bold' }}>
+                            ★ {f.averageRating.toFixed(1)}
+                          </span>
+                          <span style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                            ({f.reviewCount} {f.reviewCount === 1 ? 'review' : 'reviews'})
+                          </span>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '10px', fontStyle: 'italic' }}>
+                          No reviews yet
+                        </div>
+                      )}
                     </div>
 
                     <button
@@ -456,6 +480,22 @@ function Fixtures() {
                         }}>{f.id}</span>
                       </div>
                       <p style={{ color: 'var(--text-secondary)', fontSize: '12.5px', marginTop: '10px', lineHeight: '1.5' }}>{f.description}</p>
+                      
+                      {/* Reviews Summary Badge */}
+                      {f.reviewCount > 0 ? (
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '10px' }}>
+                          <span style={{ fontSize: '11.5px', color: '#f59e0b', fontWeight: 'bold' }}>
+                            ★ {f.averageRating.toFixed(1)}
+                          </span>
+                          <span style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                            ({f.reviewCount} {f.reviewCount === 1 ? 'review' : 'reviews'})
+                          </span>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '10px', fontStyle: 'italic' }}>
+                          No reviews yet
+                        </div>
+                      )}
                     </div>
 
                     <button

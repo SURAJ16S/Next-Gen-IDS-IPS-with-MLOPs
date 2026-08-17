@@ -260,6 +260,7 @@ const checkFrameworkManifests = (targetDir) => {
  * @param {string} [targetSubfolder] - Optional relative subfolder to look into first
  * @returns {Object} { framework: string, buildImage: string, runCommand: string, targetDir: string }
  */
+// ─── Framework Detection ──────────────────────────────────────────────────────
 const detectFramework = (dirPath, targetSubfolder = '') => {
   let targetDir = dirPath;
 
@@ -269,7 +270,10 @@ const detectFramework = (dirPath, targetSubfolder = '') => {
     if (fs.existsSync(customPath) && fs.statSync(customPath).isDirectory()) {
       targetDir = customPath;
       const detected = checkFrameworkManifests(targetDir);
-      if (detected) return detected;
+      if (detected) {
+        detected.mobileDetected = detectMobileComponent(dirPath);
+        return detected;
+      }
     }
   }
 
@@ -288,7 +292,10 @@ const detectFramework = (dirPath, targetSubfolder = '') => {
 
   // 3. Check for manifests in the resolved root targetDir
   const rootDetected = checkFrameworkManifests(targetDir);
-  if (rootDetected) return rootDetected;
+  if (rootDetected) {
+    rootDetected.mobileDetected = detectMobileComponent(dirPath);
+    return rootDetected;
+  }
 
   // 4. Auto-Detection Fallback: Scan immediate subdirectories for stack manifests (e.g. monorepo client/server split)
   try {
@@ -310,6 +317,7 @@ const detectFramework = (dirPath, targetSubfolder = '') => {
       const subdirDetected = checkFrameworkManifests(subdir);
       if (subdirDetected) {
         console.log(`[Auto-Detect] Found framework manifest inside subdirectory: ${subdirDetected.targetDir}`);
+        subdirDetected.mobileDetected = detectMobileComponent(dirPath);
         return subdirDetected;
       }
     }
@@ -325,8 +333,42 @@ const detectFramework = (dirPath, targetSubfolder = '') => {
     previewImage: generic.previewImage,
     runCommand: generic.runCommand,
     targetDir,
-    isGuiApp: false
+    isGuiApp: false,
+    mobileDetected: detectMobileComponent(dirPath)
   };
+};
+
+const detectMobileComponent = (dirPath) => {
+  try {
+    const items = fs.readdirSync(dirPath);
+    const mobileDirs = new Set(['mobile', 'android', 'ios', 'cordova', 'phonegap']);
+    if (items.some(item => mobileDirs.has(item.toLowerCase()))) {
+      return true;
+    }
+    
+    const pkgPath = path.join(dirPath, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+      if (deps['react-native'] || deps['expo'] || deps['cordova'] || deps['@capacitor/core']) {
+        return true;
+      }
+    }
+    
+    for (const item of items) {
+      const subPath = path.join(dirPath, item);
+      if (fs.existsSync(subPath) && fs.statSync(subPath).isDirectory()) {
+        if (item === 'node_modules' || item === '.git') continue;
+        const subPkg = path.join(subPath, 'package.json');
+        if (fs.existsSync(subPkg)) {
+          const pkg = JSON.parse(fs.readFileSync(subPkg, 'utf8'));
+          const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+          if (deps['react-native'] || deps['expo']) return true;
+        }
+      }
+    }
+  } catch (_) {}
+  return false;
 };
 
 module.exports = { detectFramework, detectGeneralArchitecture };

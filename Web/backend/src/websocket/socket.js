@@ -56,7 +56,62 @@ const initSocket = (server) => {
       }
     });
 
+    let terminalStream = null;
+    socket.on('terminal:init', async ({ jobId }) => {
+      console.log(`[Terminal] Client initialized terminal for job ${jobId}`);
+      
+      const Docker = require('dockerode');
+      const activeDocker = new Docker();
+      const targetContainerName = `devops-preview-${jobId}`;
+      const container = activeDocker.getContainer(targetContainerName);
+      
+      try {
+        const inspect = await container.inspect();
+        if (!inspect.State.Running) {
+          socket.emit('terminal:data', '\r\n\x1b[31m[Error] Preview container is offline. Please start/restart the preview sandbox first!\x1b[0m\r\n');
+          return;
+        }
+
+        const exec = await container.exec({
+          Cmd: ['sh'],
+          AttachStdin: true,
+          AttachStdout: true,
+          AttachStderr: true,
+          Tty: true
+        });
+
+        terminalStream = await exec.start({ hijack: true, stdin: true });
+        
+        terminalStream.on('data', (chunk) => {
+          socket.emit('terminal:data', chunk.toString('utf8'));
+        });
+
+        terminalStream.on('end', () => {
+          socket.emit('terminal:data', '\r\n\x1b[33m[Shell connection closed]\x1b[0m\r\n');
+          terminalStream = null;
+        });
+
+        terminalStream.on('error', (err) => {
+          socket.emit('terminal:data', `\r\n\x1b[31m[Shell Error] ${err.message}\x1b[0m\r\n`);
+          terminalStream = null;
+        });
+
+      } catch (err) {
+        socket.emit('terminal:data', `\r\n\x1b[31m[Error launching shell] ${err.message}\x1b[0m\r\n`);
+      }
+    });
+
+    socket.on('terminal:input', (data) => {
+      if (terminalStream) {
+        terminalStream.write(data);
+      }
+    });
+
     socket.on('disconnect', () => {
+      if (terminalStream) {
+        try { terminalStream.destroy(); } catch(_) {}
+        terminalStream = null;
+      }
       if (socket.isAgent) {
         console.log(`Agent disconnected: ${socket.nodeId}`);
       } else {

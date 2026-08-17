@@ -79,7 +79,7 @@ module.exports = {
 
     const publicDir = path.join(workDir, 'public');
     const hasPublicDir = fs.existsSync(publicDir);
-    const args = ['-S', '0.0.0.0:${PORT:-8000}'];
+    const args = ['-d', 'output_buffering=On', '-S', '0.0.0.0:${PORT:-8000}'];
 
     if (hasPublicDir) {
       args.push('-t', 'public');

@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useState, useCallback, useEffect } from 'react';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, AlertCircle, ShieldAlert } from 'lucide-react';
-import { loginUser } from '../services/api';
+import { loginUser, linkGithubAccount } from '../services/api';
 import './Auth.css';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -45,7 +45,51 @@ function Login() {
   const [attemptCount, setAttemptCount] = useState(0);
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
 
+  // GitHub Link state
+  const [linkState, setLinkState] = useState(null);
+  const [linkPassword, setLinkPassword] = useState('');
+  const [linkPasswordError, setLinkPasswordError] = useState('');
+  const [showLinkPassword, setShowLinkPassword] = useState(false);
+
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Detect GitHub redirect
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token');
+    const userStr = params.get('user');
+    const err = params.get('error');
+    const action = params.get('action');
+
+    if (action === 'link_github') {
+      const emailParam = params.get('email');
+      const ghUserParam = params.get('githubUsername');
+      const linkTokenParam = params.get('linkToken');
+      if (emailParam && ghUserParam && linkTokenParam) {
+        setLinkState({
+          email: emailParam,
+          githubUsername: ghUserParam,
+          linkToken: linkTokenParam,
+        });
+        navigate('/login', { replace: true });
+      }
+    } else if (token && userStr) {
+      try {
+        localStorage.setItem('token', token);
+        localStorage.setItem('user', decodeURIComponent(userStr));
+        navigate('/');
+      } catch (e) {
+        setServerError('Failed to process GitHub authentication.');
+      }
+    } else if (err) {
+      if (err === 'no_code') setServerError('Authorization code missing from GitHub.');
+      else if (err === 'token_failed') setServerError('GitHub token exchange failed.');
+      else setServerError('Authentication failed. Please try again.');
+      // Clean up search parameters from the URL so it's clean on refresh
+      navigate('/login', { replace: true });
+    }
+  }, [location, navigate]);
 
   // ── Field-level validate ───────────────────────────────────────────────────
   const validate = useCallback((field, value) => {
@@ -117,6 +161,31 @@ function Login() {
     }
   };
 
+  const handleLinkSubmit = async (e) => {
+    e.preventDefault();
+    if (!linkPassword) return;
+
+    setServerError('');
+    setLinkPasswordError('');
+    setLoading(true);
+
+    try {
+      const res = await linkGithubAccount({
+        email: linkState.email,
+        password: linkPassword,
+        linkToken: linkState.linkToken,
+      });
+      localStorage.setItem('token', res.data.token);
+      localStorage.setItem('user', JSON.stringify(res.data));
+      navigate('/');
+    } catch (err) {
+      const msg = err.response?.data?.message || 'Verification failed. Please check your password.';
+      setLinkPasswordError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const isLocked   = lockoutSeconds > 0;
   const emailErr   = touched.email    ? fieldErrors.email    : '';
   const pwErr      = touched.password ? fieldErrors.password : '';
@@ -150,93 +219,211 @@ function Login() {
           </div>
         )}
 
-        <form className="auth-form" onSubmit={handleSubmit} noValidate>
-
-          {/* ── Email (L1–L6) ───────────────────────────────────────────── */}
-          <div className={`auth-field ${emailErr ? 'has-error' : touched.email && !emailErr ? 'has-success' : ''}`}>
-            <label htmlFor="login-email">
-              Email Address <span className="required-star">*</span>
-            </label>
-            <div className="auth-input-wrap">
-              <input
-                id="login-email"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => handleChange('email', e.target.value)}
-                onBlur={(e) => handleBlur('email', e.target.value)}
-                autoComplete="email"
-                aria-describedby="login-email-error"
-                aria-invalid={!!emailErr}
-                maxLength={254}
-                required
-              />
-              <Mail size={15} className="field-icon" />
-              {touched.email && !emailErr && <span className="field-check">✓</span>}
+        {linkState ? (
+          <form className="auth-form" onSubmit={handleLinkSubmit} noValidate>
+            <div style={{
+              background: 'rgba(56,189,248,0.06)',
+              border: '1px solid rgba(56,189,248,0.2)',
+              borderRadius: 'var(--radius-md)',
+              padding: '12px 14px',
+              fontSize: '13px',
+              lineHeight: '1.5',
+              marginBottom: '18px',
+              color: 'var(--text-muted)'
+            }}>
+              An account with the email <strong>{linkState.email}</strong> is already registered.
+              To link your GitHub account <strong>@{linkState.githubUsername}</strong>, please enter your password.
             </div>
-            {emailErr && (
-              <p id="login-email-error" className="field-error" role="alert">
-                <AlertCircle size={11} /> {emailErr}
-              </p>
-            )}
-          </div>
 
-          {/* ── Password (L7–L12) ──────────────────────────────────────── */}
-          <div className={`auth-field ${pwErr ? 'has-error' : touched.password && !pwErr ? 'has-success' : ''}`}>
-            <label htmlFor="login-password">
-              Password <span className="required-star">*</span>
-            </label>
-            <div className="auth-input-wrap">
-              <input
-                id="login-password"
-                type={showPassword ? 'text' : 'password'}
-                placeholder="Enter your password"
-                value={password}
-                onChange={(e) => handleChange('password', e.target.value)}
-                onBlur={(e) => handleBlur('password', e.target.value)}
-                autoComplete="current-password"  // L12: allow autocomplete
-                aria-describedby="login-password-error"
-                aria-invalid={!!pwErr}
-                maxLength={128}
-                required
-              />
-              <Lock size={15} className="field-icon" />
-              {/* L10: visibility toggle */}
+            {/* Password Field */}
+            <div className={`auth-field ${linkPasswordError ? 'has-error' : ''}`}>
+              <label htmlFor="link-password">
+                Password <span className="required-star">*</span>
+              </label>
+              <div className="auth-input-wrap">
+                <input
+                  id="link-password"
+                  type={showLinkPassword ? 'text' : 'password'}
+                  placeholder="Enter your system password"
+                  value={linkPassword}
+                  onChange={(e) => {
+                    setLinkPassword(e.target.value);
+                    setLinkPasswordError('');
+                  }}
+                  required
+                />
+                <Lock size={15} className="field-icon" />
+                <button
+                  type="button"
+                  className="password-toggle"
+                  onClick={() => setShowLinkPassword((s) => !s)}
+                  aria-label={showLinkPassword ? 'Hide password' : 'Show password'}
+                  tabIndex={-1}
+                >
+                  {showLinkPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+              {linkPasswordError && (
+                <p id="link-password-error" className="field-error" role="alert">
+                  <AlertCircle size={11} /> {linkPasswordError}
+                </p>
+              )}
+            </div>
+
+            {/* Submit */}
+            <button
+              className="auth-btn"
+              id="link-submit"
+              type="submit"
+              disabled={loading || !linkPassword}
+              aria-busy={loading}
+              style={{ marginBottom: '10px' }}
+            >
+              {loading && <span className="auth-btn-spinner" />}
+              {loading ? 'Linking Account...' : 'Confirm & Link Account'}
+            </button>
+
+            <button
+              type="button"
+              className="auth-btn"
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(255,255,255,0.15)',
+                color: 'var(--text-color)',
+                marginTop: '0'
+              }}
+              onClick={() => {
+                setLinkState(null);
+                setLinkPassword('');
+                setLinkPasswordError('');
+              }}
+            >
+              Cancel
+            </button>
+          </form>
+        ) : (
+          <>
+            <form className="auth-form" onSubmit={handleSubmit} noValidate>
+
+              {/* ── Email (L1–L6) ───────────────────────────────────────────── */}
+              <div className={`auth-field ${emailErr ? 'has-error' : touched.email && !emailErr ? 'has-success' : ''}`}>
+                <label htmlFor="login-email">
+                  Email Address <span className="required-star">*</span>
+                </label>
+                <div className="auth-input-wrap">
+                  <input
+                    id="login-email"
+                    type="email"
+                    placeholder="you@example.com"
+                    value={email}
+                    onChange={(e) => handleChange('email', e.target.value)}
+                    onBlur={(e) => handleBlur('email', e.target.value)}
+                    autoComplete="email"
+                    aria-describedby="login-email-error"
+                    aria-invalid={!!emailErr}
+                    maxLength={254}
+                    required
+                  />
+                  <Mail size={15} className="field-icon" />
+                  {touched.email && !emailErr && <span className="field-check">✓</span>}
+                </div>
+                {emailErr && (
+                  <p id="login-email-error" className="field-error" role="alert">
+                    <AlertCircle size={11} /> {emailErr}
+                  </p>
+                )}
+              </div>
+
+              {/* ── Password (L7–L12) ──────────────────────────────────────── */}
+              <div className={`auth-field ${pwErr ? 'has-error' : touched.password && !pwErr ? 'has-success' : ''}`}>
+                <label htmlFor="login-password">
+                  Password <span className="required-star">*</span>
+                </label>
+                <div className="auth-input-wrap">
+                  <input
+                    id="login-password"
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="Enter your password"
+                    value={password}
+                    onChange={(e) => handleChange('password', e.target.value)}
+                    onBlur={(e) => handleBlur('password', e.target.value)}
+                    autoComplete="current-password"  // L12: allow autocomplete
+                    aria-describedby="login-password-error"
+                    aria-invalid={!!pwErr}
+                    maxLength={128}
+                    required
+                  />
+                  <Lock size={15} className="field-icon" />
+                  {/* L10: visibility toggle */}
+                  <button
+                    type="button"
+                    className="password-toggle"
+                    onClick={() => setShowPassword((s) => !s)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    tabIndex={-1}
+                  >
+                    {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+                {pwErr && (
+                  <p id="login-password-error" className="field-error" role="alert">
+                    <AlertCircle size={11} /> {pwErr}
+                  </p>
+                )}
+              </div>
+
+              {/* ── Submit (R38: disabled until valid, locked) ──────────────── */}
               <button
-                type="button"
-                className="password-toggle"
-                onClick={() => setShowPassword((s) => !s)}
-                aria-label={showPassword ? 'Hide password' : 'Show password'}
-                tabIndex={-1}
+                className="auth-btn"
+                id="login-submit"
+                type="submit"
+                disabled={loading || isLocked || !formValid}
+                aria-busy={loading}
               >
-                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+                {loading && <span className="auth-btn-spinner" />}
+                {isLocked
+                  ? `Locked — wait ${lockoutSeconds}s`
+                  : loading
+                  ? 'Authenticating...'
+                  : 'Sign In'}
               </button>
-            </div>
-            {pwErr && (
-              <p id="login-password-error" className="field-error" role="alert">
-                <AlertCircle size={11} /> {pwErr}
-              </p>
-            )}
-          </div>
+            </form>
 
-          {/* ── Submit (R38: disabled until valid, locked) ──────────────── */}
-          <button
-            className="auth-btn"
-            id="login-submit"
-            type="submit"
-            disabled={loading || isLocked || !formValid}
-            aria-busy={loading}
-          >
-            {loading && <span className="auth-btn-spinner" />}
-            {isLocked
-              ? `Locked — wait ${lockoutSeconds}s`
-              : loading
-              ? 'Authenticating...'
-              : 'Sign In'}
-          </button>
-        </form>
+            <div className="auth-divider">or</div>
 
-        <div className="auth-divider">or</div>
+            <button
+              type="button"
+              onClick={() => { window.location.href = 'http://localhost:5000/api/auth/github'; }}
+              style={{
+                width: '100%',
+                background: '#24292f',
+                border: '1px solid rgba(255,255,255,0.15)',
+                borderRadius: 'var(--radius-md)',
+                color: '#fff',
+                padding: '11px',
+                fontWeight: 600,
+                fontSize: '13.5px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '10px',
+                transition: 'opacity 0.15s',
+                marginBottom: '16px',
+                boxSizing: 'border-box'
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.85'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
+            >
+              <img
+                src="https://cdn-icons-png.flaticon.com/512/25/25231.png"
+                alt="GitHub"
+                style={{ width: '18px', height: '18px', filter: 'invert(1)' }}
+              />
+              Sign In with GitHub
+            </button>
+          </>
+        )}
 
         <div className="auth-links">
           <Link to="/forgot-password" id="forgot-password-link">Forgot Password?</Link>

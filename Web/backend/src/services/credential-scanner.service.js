@@ -277,8 +277,10 @@ const getReplacementString = (ext, varName) => {
     return `std::env::var("${varName}").unwrap_or_default()`;
   } else if (ext === '.properties' || ext === '.yml' || ext === '.yaml') {
     return `\${${varName}}`;
+  } else if (ext === '.ts' || ext === '.tsx') {
+    return `(process.env.${varName} as string)`;
   } else {
-    // default to JS/TS
+    // default to JS
     return `process.env.${varName}`;
   }
 };
@@ -350,4 +352,61 @@ const autoRemediateCredentials = (dir, findings) => {
   return envToInject;
 };
 
-module.exports = { scanDirectoryForCredentials, autoRemediateCredentials };
+const scanContentForCredentials = (content, filename = '') => {
+  const findings = [];
+  const baseName = path.basename(filename);
+  
+  if (baseName.startsWith('.env')) {
+    return findings;
+  }
+  
+  if (['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'composer.lock'].includes(baseName)) {
+    return findings;
+  }
+  
+  const ext = path.extname(filename).toLowerCase();
+  const textExtensions = ['.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.properties', '.xml', '.yml', '.yaml', '.json', '.rs', '.go', '.html', '.css', '.txt'];
+  if (ext && !textExtensions.includes(ext)) {
+    return findings;
+  }
+
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    for (const [type, regex] of Object.entries(SECRETS_REGEXES)) {
+      regex.lastIndex = 0;
+      let match;
+      while ((match = regex.exec(line)) !== null) {
+        const matchStr = match[0];
+        if (
+          matchStr.includes('process.env') || 
+          matchStr.includes('os.environ') || 
+          matchStr.includes('System.getenv') || 
+          matchStr.includes('config.') ||
+          matchStr.includes('${')
+        ) {
+          continue;
+        }
+        
+        const matchedVal = match[1] || matchStr;
+        let maskedSecret = matchStr;
+        if (matchedVal.length > 5) {
+          const mask = matchedVal.substring(0, Math.min(3, matchedVal.length)) + '...[MASKED]';
+          maskedSecret = matchStr.replace(matchedVal, mask);
+        } else {
+          maskedSecret = '[MASKED_SECRET]';
+        }
+        
+        findings.push({
+          line: i + 1,
+          type,
+          match: maskedSecret
+        });
+      }
+    }
+  }
+  return findings;
+};
+
+module.exports = { scanDirectoryForCredentials, autoRemediateCredentials, scanContentForCredentials };
+
