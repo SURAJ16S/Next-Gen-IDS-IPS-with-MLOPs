@@ -12,12 +12,115 @@ import {
   executePendingCommands,
   getChatsList,
   createChatThread,
-  getChatMessages
+  getChatMessages,
+  executeDeploymentDbQuery
 } from '../services/api';
 import { 
   Folder, File, Database, Play, Save, Send, Bot, RefreshCw, Plus, 
   Terminal, ShieldCheck, Code, ListFilter, AlertCircle, Trash2 
 } from 'lucide-react';
+import Editor from '@monaco-editor/react';
+import { Terminal as XTerm } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+import 'xterm/css/xterm.css';
+import { io } from 'socket.io-client';
+
+const getLanguageFromPath = (filePath) => {
+  if (!filePath) return 'javascript';
+  const ext = filePath.split('.').pop().toLowerCase();
+  switch (ext) {
+    case 'js':
+    case 'jsx':
+      return 'javascript';
+    case 'ts':
+    case 'tsx':
+      return 'typescript';
+    case 'py':
+      return 'python';
+    case 'json':
+      return 'json';
+    case 'html':
+      return 'html';
+    case 'css':
+      return 'css';
+    case 'yml':
+    case 'yaml':
+      return 'yaml';
+    case 'md':
+      return 'markdown';
+    default:
+      return 'text';
+  }
+};
+
+function TerminalView({ jobId }) {
+  const terminalRef = useRef(null);
+  const xtermRef = useRef(null);
+  const socketRef = useRef(null);
+
+  useEffect(() => {
+    if (!jobId || !terminalRef.current) return;
+
+    const term = new XTerm({
+      cursorBlink: true,
+      theme: {
+        background: '#1e1e1e',
+        foreground: '#f8f8f2',
+        cursor: '#f8f8f0'
+      },
+      fontSize: 13,
+      fontFamily: 'Consolas, Monaco, monospace',
+      rows: 24,
+      cols: 80
+    });
+
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(terminalRef.current);
+    setTimeout(() => {
+      try {
+        fitAddon.fit();
+      } catch (_) {}
+    }, 100);
+
+    xtermRef.current = term;
+
+    const socket = io('http://localhost:5000');
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      term.write('\x1b[32m*** Connected to terminal stream ***\x1b[0m\r\n');
+      socket.emit('terminal:init', { jobId });
+    });
+
+    socket.on('terminal:data', (data) => {
+      term.write(data);
+    });
+
+    term.onData((data) => {
+      socket.emit('terminal:input', data);
+    });
+
+    const handleResize = () => {
+      try {
+        fitAddon.fit();
+      } catch (_) {}
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      term.dispose();
+      socket.disconnect();
+    };
+  }, [jobId]);
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#1e1e1e', padding: '8px', minHeight: 0, borderRadius: '6px' }}>
+      <div ref={terminalRef} style={{ flex: 1, width: '100%', height: '100%', overflow: 'hidden' }} />
+    </div>
+  );
+}
 
 // Helper to recursively render file tree node
 function FileTreeNode({ node, onSelectFile, selectedPath }) {
@@ -64,6 +167,11 @@ function FileTreeNode({ node, onSelectFile, selectedPath }) {
 
   return (
     <div 
+      draggable={true}
+      onDragStart={(e) => {
+        e.dataTransfer.setData('text/plain', node.path);
+        e.dataTransfer.effectAllowed = 'copy';
+      }}
       onClick={() => onSelectFile(node.path)}
       style={{ 
         marginLeft: '12px',
@@ -122,7 +230,12 @@ export default function Agent() {
   const [isAgentTyping, setIsAgentTyping] = useState(false);
   
   // Current tab inside center pane
-  const [centerTab, setCenterTab] = useState('editor'); // 'editor' | 'database'
+  const [centerTab, setCenterTab] = useState('editor'); // 'editor' | 'database' | 'terminal' | 'dbShell'
+  
+  // Database Shell State
+  const [shellQuery, setShellQuery] = useState('');
+  const [shellOutput, setShellOutput] = useState('');
+  const [isShellRunning, setIsShellRunning] = useState(false);
   
   const chatEndRef = useRef(null);
 
@@ -271,6 +384,20 @@ export default function Agent() {
       handleSelectCollection(activeCollection); // refresh list
     } catch (err) {
       setInsertError(err.response?.data?.message || err.message || 'Invalid JSON format');
+    }
+  };
+
+  const handleRunShellQuery = async () => {
+    if (!shellQuery.trim() || !selectedId) return;
+    setIsShellRunning(true);
+    setShellOutput('Executing database query inside container...');
+    try {
+      const res = await executeDeploymentDbQuery(selectedId, shellQuery, selectedDep?.dbInitType || 'mongodb');
+      setShellOutput(res.data.output || '(Query successfully completed with empty output.)');
+    } catch (err) {
+      setShellOutput(`Error: ${err.response?.data?.message || err.message}`);
+    } finally {
+      setIsShellRunning(false);
     }
   };
 
@@ -586,6 +713,42 @@ export default function Agent() {
             >
               <Database size={14} /> Live DB Data
             </button>
+            <button
+              onClick={() => setCenterTab('terminal')}
+              style={{
+                background: centerTab === 'terminal' ? 'var(--bg-secondary)' : 'transparent',
+                border: 'none',
+                color: centerTab === 'terminal' ? 'var(--text-primary)' : 'var(--text-muted)',
+                padding: '10px 18px',
+                fontSize: '13px',
+                fontWeight: 500,
+                cursor: 'pointer',
+                borderRight: '1px solid var(--border-subtle)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
+              }}
+            >
+              <Terminal size={14} /> Interactive Terminal
+            </button>
+            <button
+              onClick={() => setCenterTab('dbShell')}
+              style={{
+                background: centerTab === 'dbShell' ? 'var(--bg-secondary)' : 'transparent',
+                border: 'none',
+                color: centerTab === 'dbShell' ? 'var(--text-primary)' : 'var(--text-muted)',
+                padding: '10px 18px',
+                fontSize: '13px',
+                fontWeight: 500,
+                cursor: 'pointer',
+                borderRight: '1px solid var(--border-subtle)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
+              }}
+            >
+              <Terminal size={14} /> Database Shell
+            </button>
           </div>
 
           {/* Tab contents */}
@@ -613,26 +776,25 @@ export default function Agent() {
                       }}
                     >
                       <Save size={14} />
-                      {isSavingFile ? 'Saving...' : 'Save File'}
                     </button>
                   </div>
-                  <textarea
-                    value={fileContent}
-                    onChange={(e) => setFileContent(e.target.value)}
-                    style={{
-                      flex: 1,
-                      background: 'rgba(0,0,0,0.3)',
-                      color: '#a7f3d0',
-                      border: '1px solid var(--border-subtle)',
-                      borderRadius: '6px',
-                      padding: '12px',
-                      fontFamily: 'Consolas, Monaco, monospace',
-                      fontSize: '13px',
-                      lineHeight: '1.5',
-                      resize: 'none',
-                      outline: 'none'
-                    }}
-                  />
+                  <div style={{ flex: 1, minHeight: 0, borderRadius: '6px', border: '1px solid var(--border-subtle)', overflow: 'hidden' }}>
+                    <Editor
+                      height="100%"
+                      defaultLanguage="javascript"
+                      language={getLanguageFromPath(activeFile)}
+                      theme="vs-dark"
+                      value={fileContent}
+                      onChange={(value) => setFileContent(value || '')}
+                      options={{
+                        minimap: { enabled: false },
+                        fontSize: 13,
+                        lineHeight: 20,
+                        fontFamily: 'Consolas, Monaco, monospace',
+                        automaticLayout: true
+                      }}
+                    />
+                  </div>
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--text-muted)', gap: '10px' }}>
@@ -640,6 +802,59 @@ export default function Agent() {
                   <span style={{ fontSize: '13px' }}>Select a file from the explorer to begin editing.</span>
                 </div>
               )
+            ) : centerTab === 'terminal' ? (
+              <TerminalView jobId={selectedDep?.jobId} />
+            ) : centerTab === 'dbShell' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, gap: '12px', minHeight: 0 }}>
+                <div style={{ fontSize: '14px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Database size={15} color="var(--accent-blue)" /> Database Query Shell
+                </div>
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Enter queries to run inside the database container. Use Mongo syntax (e.g. <code>db.products.find()</code>) or SQL commands depending on database.
+                </span>
+                <textarea
+                  value={shellQuery}
+                  onChange={(e) => setShellQuery(e.target.value)}
+                  placeholder="e.g. db.products.find().toArray()"
+                  style={{
+                    height: '100px',
+                    background: 'rgba(0,0,0,0.2)',
+                    color: '#fff',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px',
+                    padding: '10px',
+                    fontFamily: 'monospace',
+                    fontSize: '12.5px',
+                    outline: 'none',
+                    resize: 'none'
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                    DB Type: <code style={{ color: 'var(--accent-cyan)' }}>{selectedDep?.dbInitType || 'mongodb'}</code>
+                  </span>
+                  <button
+                    onClick={handleRunShellQuery}
+                    disabled={isShellRunning || !shellQuery.trim()}
+                    style={{
+                      background: 'var(--accent-blue)',
+                      color: '#fff',
+                      border: 'none',
+                      padding: '6px 16px',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      opacity: isShellRunning || !shellQuery.trim() ? 0.6 : 1
+                    }}
+                  >
+                    {isShellRunning ? 'Running Query...' : 'Run Query'}
+                  </button>
+                </div>
+                <div style={{ flex: 1, background: '#1e1e1e', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '10px', overflow: 'auto', fontFamily: 'monospace', fontSize: '12px', color: '#10b981' }}>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{shellOutput}</pre>
+                </div>
+              </div>
             ) : (
               // Live DB collection grid
               <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
@@ -831,7 +1046,35 @@ export default function Agent() {
                   gap: '8px'
                 }}
               >
-                <div>{msg.text}</div>
+                {(() => {
+                  if (!msg.text) return null;
+                  const thoughtRegex = /<(thought|thinking)>([\s\S]*?)<\/\1>/gi;
+                  const match = thoughtRegex.exec(msg.text);
+                  if (match) {
+                    const thoughtContent = match[2].trim();
+                    const cleanText = msg.text.replace(thoughtRegex, '').trim();
+                    return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <details style={{
+                          background: 'rgba(0,0,0,0.15)',
+                          border: '1px solid var(--border-subtle)',
+                          borderRadius: '6px',
+                          padding: '6px 10px',
+                          fontSize: '12px'
+                        }}>
+                          <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontWeight: 500, outline: 'none' }}>
+                            Thinking Process...
+                          </summary>
+                          <div style={{ marginTop: '6px', whiteSpace: 'pre-wrap', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: '11px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '6px' }}>
+                            {thoughtContent}
+                          </div>
+                        </details>
+                        {cleanText && <div style={{ whiteSpace: 'pre-wrap' }}>{cleanText}</div>}
+                      </div>
+                    );
+                  }
+                  return <div style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</div>;
+                })()}
                 {msg.pendingAction && (
                   <div style={{
                     marginTop: '8px',
@@ -845,9 +1088,39 @@ export default function Agent() {
                     <div style={{ fontWeight: 600, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <AlertCircle size={14} color="#facc15" /> Confirm Execution Command
                     </div>
-                    <div style={{ fontFamily: 'monospace', background: 'rgba(0,0,0,0.3)', padding: '6px', borderRadius: '4px', marginBottom: '8px', color: '#fff' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
                       {msg.pendingAction.commands.map((cmd, cIdx) => (
-                        <div key={cIdx}>$ {cmd}</div>
+                        <div key={cIdx} style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(0,0,0,0.3)', padding: '4px 6px', borderRadius: '4px' }}>
+                          <span style={{ color: '#94a3b8', fontFamily: 'monospace' }}>$</span>
+                          <input
+                            type="text"
+                            value={cmd}
+                            onChange={(e) => {
+                              const updatedCmds = [...msg.pendingAction.commands];
+                              updatedCmds[cIdx] = e.target.value;
+                              setChatMessages(prev => {
+                                const copy = [...prev];
+                                copy[idx] = {
+                                  ...copy[idx],
+                                  pendingAction: {
+                                    ...copy[idx].pendingAction,
+                                    commands: updatedCmds
+                                  }
+                                };
+                                return copy;
+                              });
+                            }}
+                            style={{
+                              flex: 1,
+                              background: 'transparent',
+                              color: '#fff',
+                              border: 'none',
+                              outline: 'none',
+                              fontFamily: 'monospace',
+                              fontSize: '12px'
+                            }}
+                          />
+                        </div>
                       ))}
                     </div>
                     <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
@@ -912,12 +1185,31 @@ export default function Agent() {
           {/* Chat Input panel */}
           <div style={{ padding: '12px', borderTop: '1px solid var(--border-subtle)' }}>
             <div style={{ display: 'flex', gap: '8px' }}>
-              <input
-                type="text"
+              <textarea
                 placeholder="Ask agent to seed db or edit code..."
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSendChat()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendChat();
+                  }
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'copy';
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const filePath = e.dataTransfer.getData('text/plain');
+                  if (filePath) {
+                    setChatInput(prev => {
+                      const suffix = ` [Reference: ${filePath}]`;
+                      return prev ? prev + suffix : suffix;
+                    });
+                  }
+                }}
+                rows={5}
                 style={{
                   flex: 1,
                   background: '#fff',
@@ -926,7 +1218,11 @@ export default function Agent() {
                   borderRadius: '6px',
                   padding: '8px 12px',
                   fontSize: '13px',
-                  outline: 'none'
+                  outline: 'none',
+                  resize: 'none',
+                  fontFamily: 'inherit',
+                  lineHeight: '1.4',
+                  overflowY: 'auto'
                 }}
               />
               <button

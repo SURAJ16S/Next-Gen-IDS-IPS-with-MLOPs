@@ -71,6 +71,7 @@ export const executePendingCommands = (id, commands, chatId) => api.post(`/devop
 export const getChatsList = (id) => api.get(`/devops/${id}/agent/chats`);
 export const createChatThread = (id, title) => api.post(`/devops/${id}/agent/chats`, { title });
 export const getChatMessages = (id, chatId) => api.get(`/devops/${id}/agent/chats/${chatId}`);
+export const getDeploymentStatus = (id) => api.get(`/devops/${id}/status`);
 
 // GitHub OAuth
 export const getGithubAuthUrl  = ()     => api.get('/devops/github/auth-url');

@@ -31,7 +31,13 @@ if (!fs.existsSync(CACHE_BASE_DIR)) fs.mkdirSync(CACHE_BASE_DIR, { recursive: tr
 const logToJob = async (deploymentId, jobId, message) => {
   const formattedLog = `[${new Date().toISOString()}] ${message}`;
   console.log(`[Job ${jobId}] ${message}`);
-  await Deployment.findByIdAndUpdate(deploymentId, { $push: { buildLogs: formattedLog } });
+  try {
+    const logDir = path.join(BUILDS_BASE_DIR, jobId);
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, 'pipeline.log'), formattedLog + '\n', 'utf8');
+  } catch (err) {
+    console.error('Failed to write build log to file:', err.message);
+  }
   try {
     const io = getIO();
     io.to(`pipeline:${jobId}`).emit('pipeline:log', { jobId, log: formattedLog });
@@ -210,7 +216,12 @@ const runContainerCommand = (image, cmd, binds, deploymentId, jobId, stepName) =
     docker.createContainer({
       Image: image,
       Cmd: cmd,
-      HostConfig: { Binds: binds },
+      HostConfig: {
+        Binds: binds,
+        NanoCPUs: 1000000000,
+        Memory: 536870912,
+        PidsLimit: 100
+      },
       WorkingDir: '/workspace'
     }, (err, container) => {
       if (err) return reject(new Error(`Failed to create container for ${stepName}: ${err.message}`));
@@ -1018,8 +1029,13 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
     logToJob(deploymentId, jobId, `[-] PIPELINE ERROR: ${error.message}`);
     deploymentStatus = 'failed';
     try {
-      const currentDeployment = await Deployment.findById(deploymentId);
-      const allLogsText = (currentDeployment.buildLogs || []).join('\n');
+      let allLogsText = '';
+      try {
+        const logFilePath = path.join(BUILDS_BASE_DIR, jobId, 'pipeline.log');
+        if (fs.existsSync(logFilePath)) {
+          allLogsText = fs.readFileSync(logFilePath, 'utf8');
+        }
+      } catch (_) {}
       const diagnoses = analyzeLogsAndDiagnose(allLogsText + '\n' + error.message);
       if (diagnoses.length > 0) {
         logToJob(deploymentId, jobId, `\n[DIAGNOSTICS] DevOps Smart Diagnosis Engine identified potential root causes:`);

@@ -9,11 +9,36 @@ const upload = require('../middleware/upload.middleware');
 const { runPipeline } = require('../services/pipeline-runner.service');
 const { suggestPort, stopPreview, getRunningPreviews } = require('../services/process-manager.service');
 
+const cleanDockerOutput = (rawBuffer) => {
+  if (!Buffer.isBuffer(rawBuffer)) {
+    rawBuffer = Buffer.from(rawBuffer);
+  }
+  let offset = 0;
+  let cleanText = '';
+  
+  while (offset < rawBuffer.length) {
+    if (offset + 8 <= rawBuffer.length) {
+      const type = rawBuffer[offset];
+      if (type === 1 || type === 2) {
+        const size = rawBuffer.readUInt32BE(offset + 4);
+        if (size > 0 && offset + 8 + size <= rawBuffer.length) {
+          cleanText += rawBuffer.toString('utf8', offset + 8, offset + 8 + size);
+          offset += 8 + size;
+          continue;
+        }
+      }
+    }
+    cleanText += rawBuffer.toString('utf8', offset, offset + 1);
+    offset += 1;
+  }
+  return cleanText;
+};
+
 // ─── Existing handlers ────────────────────────────────────────────────────────
 
 const getDeployments = async (req, res) => {
   try {
-    const deployments = await Deployment.find({}, '-envFiles.content')
+    const deployments = await Deployment.find({}, '-envFiles.content -buildLogs')
       .populate('deployedBy', 'firstName lastName email role')
       .sort({ createdAt: -1 });
     res.json(deployments);
@@ -116,6 +141,17 @@ const getDeploymentStatus = async (req, res) => {
   try {
     const deployment = await Deployment.findById(req.params.id);
     if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    
+    let buildLogs = [];
+    try {
+      const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+      const logFilePath = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId, 'pipeline.log');
+      if (fs.existsSync(logFilePath)) {
+        const fileContent = fs.readFileSync(logFilePath, 'utf8');
+        buildLogs = fileContent.split('\n').filter(Boolean);
+      }
+    } catch (_) {}
+
     res.json({
       id: deployment._id,
       projectName: deployment.projectName,
@@ -123,7 +159,7 @@ const getDeploymentStatus = async (req, res) => {
       architectureDetected: deployment.architectureDetected,
       status: deployment.status,
       vulnerabilitiesFound: deployment.vulnerabilitiesFound,
-      buildLogs: deployment.buildLogs,
+      buildLogs: buildLogs.length > 0 ? buildLogs : (deployment.buildLogs || []),
       scanReport: deployment.scanReport,
       previewPort: deployment.previewPort,
       previewStatus: deployment.previewStatus,
@@ -737,10 +773,11 @@ const executeDeploymentDbQuery = async (req, res) => {
 
     const delimiter = '__DB_QUERY_EOF__';
     if (dbType === 'mysql') {
-      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\nmysql -u root -D "${dbName}" < /tmp/run.sql`];
+      const wrappedQuery = `START TRANSACTION;\n${query}\nCOMMIT;`;
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${wrappedQuery}\n${delimiter}\nmysql -u root --bail -D "${dbName}" < /tmp/run.sql`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else if (dbType === 'postgres') {
-      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\npsql -U postgres -d "${dbName}" < /tmp/run.sql`];
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\npsql -U postgres -d "${dbName}" --single-transaction < /tmp/run.sql`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else if (dbType === 'mongodb') {
       const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.js\n${query}\n${delimiter}\nmongosh "${dbName}" --quiet /tmp/run.js`];
@@ -844,6 +881,15 @@ const saveWorkspaceFile = async (req, res) => {
     if (!resolvedPath.startsWith(path.resolve(extractDir))) {
       return res.status(403).json({ message: 'Access denied' });
     }
+
+    const { scanContentForCredentials } = require('../services/credential-scanner.service');
+    const findings = scanContentForCredentials(content || '', filePath);
+    if (findings.length > 0) {
+      return res.status(400).json({
+        message: `Security Blocked: Potential credential/secret leak detected in ${filePath}.`,
+        findings
+      });
+    }
     
     fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
     fs.writeFileSync(resolvedPath, content || '', 'utf8');
@@ -880,7 +926,7 @@ const getDbCollections = async (req, res) => {
     }
     
     const runExec = async (cmd) => {
-      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: true });
       const stream = await exec.start();
       return new Promise((resolve) => {
         let output = '';
@@ -950,7 +996,7 @@ const getDbCollectionData = async (req, res) => {
     }
     
     const runExec = async (cmd) => {
-      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: true });
       const stream = await exec.start();
       return new Promise((resolve) => {
         let output = '';
@@ -968,7 +1014,7 @@ const getDbCollectionData = async (req, res) => {
       const output = await runExec(cmd);
       try {
         const docs = JSON.parse(output);
-        return res.json(docs);
+        return res.json(maskPIIData(docs));
       } catch (_) {
         return res.json([]);
       }
@@ -984,14 +1030,14 @@ const getDbCollectionData = async (req, res) => {
         headers.forEach((h, i) => { obj[h] = values[i] || null; });
         return obj;
       });
-      return res.json(rows);
+      return res.json(maskPIIData(rows));
     } else if (dbType === 'postgres') {
       const query = `SELECT json_agg(t) FROM (SELECT * FROM "${collection}" LIMIT 50) t;`;
       const cmd = ['psql', '-U', 'postgres', '-d', dbName, '-t', '-c', query];
       const output = await runExec(cmd);
       try {
         const data = JSON.parse(output);
-        return res.json(data || []);
+        return res.json(maskPIIData(data || []));
       } catch (_) {
         return res.json([]);
       }
@@ -999,7 +1045,7 @@ const getDbCollectionData = async (req, res) => {
       const cmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 -header -json "$sqliteFile" "select * from \`${collection}\` limit 50;"`];
       const output = await runExec(cmd);
       try {
-        return res.json(JSON.parse(output) || []);
+        return res.json(maskPIIData(JSON.parse(output) || []));
       } catch (_) {
         return res.json([]);
       }
@@ -1037,7 +1083,7 @@ const insertDbRecord = async (req, res) => {
     }
     
     const runExec = async (cmd) => {
-      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: true });
       const stream = await exec.start();
       return new Promise((resolve) => {
         let output = '';
@@ -1048,6 +1094,13 @@ const insertDbRecord = async (req, res) => {
     };
     
     const dbName = 'preview_db';
+
+    try {
+      await validateDbRecord(container, dbType, dbName, collection, record);
+    } catch (valErr) {
+      return res.status(400).json({ message: `Validation Failed: ${valErr.message}` });
+    }
+
     if (dbType === 'mongodb') {
       const delimiter = '__DB_QUERY_EOF__';
       const query = `printjson(db.${collection}.insertOne(${JSON.stringify(record)}))`;
@@ -1082,6 +1135,44 @@ const insertDbRecord = async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
+};
+
+const getFlatWorkspaceFiles = (dirPath, relativeDir = '') => {
+  let list = [];
+  if (!fs.existsSync(dirPath)) return list;
+  try {
+    const files = fs.readdirSync(dirPath);
+    for (const file of files) {
+      if (['node_modules', '.git', 'dist', 'build', '.security-reports'].includes(file)) continue;
+      const fullPath = path.join(dirPath, file);
+      const relPath = path.join(relativeDir, file).replace(/\\/g, '/');
+      if (fs.statSync(fullPath).isDirectory()) {
+        list = list.concat(getFlatWorkspaceFiles(fullPath, relPath));
+      } else {
+        list.push(relPath);
+      }
+    }
+  } catch (_) {}
+  return list;
+};
+
+const isReadOnlyCommand = (command) => {
+  if (!command || typeof command !== 'string') return false;
+  const cmd = command.toLowerCase().trim();
+  
+  if (/[><]/.test(cmd)) return false;
+  
+  const subParts = cmd.split(/[;&|]/).map(s => s.trim()).filter(Boolean);
+  if (subParts.length === 0) return false;
+  
+  const readKeywords = ['cat', 'ls', 'find', 'grep', 'pwd', 'head', 'tail', 'echo', 'printenv', 'file', 'stat', 'which', 'type', 'du', 'df'];
+  for (const part of subParts) {
+    const firstWord = part.split(/\s+/)[0];
+    if (!readKeywords.includes(firstWord)) {
+      return false;
+    }
+  }
+  return true;
 };
 
 // ─── AI DevOps Agent Chat-Exec Handlers ────────────────────────────────────────
@@ -1125,6 +1216,7 @@ const executeAgentChat = async (req, res) => {
     } catch (_) {}
 
     const axios = require('axios');
+    const flatFilesList = getFlatWorkspaceFiles(extractDir);
     const systemPrompt = `You are a DevOps AI Developer Assistant inside a container workspace environment.
 You help developers write code, design databases, and perform operational tasks like database seeding, record insertion, or workspace script execution.
 
@@ -1134,13 +1226,31 @@ Current context:
 - Project Package Details:
 ${pkgDetails}
 
+Current Workspace Files Structure:
+${flatFilesList.map(f => ` - ${f}`).join('\n')}
+
 YOUR DYNAMIC ABILITIES:
 1. File patches: You can create or modify files inside the container's workspace. Wrap the full content inside a <patch file="relative/path/to/file">...</patch> tag. Make sure the relative path is correct.
-2. Executing scripts/commands: You can run terminal commands directly inside the active preview container (which has Python, Node, curl, etc. installed). Wrap the command inside an <exec command="command" /> tag.
-   - Example: To run a python script, use <exec command="python script.py" />
+2. Executing scripts/commands: You can run terminal commands directly inside the active preview container. Wrap the command inside an <exec command="command" /> tag.
+   - Example: To read a model schema file, use <exec command="cat server/models/Product.js" /> to print the schema content to the terminal output before writing seed scripts.
    - Example: To install an npm package, use <exec command="npm install package" />
-3. TOKEN EFFICIENCY & COMPATIBILITY REQUIREMENT: If the user asks you to insert database data, do NOT write massive JS loops or hardcode queries inside application controllers. Instead, create a standalone seeding script (e.g. seed_data.js or seed_data.py) using a <patch> tag, and trigger it using an <exec> tag.
-   - CRITICAL WARNING: The preview container DOES NOT have 'ts-node' installed. If you create helper scripts, ALWAYS write them in plain JavaScript (e.g. seed.js) and run them with 'node seed.js', or write them in Python (e.g. seed.py) and run them with 'python seed.py'. Under no circumstances should you output a ts script and run it via ts-node, as it will crash with command not found!
+3. TOKEN EFFICIENCY & COMPATIBILITY REQUIREMENT: If the user asks you to insert database data, do NOT write massive JS loops or hardcode queries inside application controllers. Instead, create a standalone seeding script (e.g. seed.js) using a <patch> tag, and trigger it using an <exec> tag.
+   - CRITICAL WARNING & RUNTIME CONSTRAINTS: 
+     * Node.js (node, npm) is INSTALLED and AVAILABLE inside the container.
+     * Python (python, python3) is NOT INSTALLED inside the container.
+     * Under no circumstances should you generate Python scripts or run python commands inside this container. If you need to seed the database, write helper scripts, or execute operations, ALWAYS write them in plain JavaScript (e.g. seed.js) and run them with 'node seed.js'.
+     * The preview container does NOT have 'ts-node' installed. Do not output typescript scripts to run via ts-node.
+     * CRITICAL DATABASE RESOLUTION: The database server is NOT running on localhost inside this container. To connect to the database inside your scripts (e.g. seed.js), ALWAYS read the environment variables (like MONGODB_URI, DB_HOST, PGHOST, etc.) which are already configured with the correct network hostname, or use the container network hostname:
+       - MongoDB: \`mongodb://devops-db-mongodb-${deployment.jobId}:27017/preview_db\`
+       - PostgreSQL: \`postgresql://postgres@devops-db-postgres-${deployment.jobId}:5432/preview_db\`
+       - MySQL: \`mysql://root@devops-db-mysql-${deployment.jobId}:3306/preview_db\`
+4. HIDING REASONING IN THE UI:
+   If you want to brainstorm, write down steps, think, or reason before outputting your final answer, you MUST wrap that entire thinking process inside a <thought>...</thought> block (or <thinking>...</thinking> block).
+   Only write the final, user-facing instructions, markdown explanations, and executable tags (<exec> or <patch>) outside of the thought blocks.
+5. AUTONOMOUS FILE SEARCH & PROACTIVE READ OPERATIONS:
+   - When a user asks you to locate, view, read, show, or check a file (e.g. "show me nodemon.json" or "find nodemon.json"), you must NOT tell the user how to do it or write down regex explanations.
+   - Instead, you MUST immediately output an <exec command="..." /> tag to search the filesystem (using command keywords like \`find . -name "nodemon.json"\` or \`find /workspace -name "*nodemon*"\` or \`grep -r "pattern" .\`) or print the file content (\`cat <path>\`).
+   - If a file is not in the initial workspace file listing, use search commands autonomously. Read operations are always allowed on this sandbox, so search and inspect files proactively to solve tasks!
 
 Explain clearly what changes you have made and summarize any execution stdout/stderr results.`;
 
@@ -1194,17 +1304,32 @@ Explain clearly what changes you have made and summarize any execution stdout/st
 
     // Parse and apply <patch> tags
     const patches = [];
+    const blockedPatches = [];
     const patchRegex = /<patch\s+file="([^"]+)">([\s\S]*?)<\/patch>/g;
     let match;
+    const { scanContentForCredentials } = require('../services/credential-scanner.service');
     while ((match = patchRegex.exec(assistantText)) !== null) {
       const relPath = match[1];
       const code = match[2];
       const targetAbsPath = path.resolve(extractDir, relPath);
       if (targetAbsPath.startsWith(path.resolve(extractDir))) {
+        const findings = scanContentForCredentials(code, relPath);
+        if (findings.length > 0) {
+          blockedPatches.push({ file: relPath, findings });
+          continue;
+        }
         fs.mkdirSync(path.dirname(targetAbsPath), { recursive: true });
         fs.writeFileSync(targetAbsPath, code, 'utf8');
         patches.push(relPath);
       }
+    }
+
+    let patchesReport = '';
+    if (patches.length > 0) {
+      patchesReport += `\n\n**[AI Agent applied patches to files]:**\n${patches.map(p => ` - \`${p}\``).join('\n')}`;
+    }
+    if (blockedPatches.length > 0) {
+      patchesReport += `\n\n⚠️ **[AI Agent Security Notice - Secret Leak Blocked]:**\nPatches to the following files were blocked because they contained hardcoded secrets/credentials:\n${blockedPatches.map(bp => ` - \`${bp.file}\` (Detected: ${bp.findings.map(f => f.type).join(', ')})`).join('\n')}\nPlease use environment variables instead.`;
     }
 
     const execRegex = /<exec\s+command="([^"]+)"\s*\/>/g;
@@ -1213,21 +1338,82 @@ Explain clearly what changes you have made and summarize any execution stdout/st
       commandsToRun.push(match[1]);
     }
 
+    const unsafeCommands = [];
+    const safeCommandsToRun = [];
+    for (const cmd of commandsToRun) {
+      if (isCommandSafe(cmd)) {
+        safeCommandsToRun.push(cmd);
+      } else {
+        unsafeCommands.push(cmd);
+      }
+    }
+
+    let guardrailReport = '';
+    if (unsafeCommands.length > 0) {
+      guardrailReport += `\n\n⚠️ **[AI Agent Security Notice - Execution Blocked]:**\nThe following commands were blocked by Outbound Guardrails as they contained potentially unsafe operations:\n${unsafeCommands.map(c => ` - \`${c}\``).join('\n')}`;
+    }
+
     // Push user query to DB first
     chatSession.messages.push({
       role: 'user',
       text: message
     });
 
+    const readOnlyCommands = [];
+    const cudCommands = [];
+    for (const cmd of safeCommandsToRun) {
+      if (isReadOnlyCommand(cmd)) {
+        readOnlyCommands.push(cmd);
+      } else {
+        cudCommands.push(cmd);
+      }
+    }
+
+    // Run read-only commands automatically
+    let readLogs = '';
+    if (readOnlyCommands.length > 0) {
+      const Docker = require('dockerode');
+      const activeDocker = new Docker();
+      const targetContainerName = `devops-preview-${deployment.jobId}`;
+      const container = activeDocker.getContainer(targetContainerName);
+      
+      let isContainerRunning = false;
+      try {
+        const inspect = await container.inspect();
+        isContainerRunning = inspect.State.Running;
+      } catch (_) {}
+
+      for (const cmd of readOnlyCommands) {
+        readLogs += `\n$ ${cmd}\n`;
+        if (isContainerRunning) {
+          const exec = await container.exec({ Cmd: ['sh', '-c', `cd /project 2>/dev/null || cd /workspace 2>/dev/null || true; ${cmd}`], AttachStdout: true, AttachStderr: true });
+          const stream = await exec.start();
+          const out = await new Promise((resolve) => {
+            const chunks = [];
+            stream.on('data', chunk => { chunks.push(chunk); });
+            stream.on('end', () => {
+              const fullBuffer = Buffer.concat(chunks);
+              resolve(cleanDockerOutput(fullBuffer));
+            });
+            stream.on('error', () => resolve(''));
+          });
+          readLogs += out;
+        } else {
+          readLogs += `Execution blocked: Preview container is offline.\n`;
+        }
+      }
+    }
+
+    let currentMessage = assistantText + patchesReport + guardrailReport;
+    if (readLogs) {
+      currentMessage += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash${readLogs}\`\`\``;
+    }
+
     const execPermission = deployment.execPermission || 'ask';
 
-    if (commandsToRun.length > 0) {
+    if (cudCommands.length > 0) {
       if (execPermission === 'never') {
-        let finalMessage = assistantText;
-        if (patches.length > 0) {
-          finalMessage += `\n\n**[AI Agent applied patches to files]:**\n${patches.map(p => ` - \`${p}\``).join('\n')}`;
-        }
-        finalMessage += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash\n[Execution blocked: User has disabled command execution for this agent]\n\`\`\``;
+        const finalMessage = currentMessage + `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash\n[Execution blocked: User has disabled command execution for this agent]\n\`\`\``;
         
         chatSession.messages.push({
           role: 'agent',
@@ -1245,31 +1431,26 @@ Explain clearly what changes you have made and summarize any execution stdout/st
       }
 
       if (execPermission === 'ask') {
-        let finalMessage = assistantText;
-        if (patches.length > 0) {
-          finalMessage += `\n\n**[AI Agent applied patches to files]:**\n${patches.map(p => ` - \`${p}\``).join('\n')}`;
-        }
-
         chatSession.messages.push({
           role: 'agent',
-          text: finalMessage,
-          pendingAction: { commands: commandsToRun }
+          text: currentMessage,
+          pendingAction: { commands: cudCommands }
         });
         await chatSession.save();
 
         return res.json({ 
-          message: finalMessage, 
+          message: currentMessage, 
           pendingExec: true, 
-          commands: commandsToRun, 
+          commands: cudCommands, 
           patches,
           chatId: chatSession._id
         });
       }
     }
 
-    // Default to running if permission is 'always' or no commands
-    let execLogs = '';
-    if (commandsToRun.length > 0 && execPermission === 'always') {
+    // Default to running if permission is 'always' or no CUD commands
+    let cudLogs = '';
+    if (cudCommands.length > 0 && execPermission === 'always') {
       const Docker = require('dockerode');
       const activeDocker = new Docker();
       const targetContainerName = `devops-preview-${deployment.jobId}`;
@@ -1281,36 +1462,30 @@ Explain clearly what changes you have made and summarize any execution stdout/st
         isContainerRunning = inspect.State.Running;
       } catch (_) {}
 
-      for (const cmd of commandsToRun) {
-        execLogs += `\n$ ${cmd}\n`;
+      for (const cmd of cudCommands) {
+        cudLogs += `\n$ ${cmd}\n`;
         if (isContainerRunning) {
-          const exec = await container.exec({ Cmd: ['sh', '-c', cmd], AttachStdout: true, AttachStderr: true });
+          const exec = await container.exec({ Cmd: ['sh', '-c', `cd /project 2>/dev/null || cd /workspace 2>/dev/null || true; ${cmd}`], AttachStdout: true, AttachStderr: true });
           const stream = await exec.start();
           const out = await new Promise((resolve) => {
-            let buffer = '';
-            stream.on('data', chunk => { buffer += chunk.toString(); });
-            stream.on('end', () => resolve(buffer));
+            const chunks = [];
+            stream.on('data', chunk => { chunks.push(chunk); });
+            stream.on('end', () => {
+              const fullBuffer = Buffer.concat(chunks);
+              resolve(cleanDockerOutput(fullBuffer));
+            });
             stream.on('error', () => resolve(''));
           });
-          execLogs += out;
+          cudLogs += out;
         } else {
-          const { execSync } = require('child_process');
-          try {
-            const out = execSync(cmd, { cwd: extractDir, env: process.env }).toString();
-            execLogs += out;
-          } catch (e) {
-            execLogs += `Execution failed: ${e.message}\n${e.stderr ? e.stderr.toString() : ''}`;
-          }
+          cudLogs += `Execution blocked: Preview container is offline. Please restart the sandbox from the DevOps Dashboard before executing commands.\n`;
         }
       }
     }
 
-    let finalMessage = assistantText;
-    if (patches.length > 0) {
-      finalMessage += `\n\n**[AI Agent applied patches to files]:**\n${patches.map(p => ` - \`${p}\``).join('\n')}`;
-    }
-    if (execLogs) {
-      finalMessage += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash${execLogs}\`\`\``;
+    let finalMessage = currentMessage;
+    if (cudLogs) {
+      finalMessage += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash${cudLogs}\`\`\``;
     }
 
     chatSession.messages.push({
@@ -1370,27 +1545,30 @@ const executePendingCommands = async (req, res) => {
       isContainerRunning = inspect.State.Running;
     } catch (_) {}
     
+    if (!isContainerRunning) {
+      return res.status(400).json({ message: 'Preview container is offline. Please start/restart the preview sandbox first!' });
+    }
+
+    for (const cmd of commands) {
+      if (!isCommandSafe(cmd)) {
+        return res.status(400).json({ message: `Security Blocked: Command contains potentially dangerous patterns and was rejected by guardrails: "${cmd}"` });
+      }
+    }
+
     for (const cmd of commands) {
       execLogs += `\n$ ${cmd}\n`;
-      if (isContainerRunning) {
-        const exec = await container.exec({ Cmd: ['sh', '-c', cmd], AttachStdout: true, AttachStderr: true });
-        const stream = await exec.start();
-        const out = await new Promise((resolve) => {
-          let buffer = '';
-          stream.on('data', chunk => { buffer += chunk.toString(); });
-          stream.on('end', () => resolve(buffer));
-          stream.on('error', () => resolve(''));
+      const exec = await container.exec({ Cmd: ['sh', '-c', `cd /project 2>/dev/null || cd /workspace 2>/dev/null || true; ${cmd}`], AttachStdout: true, AttachStderr: true });
+      const stream = await exec.start();
+      const out = await new Promise((resolve) => {
+        const chunks = [];
+        stream.on('data', chunk => { chunks.push(chunk); });
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer));
         });
-        execLogs += out;
-      } else {
-        const { execSync } = require('child_process');
-        try {
-          const out = execSync(cmd, { cwd: extractDir, env: process.env }).toString();
-          execLogs += out;
-        } catch (e) {
-          execLogs += `Execution failed: ${e.message}\n${e.stderr ? e.stderr.toString() : ''}`;
-        }
-      }
+        stream.on('error', () => resolve(''));
+      });
+      execLogs += out;
     }
 
     // Append logs to the specific message inside MongoDB chat session
@@ -1456,6 +1634,191 @@ const getChatMessages = async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
+};
+
+const isCommandSafe = (command) => {
+  if (!command || typeof command !== 'string') return false;
+  
+  const cmd = command.toLowerCase().trim();
+  
+  if (/\brm\s+-[a-z]*r[a-z]*\s+(\/($|\s|\*)|(\.\.)($|\s)|\*)/.test(cmd)) return false;
+  
+  if (/\b(nc|netcat|ncat)\b/.test(cmd)) return false;
+  if (cmd.includes('/dev/tcp') || cmd.includes('/dev/udp')) return false;
+  if (cmd.includes('bash -i') || cmd.includes('sh -i')) return false;
+  
+  if (cmd.includes('docker ') || cmd.includes('docker.sock')) return false;
+  
+  if (/\b(mkfs|dd|fdisk|parted)\b/.test(cmd) && (cmd.includes('/dev/') || cmd.includes('of='))) return false;
+  
+  if (cmd.includes('/etc/passwd') || cmd.includes('/etc/shadow') || cmd.includes('/etc/gshadow') || cmd.includes('/etc/group')) return false;
+  
+  if (cmd.includes(':(){') || cmd.includes(':|:&')) return false;
+
+  return true;
+};
+
+const validateDbRecord = async (container, dbType, dbName, collection, record) => {
+  const runExec = async (cmd) => {
+    const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: true });
+    const stream = await exec.start();
+    return new Promise((resolve) => {
+      let output = '';
+      stream.on('data', chunk => { output += chunk.toString(); });
+      stream.on('end', () => resolve(output.trim()));
+      stream.on('error', () => resolve(''));
+    });
+  };
+
+  if (dbType === 'sqlite') {
+    const cmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 -header -json "$sqliteFile" "PRAGMA table_info(\`${collection}\`);"`];
+    const output = await runExec(cmd);
+    try {
+      const cols = JSON.parse(output);
+      if (!Array.isArray(cols) || cols.length === 0) return null;
+      for (const col of cols) {
+        const val = record[col.name];
+        if (col.notnull && (val === undefined || val === null) && col.dflt_value === null && !col.pk) {
+          throw new Error(`Field '${col.name}' is required and cannot be null.`);
+        }
+        if (val !== undefined && val !== null) {
+          const type = col.type.toUpperCase();
+          if ((type.includes('INT') || type.includes('NUM') || type.includes('REAL') || type.includes('DOUBLE') || type.includes('FLOAT')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${col.name}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('required') || e.message.includes('Invalid type')) throw e;
+    }
+  } else if (dbType === 'postgres') {
+    const query = `SELECT json_agg(t) FROM (SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = '${collection}') t;`;
+    const cmd = ['psql', '-U', 'postgres', '-d', dbName, '-t', '-c', query];
+    const output = await runExec(cmd);
+    try {
+      const cols = JSON.parse(output);
+      if (!Array.isArray(cols) || cols.length === 0) return null;
+      for (const col of cols) {
+        const val = record[col.column_name];
+        if (col.is_nullable === 'NO' && (val === undefined || val === null)) {
+          throw new Error(`Field '${col.column_name}' is required and cannot be null.`);
+        }
+        if (val !== undefined && val !== null) {
+          const type = col.data_type.toLowerCase();
+          if ((type.includes('int') || type.includes('decimal') || type.includes('numeric') || type.includes('double') || type.includes('real')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${col.column_name}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('required') || e.message.includes('Invalid type')) throw e;
+    }
+  } else if (dbType === 'mysql' || dbType === 'mariadb') {
+    const query = `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='${dbName}' AND TABLE_NAME='${collection}';`;
+    const cmd = ['mysql', '-u', 'root', '-D', dbName, '-e', query, '-B'];
+    const output = await runExec(cmd);
+    const lines = output.split('\n').filter(Boolean);
+    if (lines.length > 1) {
+      const headers = lines[0].split('\t');
+      const cols = lines.slice(1).map(line => {
+        const values = line.split('\t');
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = values[i] || null; });
+        return obj;
+      });
+      for (const col of cols) {
+        const colName = col.COLUMN_NAME;
+        const val = record[colName];
+        if (col.IS_NULLABLE === 'NO' && (val === undefined || val === null)) {
+          throw new Error(`Field '${colName}' is required and cannot be null.`);
+        }
+        if (val !== undefined && val !== null) {
+          const type = col.DATA_TYPE.toLowerCase();
+          if ((type.includes('int') || type.includes('decimal') || type.includes('float') || type.includes('double') || type.includes('numeric')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${colName}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    }
+  } else if (dbType === 'mongodb') {
+    const delimiter = '__DB_QUERY_EOF__';
+    const query = `printjson(db.${collection}.find().limit(5).toArray())`;
+    const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/infer.js\n${query}\n${delimiter}\nmongosh "${dbName}" --quiet /tmp/infer.js`];
+    const output = await runExec(cmd);
+    try {
+      const docs = JSON.parse(output);
+      if (Array.isArray(docs) && docs.length > 0) {
+        const representativeDoc = docs[0];
+        for (const [key, val] of Object.entries(record)) {
+          if (representativeDoc[key] !== undefined && representativeDoc[key] !== null) {
+            const expectedType = typeof representativeDoc[key];
+            const actualType = typeof val;
+            if (expectedType !== actualType && expectedType !== 'object' && actualType !== 'object') {
+              throw new Error(`Invalid type for field '${key}': expected ${expectedType}, got ${actualType}.`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('Invalid type')) throw e;
+    }
+  }
+};
+
+const maskPIIData = (data) => {
+  if (data === null || data === undefined) return data;
+  if (Array.isArray(data)) {
+    return data.map(item => maskPIIData(item));
+  }
+  if (typeof data === 'object') {
+    const masked = {};
+    for (const [key, val] of Object.entries(data)) {
+      const lowerKey = key.toLowerCase();
+      if (typeof val === 'string') {
+        if (lowerKey.includes('email') || lowerKey.includes('mail')) {
+          masked[key] = val.replace(/^([^@]+)@(.+)$/, (m, p1, p2) => {
+            const visible = p1.substring(0, Math.min(2, p1.length));
+            return visible + '***@' + p2;
+          });
+        } else if (lowerKey.includes('phone') || lowerKey.includes('telephone') || lowerKey.includes('mobile') || lowerKey.includes('cell')) {
+          masked[key] = '[MASKED_PHONE]';
+        } else if (lowerKey.includes('password') || lowerKey.includes('pwd') || lowerKey.includes('passwd')) {
+          masked[key] = '[MASKED_PASSWORD]';
+        } else if (lowerKey.includes('ssn') || lowerKey.includes('socialsecurity')) {
+          masked[key] = '[MASKED_SSN]';
+        } else if (lowerKey.includes('card') || lowerKey.includes('creditcard') || lowerKey.includes('cvv')) {
+          masked[key] = '[MASKED_CARD]';
+        } else if (
+          lowerKey === 'name' || 
+          lowerKey === 'firstname' || 
+          lowerKey === 'lastname' || 
+          lowerKey === 'fullname' || 
+          lowerKey === 'username'
+        ) {
+          masked[key] = val.split(' ').map(part => {
+            if (part.length <= 1) return part;
+            return part[0] + '***';
+          }).join(' ');
+        } else if (
+          lowerKey.includes('address') || 
+          lowerKey.includes('street') || 
+          lowerKey.includes('city') || 
+          lowerKey.includes('zip') || 
+          lowerKey.includes('postcode')
+        ) {
+          masked[key] = '[MASKED_ADDRESS]';
+        } else {
+          masked[key] = val;
+        }
+      } else if (typeof val === 'object' && val !== null) {
+        masked[key] = maskPIIData(val);
+      } else {
+        masked[key] = val;
+      }
+    }
+    return masked;
+  }
+  return data;
 };
 
 module.exports = {

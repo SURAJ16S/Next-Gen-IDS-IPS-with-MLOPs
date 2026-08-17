@@ -18,14 +18,16 @@ import {
   unlinkGithub,
   getGithubBranches,
   executeDeploymentDbQuery,
+  getDeploymentStatus
 } from '../services/api';
 import { io } from 'socket.io-client';
 import {
   Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu, Check, Database,
   Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff,
   RefreshCw, Search, Lock, Unlock, GitBranch, Star, Settings,
-  Bird, Maximize2, Minimize2
+  Bird, Maximize2, Minimize2, Bot, Send, AlertCircle
 } from 'lucide-react';
+import api from '../services/api';
 
 const Github = (props) => (
   <img
@@ -341,6 +343,7 @@ function DevOps() {
   const [isLogExpanded, setIsLogExpanded] = useState(false);
   const [showBirdAgent, setShowBirdAgent] = useState(false);
   const [birdMessage, setBirdMessage] = useState('');
+  const [isAgentOpen, setIsAgentOpen] = useState(false);
   const [terminalQuery, setTerminalQuery] = useState('');
   const [terminalOutput, setTerminalOutput] = useState('');
   const [runningQuery, setRunningQuery] = useState(false);
@@ -811,19 +814,26 @@ function DevOps() {
     setEnvFiles((prev) => prev.map((row, i) => (i === idx ? { ...row, [field]: value } : row)));
 
   // ── History details selector ──────────────────────────────────────────────
-  const handleSelectDeployment = (d) => {
+  const handleSelectDeployment = async (d) => {
     setActiveDeploymentId(d._id);
     setActiveJobId(d.jobId);
     setActiveJobStatus(d.status);
     setActiveJobVulns(d.vulnerabilitiesFound || 0);
     setActiveJobTech(d.techStackDetected || '');
     setActiveJobArch(d.architectureDetected || '');
-    setActiveJobLogs(d.buildLogs || []);
+    setActiveJobLogs([]);
     setActiveJobUpgrades(d.recommendedUpgrades || []);
     setPreviewPort(d.previewPort || '');
     setPreviewUrl(d.previewPort ? `http://localhost:${d.previewPort}` : '');
     setPreviewRunning(d.previewStatus === 'running');
     setPreviewReady(d.previewStatus === 'running');
+
+    try {
+      const res = await getDeploymentStatus(d._id);
+      setActiveJobLogs(res.data.buildLogs || []);
+    } catch (_) {
+      setActiveJobLogs(d.buildLogs || []);
+    }
   };
 
   // ── Upload submit ──────────────────────────────────────────────────────────
@@ -2552,44 +2562,6 @@ function DevOps() {
             </div>
           </div>{!isPipelineLogCollapsed && (
             <>
-              {showBirdAgent && (
-                <div style={{
-                  display: 'flex',
-                  gap: '12px',
-                  padding: '16px',
-                  margin: '12px 0',
-                  background: 'rgba(59, 130, 246, 0.08)',
-                  border: '1px solid rgba(59, 130, 246, 0.2)',
-                  borderRadius: 'var(--radius-md)',
-                  alignItems: 'center',
-                  animation: 'floating 3s ease-in-out infinite'
-                }}>
-                  <div style={{
-                    width: '40px',
-                    height: '40px',
-                    borderRadius: '50%',
-                    background: 'var(--grad-brand)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    boxShadow: '0 0 10px rgba(59, 130, 246, 0.4)'
-                  }}>
-                    <Bird size={24} color="#fff" />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px', fontSize: '13px' }}>
-                      Self-Healing Agent
-                    </div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', fontStyle: 'italic' }}>
-                      "{birdMessage}"
-                    </div>
-                    <div style={{ fontSize: '10px', color: 'var(--accent-cyan)', marginTop: '6px', fontWeight: 500 }}>
-                      * Restricted to compilation and DB sandboxes only. ML guardrails active.
-                    </div>
-                  </div>
-                </div>
-              )}
-
           {!activeJobStatus ? (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
               No active pipeline running. Upload a project to view console.
@@ -3581,6 +3553,361 @@ function DevOps() {
           </div>
         </div>
       )}
+
+      {/* Floating Bot Chat Widget */}
+      <div 
+        onClick={() => setIsAgentOpen(!isAgentOpen)}
+        style={{
+          position: 'fixed',
+          bottom: '24px',
+          right: '24px',
+          width: '56px',
+          height: '56px',
+          borderRadius: '50%',
+          background: 'var(--accent-blue)',
+          boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          zIndex: 1000,
+          border: '2px solid rgba(255,255,255,0.1)',
+          transition: 'all 0.3s ease'
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.08)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+      >
+        <Bot size={24} color="#fff" />
+        {showBirdAgent && (
+          <div style={{
+            position: 'absolute',
+            top: '-2px',
+            right: '-2px',
+            width: '14px',
+            height: '14px',
+            borderRadius: '50%',
+            background: '#ef4444',
+            border: '2px solid var(--bg-primary)'
+          }} />
+        )}
+      </div>
+
+      {isAgentOpen && (
+        <div style={{
+          position: 'fixed',
+          bottom: '90px',
+          right: '24px',
+          width: '380px',
+          height: '520px',
+          background: 'var(--bg-secondary)',
+          border: '1px solid var(--border-subtle)',
+          borderRadius: '12px',
+          boxShadow: '0 10px 40px rgba(0,0,0,0.6)',
+          display: 'flex',
+          flexDirection: 'column',
+          zIndex: 1000,
+          overflow: 'hidden'
+        }}>
+          {/* Header */}
+          <div style={{
+            padding: '12px 16px',
+            borderBottom: '1px solid var(--border-subtle)',
+            background: 'rgba(0,0,0,0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Bot size={16} color="var(--accent-blue)" />
+              <span style={{ fontSize: '13.5px', fontWeight: 600 }}>DevOps Workspace Agent</span>
+            </div>
+            <button 
+              onClick={() => setIsAgentOpen(false)}
+              style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '18px', fontWeight: 700 }}
+            >
+              &times;
+            </button>
+          </div>
+
+          {/* Content panel */}
+          {!activeDeploymentId ? (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', padding: '24px', textAlign: 'center', gap: '10px' }}>
+              <Bot size={36} color="var(--border-subtle)" />
+              <span style={{ fontSize: '12.5px' }}>Please select a deployment from the dashboard list to start chatting with the DevOps AI Agent.</span>
+            </div>
+          ) : (
+            <FloatingAgentChatPanel 
+              deploymentId={activeDeploymentId} 
+              jobId={activeJobId} 
+              birdMessage={showBirdAgent ? birdMessage : null} 
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage }) {
+  const [chats, setChats] = useState([]);
+  const [activeChatId, setActiveChatId] = useState('');
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isAgentTyping, setIsAgentTyping] = useState(false);
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    if (deploymentId) {
+      fetchChats();
+    }
+  }, [deploymentId]);
+
+  useEffect(() => {
+    if (activeChatId) {
+      fetchMessages(activeChatId);
+    } else {
+      setChatMessages([]);
+    }
+  }, [activeChatId]);
+
+  useEffect(() => {
+    if (birdMessage) {
+      setChatMessages(prev => {
+        const exists = prev.some(m => m.text === birdMessage);
+        if (exists) return prev;
+        return [...prev, { role: 'agent', text: `✨ [Self-Healing Log]: ${birdMessage}` }];
+      });
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    }
+  }, [birdMessage]);
+
+  const fetchChats = async () => {
+    try {
+      const res = await api.get(`/devops/${deploymentId}/agent/chats`);
+      setChats(res.data);
+      if (res.data.length > 0) {
+        setActiveChatId(res.data[0]._id);
+      } else {
+        handleCreateChat('Default Session');
+      }
+    } catch (_) {}
+  };
+
+  const handleCreateChat = async (title = 'New Session') => {
+    try {
+      const res = await api.post(`/devops/${deploymentId}/agent/chats`, { title });
+      setChats(prev => [res.data, ...prev]);
+      setActiveChatId(res.data._id);
+    } catch (_) {}
+  };
+
+  const fetchMessages = async (chatId) => {
+    try {
+      const res = await api.get(`/devops/${deploymentId}/agent/chats/${chatId}`);
+      setChatMessages(res.data.messages || []);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    } catch (_) {}
+  };
+
+  const handleSendChat = async () => {
+    if (!chatInput.trim() || isAgentTyping) return;
+    const text = chatInput;
+    setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', text }]);
+    setIsAgentTyping(true);
+    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+
+    try {
+      const res = await api.post(`/devops/${deploymentId}/agent/chat`, { message: text, chatId: activeChatId });
+      setChatMessages(prev => [...prev, { role: 'agent', text: res.data.message, pendingAction: res.data.pendingExec ? { commands: res.data.commands } : null }]);
+    } catch (err) {
+      setChatMessages(prev => [...prev, { role: 'agent', text: `Error: ${err.response?.data?.message || err.message}` }]);
+    } finally {
+      setIsAgentTyping(false);
+      setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    }
+  };
+
+  const handlePermissionAllow = async (idx, commands) => {
+    setChatMessages(prev => {
+      const copy = [...prev];
+      copy[idx] = { ...copy[idx], pendingAction: null };
+      return copy;
+    });
+    try {
+      const res = await api.post(`/devops/${deploymentId}/agent/exec-pending`, { commands, chatId: activeChatId });
+      setChatMessages(prev => [...prev, { role: 'agent', text: res.data.message }]);
+    } catch (err) {
+      setChatMessages(prev => [...prev, { role: 'agent', text: `Execution failed: ${err.message}` }]);
+    }
+  };
+
+  const handlePermissionNever = (idx) => {
+    setChatMessages(prev => {
+      const copy = [...prev];
+      copy[idx] = { ...copy[idx], pendingAction: null };
+      return copy;
+    });
+    setChatMessages(prev => [...prev, { role: 'agent', text: 'Execution rejected by user.' }]);
+  };
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {/* Session selector */}
+      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)', background: 'rgba(0,0,0,0.15)', display: 'flex', gap: '6px', alignItems: 'center' }}>
+        <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Session:</span>
+        <select
+          value={activeChatId}
+          onChange={(e) => setActiveChatId(e.target.value)}
+          style={{ flex: 1, background: '#1e293b', color: '#fff', border: '1px solid var(--border-subtle)', borderRadius: '4px', fontSize: '11px', padding: '2px 4px', outline: 'none' }}
+        >
+          {chats.map(chat => (
+            <option key={chat._id} value={chat._id}>{chat.title || 'Untitled Thread'}</option>
+          ))}
+        </select>
+        <button
+          onClick={() => handleCreateChat(`Session #${chats.length + 1}`)}
+          style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', borderRadius: '4px', padding: '2px 6px', fontSize: '11px', cursor: 'pointer' }}
+        >
+          + New
+        </button>
+      </div>
+
+      {/* Messages bubble list */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px', display: 'flex', flexDirection: 'column', gap: '10px', background: 'rgba(0,0,0,0.1)' }}>
+        {chatMessages.map((msg, idx) => (
+          <div 
+            key={idx} 
+            style={{ 
+              alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              maxWidth: '85%',
+              background: msg.role === 'user' ? 'var(--accent-blue)' : 'rgba(255,255,255,0.05)',
+              padding: '8px 10px',
+              borderRadius: '8px',
+              fontSize: '12.5px',
+              lineHeight: '1.4',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px'
+            }}
+          >
+            {(() => {
+              if (!msg.text) return null;
+              const thoughtRegex = /<(thought|thinking)>([\s\S]*?)<\/\1>/gi;
+              const match = thoughtRegex.exec(msg.text);
+              if (match) {
+                const thoughtContent = match[2].trim();
+                const cleanText = msg.text.replace(thoughtRegex, '').trim();
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <details style={{
+                      background: 'rgba(0,0,0,0.15)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: '4px',
+                      padding: '4px 8px',
+                      fontSize: '11px'
+                    }}>
+                      <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontWeight: 500, outline: 'none' }}>
+                        Thinking Process...
+                      </summary>
+                      <div style={{ marginTop: '4px', whiteSpace: 'pre-wrap', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: '10px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '4px' }}>
+                        {thoughtContent}
+                      </div>
+                    </details>
+                    {cleanText && <div style={{ whiteSpace: 'pre-wrap' }}>{cleanText}</div>}
+                  </div>
+                );
+              }
+              return <div style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</div>;
+            })()}
+
+            {/* Permission pending command block */}
+            {msg.pendingAction && (
+              <div style={{
+                marginTop: '6px',
+                padding: '8px',
+                background: 'rgba(0,0,0,0.2)',
+                borderRadius: '6px',
+                border: '1px solid rgba(234, 179, 8, 0.3)',
+                fontSize: '11.5px',
+                color: '#fef08a'
+              }}>
+                <div style={{ fontWeight: 600, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <AlertCircle size={12} color="#facc15" /> Confirm Execution Command
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '6px' }}>
+                  {msg.pendingAction.commands.map((cmd, cIdx) => (
+                    <div key={cIdx} style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(0,0,0,0.3)', padding: '2px 4px', borderRadius: '4px' }}>
+                      <span style={{ color: '#94a3b8', fontFamily: 'monospace' }}>$</span>
+                      <input
+                        type="text"
+                        value={cmd}
+                        onChange={(e) => {
+                          const updatedCmds = [...msg.pendingAction.commands];
+                          updatedCmds[cIdx] = e.target.value;
+                          setChatMessages(prev => {
+                            const copy = [...prev];
+                            copy[idx] = {
+                              ...copy[idx],
+                              pendingAction: { ...copy[idx].pendingAction, commands: updatedCmds }
+                            };
+                            return copy;
+                          });
+                        }}
+                        style={{ flex: 1, background: 'transparent', color: '#fff', border: 'none', outline: 'none', fontFamily: 'monospace', fontSize: '11px' }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button 
+                    onClick={() => handlePermissionAllow(idx, msg.pendingAction.commands)}
+                    style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 500, cursor: 'pointer' }}
+                  >
+                    Allow
+                  </button>
+                  <button 
+                    onClick={() => handlePermissionNever(idx)}
+                    style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 500, cursor: 'pointer' }}
+                  >
+                    Never
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+        {isAgentTyping && (
+          <div style={{ alignSelf: 'flex-start', color: 'var(--text-muted)', fontSize: '11.5px', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <Bot size={12} /> DevOps Agent is writing...
+          </div>
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      {/* Chat input form */}
+      <div style={{ padding: '8px', borderTop: '1px solid var(--border-subtle)', background: 'rgba(0,0,0,0.15)', display: 'flex', gap: '6px' }}>
+        <textarea
+          value={chatInput}
+          onChange={(e) => setChatInput(e.target.value)}
+          placeholder="Ask agent to check file or fix errors..."
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              handleSendChat();
+            }
+          }}
+          rows={2}
+          style={{ flex: 1, background: '#fff', color: 'black', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', fontSize: '12px', outline: 'none', resize: 'none', fontFamily: 'inherit', lineHeight: '1.3' }}
+        />
+        <button
+          onClick={handleSendChat}
+          disabled={isAgentTyping}
+          style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', borderRadius: '4px', width: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+        >
+          <Send size={12} />
+        </button>
+      </div>
     </div>
   );
 }

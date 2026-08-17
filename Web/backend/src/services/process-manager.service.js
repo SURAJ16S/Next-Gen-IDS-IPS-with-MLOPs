@@ -9,6 +9,9 @@ const { getIO } = require('../websocket/socket');
 const { detectFramework } = require('./framework-detector.service');
 const { analyzeLogsAndDiagnose } = require('./diagnostics.service');
 
+const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+const BUILDS_BASE_DIR = path.join(WORKSPACE_DIR, 'DevOps', 'builds');
+
 /**
  * Polls http://localhost:{port}/ until the server returns any response (≤599)
  * or until the timeout expires. Logs each attempt to the deployment.
@@ -260,7 +263,13 @@ const getPreviewCommand = async (framework, workDir) => {
 const logPreview = async (deploymentId, jobId, message) => {
   const formattedLog = `[${new Date().toISOString()}] ${message}`;
   console.log(`[Preview ${jobId}] ${message}`);
-  await Deployment.findByIdAndUpdate(deploymentId, { $push: { buildLogs: formattedLog } });
+  try {
+    const logDir = path.join(BUILDS_BASE_DIR, jobId);
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, 'pipeline.log'), formattedLog + '\n', 'utf8');
+  } catch (err) {
+    console.error('Failed to write preview log to file:', err.message);
+  }
   try {
     const io = getIO();
     io.to(`pipeline:${jobId}`).emit('pipeline:log', { jobId, log: formattedLog });
@@ -906,7 +915,10 @@ server.listen(PREVIEW_PORT, () => {
             name: dbContainerName,
             Env: dbEnv,
             HostConfig: {
-              NetworkMode: networkName
+              NetworkMode: networkName,
+              NanoCPUs: 1000000000,
+              Memory: 536870912,
+              PidsLimit: 100
             }
           });
           
@@ -1092,7 +1104,10 @@ server.listen(PREVIEW_PORT, () => {
           [`${port}/tcp`]: [{ HostPort: String(port) }]
         },
         ExtraHosts: ['host.docker.internal:host-gateway'],
-        NetworkMode: networkName
+        NetworkMode: networkName,
+        NanoCPUs: 1000000000,
+        Memory: 536870912,
+        PidsLimit: 100
       },
       ExposedPorts: {
         [`${port}/tcp`]: {}

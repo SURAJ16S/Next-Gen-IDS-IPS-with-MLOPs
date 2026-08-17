@@ -323,9 +323,14 @@ const importGithubRepo = async (req, res) => {
         runPipeline(jobId, deployment._id, zipPath, previewPort, envFiles, targetSubfolder, upgradeMode);
       } catch (cloneErr) {
         console.error('[GitHub Import] Clone/zip error:', cloneErr.message);
+        try {
+          const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+          const logDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', jobId);
+          if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+          fs.writeFileSync(path.join(logDir, 'pipeline.log'), `[${new Date().toISOString()}] GitHub clone failed: ${cloneErr.message}\n`, 'utf8');
+        } catch (_) {}
         await Deployment.findByIdAndUpdate(deployment._id, {
           status: 'failed',
-          $push: { buildLogs: `[${new Date().toISOString()}] GitHub clone failed: ${cloneErr.message}` },
         });
         // Cleanup
         if (fs.existsSync(cloneDir)) fs.rmSync(cloneDir, { recursive: true, force: true });
