@@ -242,7 +242,17 @@ listeners:
     - listen_port: 13000
       backend_addr: 127.0.0.1:3000
       transport: tcp
-      service: Node.js / Grafana (Dev) [MainThread] PID:42581
+      service: Node.js / Grafana (Dev) [MainThread] PID:55787
+      enabled: true
+    - listen_port: 12222
+      backend_addr: 127.0.0.1:2222
+      transport: tcp
+      service: python3 (PID:9985)
+      enabled: true
+    - listen_port: 13001
+      backend_addr: 127.0.0.1:3000
+      transport: tcp
+      service: Node.js / Grafana (Dev) [MainThread] PID:55787
       enabled: true
 tls:
     enabled: false
