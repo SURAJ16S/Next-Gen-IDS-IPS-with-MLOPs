@@ -49,16 +49,22 @@ module.exports = {
   },
   buildImage: 'python:3.12-slim',
   runCommand: 'python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt',
-  getPreviewCommand: (workDir) => {
+  getPreviewCommand: (workDir, isDocker = false) => {
     const unixPython = path.join(workDir, '.venv', 'bin', 'python');
     const winPython = path.join(workDir, '.venv', 'Scripts', 'python.exe');
     const flaskApp = findFlaskApp(workDir);
 
     let pythonCmd = 'python';
-    if (fs.existsSync(unixPython)) {
-      pythonCmd = '.venv/bin/python';
-    } else if (fs.existsSync(winPython)) {
-      pythonCmd = '.venv/Scripts/python';
+    if (fs.existsSync(path.join(workDir, '.venv'))) {
+      if (isDocker) {
+        pythonCmd = '.venv/bin/python';
+      } else {
+        if (fs.existsSync(unixPython)) {
+          pythonCmd = '.venv/bin/python';
+        } else if (fs.existsSync(winPython)) {
+          pythonCmd = '.venv/Scripts/python';
+        }
+      }
     }
 
     return {

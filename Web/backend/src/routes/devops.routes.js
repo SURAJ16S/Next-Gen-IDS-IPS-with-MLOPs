@@ -19,6 +19,18 @@ const {
   getFixtureReviews,
   createFixtureReview,
   changeDeploymentPort,
+  getWorkspaceFiles,
+  getWorkspaceFileContent,
+  saveWorkspaceFile,
+  getDbCollections,
+  getDbCollectionData,
+  insertDbRecord,
+  executeAgentChat,
+  updateAgentPermission,
+  executePendingCommands,
+  getChats,
+  createChat,
+  getChatMessages,
 } = require('../controllers/devops.controller');
 const {
   getGithubAuthUrl,
@@ -33,9 +45,7 @@ const {
 const { protect } = require('../middleware/auth.middleware');
 
 // ─── GitHub OAuth ──────────────────────────────────────────────────────────────
-// Public callback (GitHub redirects here — no protect middleware)
 router.get('/github/callback', githubOAuthCallback);
-// Protected GitHub routes
 router.get('/github/auth-url', protect, getGithubAuthUrl);
 router.get('/github/status',   protect, getGithubStatus);
 router.get('/github/profile',  protect, getGithubUserProfile);
@@ -68,4 +78,22 @@ router.post('/:id/start-preview', protect, startDeploymentPreview);
 router.post('/:id/change-port', protect, changeDeploymentPort);
 router.post('/:id/run-query', protect, executeDeploymentDbQuery);
 
-module.exports = router;
+// Workspace File API
+router.get('/:id/files', protect, getWorkspaceFiles);
+router.get('/:id/files/content', protect, getWorkspaceFileContent);
+router.post('/:id/files/save', protect, saveWorkspaceFile);
+
+// Database API
+router.get('/:id/db/collections', protect, getDbCollections);
+router.get('/:id/db/collection/:collection', protect, getDbCollectionData);
+router.post('/:id/db/insert', protect, insertDbRecord);
+
+// AI Agent Chat & Permission API
+router.get('/:id/agent/chats', protect, getChats);
+router.post('/:id/agent/chats', protect, createChat);
+router.get('/:id/agent/chats/:chatId', protect, getChatMessages);
+router.post('/:id/agent/chat', protect, executeAgentChat);
+router.post('/:id/agent/permission', protect, updateAgentPermission);
+router.post('/:id/agent/exec-pending', protect, executePendingCommands);
+
+module.exports = router;

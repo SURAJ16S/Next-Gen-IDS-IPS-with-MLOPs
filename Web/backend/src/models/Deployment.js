@@ -75,7 +75,12 @@ const deploymentSchema = new mongoose.Schema(
     upgradeMode: { type: String, enum: ['automatic', 'semi-automatic', 'disabled'], default: 'automatic' },
     useTempDb: { type: Boolean, default: true },
     dbInitScript: { type: String, default: '' },
-    dbInitType: { type: String, enum: ['mysql', 'postgres', 'mongodb', 'none'], default: 'none' },
+    dbInitType: { type: String, enum: ['mysql', 'postgres', 'mongodb', 'sqlite', 'mariadb', 'mssql', 'oracle', 'cassandra', 'redis', 'none'], default: 'none' },
+    enableSmartSeeding: { type: Boolean, default: false },
+    detectedTables: { type: mongoose.Schema.Types.Mixed, default: [] },
+    isPruned: { type: Boolean, default: false },
+    lastPreviewedAt: { type: Date },
+    execPermission: { type: String, enum: ['ask', 'always', 'never'], default: 'ask' },
   },
   { 
     timestamps: true,

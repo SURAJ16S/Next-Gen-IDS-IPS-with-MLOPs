@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useState, useCallback, useEffect } from 'react';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import {
   User, Mail, Lock, Phone, Calendar, AtSign,
   Eye, EyeOff, AlertCircle, CheckCircle, Info,
@@ -167,7 +167,35 @@ function Register() {
   const [serverError, setServerError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const [githubRegToken, setGithubRegToken] = useState('');
+  const [githubUsername, setGithubUsername] = useState('');
+
   const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const action = params.get('action');
+    if (action === 'github_signup') {
+      const emailParam = params.get('email') || '';
+      const firstNameParam = params.get('firstName') || '';
+      const lastNameParam = params.get('lastName') || '';
+      const usernameParam = params.get('githubUsername') || '';
+      const tokenParam = params.get('githubRegToken') || '';
+
+      setForm((prev) => ({
+        ...prev,
+        email: emailParam,
+        firstName: firstNameParam,
+        lastName: lastNameParam,
+        username: usernameParam,
+      }));
+      setGithubRegToken(tokenParam);
+      setGithubUsername(usernameParam);
+      navigate('/register', { replace: true });
+    }
+  }, [location, navigate]);
 
   const strength = getPasswordStrength(form.password);
 
@@ -238,7 +266,7 @@ function Register() {
     setServerError('');
     setSuccess('');
     try {
-      await registerUser({
+      const res = await registerUser({
         firstName: form.firstName.trim(),
         lastName:  form.lastName.trim(),
         username:  form.username.trim().toLowerCase(),   // R13
@@ -246,9 +274,15 @@ function Register() {
         mobile:    form.mobile.trim(),
         email:     form.email.trim().toLowerCase(),
         password:  form.password.trim(),
+        githubRegToken: githubRegToken || undefined,
+        githubUsername: githubUsername || undefined,
       });
-      setSuccess('Account created successfully! Redirecting to sign in...');
-      setTimeout(() => navigate('/login'), 2000);
+      setSuccess('Account created successfully! Logging you in...');
+      if (res.data && res.data.token) {
+        localStorage.setItem('token', res.data.token);
+        localStorage.setItem('user', JSON.stringify(res.data));
+      }
+      setTimeout(() => navigate('/'), 2000);
     } catch (err) {
       const data = err.response?.data;
       if (data?.errors) {
@@ -267,7 +301,7 @@ function Register() {
   };
 
   // ── Field helper: render label + input + error ─────────────────────────────
-  const renderField = ({ name, label, type = 'text', placeholder, icon: Icon, children }) => {
+  const renderField = ({ name, label, type = 'text', placeholder, icon: Icon, children, readOnly = false }) => {
     const err   = touched[name] ? errors[name] : '';
     const valid = touched[name] && !errors[name] && form[name];
     return (
@@ -287,6 +321,8 @@ function Register() {
               onBlur={handleBlur}
               aria-describedby={err ? `reg-${name}-error` : undefined}
               aria-invalid={!!err}
+              readOnly={readOnly}
+              style={readOnly ? { background: 'rgba(255,255,255,0.05)', cursor: 'not-allowed' } : undefined}
               autoComplete={
                 name === 'email' ? 'email' :
                 name === 'password' ? 'new-password' :
@@ -318,6 +354,27 @@ function Register() {
           <p>Register for IDPS Security Platform</p>
         </div>
 
+        {githubRegToken && (
+          <div style={{
+            background: 'rgba(56,189,248,0.06)',
+            border: '1px solid rgba(56,189,248,0.2)',
+            borderRadius: 'var(--radius-md)',
+            padding: '12px 14px',
+            fontSize: '13px',
+            lineHeight: '1.5',
+            color: 'var(--text-muted)',
+            marginBottom: '18px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <Info size={14} style={{ color: 'var(--accent-cyan)', flexShrink: 0 }} />
+            <span>
+              Signing up with GitHub account <strong>@{githubUsername}</strong>. Please fill in your date of birth, mobile number, and password to complete registration.
+            </span>
+          </div>
+        )}
+
         {serverError && (
           <div className="auth-error" role="alert">
             <AlertCircle size={14} /> {serverError}
@@ -333,8 +390,8 @@ function Register() {
 
           {/* ── Names (R1–R6) ──────────────────────────────────────────── */}
           <div className="auth-row">
-            {renderField({ name: "firstName", label: "First Name", placeholder: "John", icon: User })}
-            {renderField({ name: "lastName",  label: "Last Name",  placeholder: "Doe",  icon: User })}
+            {renderField({ name: "firstName", label: "First Name", placeholder: "John", icon: User, readOnly: !!githubRegToken })}
+            {renderField({ name: "lastName",  label: "Last Name",  placeholder: "Doe",  icon: User, readOnly: !!githubRegToken })}
           </div>
 
           {/* ── Username (R7–R13) ──────────────────────────────────────── */}
@@ -350,7 +407,7 @@ function Register() {
           </div>
 
           {/* ── Email (R21–R22) ─────────────────────────────────────────── */}
-          {renderField({ name: "email", label: "Email Address", type: "email", placeholder: "you@example.com", icon: Mail })}
+          {renderField({ name: "email", label: "Email Address", type: "email", placeholder: "you@example.com", icon: Mail, readOnly: !!githubRegToken })}
 
           {/* ── Password (R23–R32) ──────────────────────────────────────── */}
           {(() => {

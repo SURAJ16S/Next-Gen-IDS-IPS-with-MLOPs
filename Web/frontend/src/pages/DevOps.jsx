@@ -23,7 +23,8 @@ import { io } from 'socket.io-client';
 import {
   Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu, Check, Database,
   Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff,
-  RefreshCw, Search, Lock, Unlock, GitBranch, Star, Settings
+  RefreshCw, Search, Lock, Unlock, GitBranch, Star, Settings,
+  Bird, Maximize2, Minimize2
 } from 'lucide-react';
 
 const Github = (props) => (
@@ -332,10 +333,14 @@ function DevOps() {
   const [previewPort, setPreviewPort] = useState('');
   const [portLoading, setPortLoading] = useState(false);
   const [useTempDb, setUseTempDb] = useState(true);
+  const [enableSmartSeeding, setEnableSmartSeeding] = useState(false);
   const [enableDbInit, setEnableDbInit] = useState(false);
   const [dbInitType, setDbInitType] = useState('mysql');
   const [dbInitScript, setDbInitScript] = useState('');
   const [isPipelineLogCollapsed, setIsPipelineLogCollapsed] = useState(false);
+  const [isLogExpanded, setIsLogExpanded] = useState(false);
+  const [showBirdAgent, setShowBirdAgent] = useState(false);
+  const [birdMessage, setBirdMessage] = useState('');
   const [terminalQuery, setTerminalQuery] = useState('');
   const [terminalOutput, setTerminalOutput] = useState('');
   const [runningQuery, setRunningQuery] = useState(false);
@@ -536,6 +541,13 @@ function DevOps() {
 
     socket.on('pipeline:log', (data) => {
       setActiveJobLogs((prev) => [...prev, data.log]);
+      if (data.log.includes('[SELF-HEALING]')) {
+        setShowBirdAgent(true);
+        if (data.log.includes('Querying LLM')) setBirdMessage('Analyzing compilation errors and querying the self-healing LLM...');
+        else if (data.log.includes('Applying patches')) setBirdMessage('Applying the proposed source code patches dynamically...');
+        else if (data.log.includes('Successfully patched')) setBirdMessage('Successfully patched the files! Re-running the compilation...');
+        else setBirdMessage('Guess I have to continue from here... Safely scanning your code to fix the build issues!');
+      }
       const match = data.log.match(/Detected Tech Stack \/ Framework: (\S+)/i);
       if (match) setActiveJobTech(match[1]);
       const archMatch = data.log.match(/Detected Architecture: (\S+)/i);
@@ -549,6 +561,14 @@ function DevOps() {
       setActiveJobUpgrades(data.recommendedUpgrades || []);
       setUploading(false);
       setUploadProgress(0);
+      
+      if (data.status === 'failed') {
+        setShowBirdAgent(true);
+        setBirdMessage("I did my best to dynamically patch your code, but the compiler errors require manual intervention! Please review my diagnostic hints above and update your files.");
+      } else {
+        setShowBirdAgent(false);
+      }
+
       fetchDeployments();
       if (data.status === 'deployed' && data.isGuiApp) {
         alert("🖥️ Desktop GUI App Detected!\n\nThis application does not run on a port and cannot be previewed in the browser. Please use the Download button under Actions to download the zip, extract it, and run the executable locally.");
@@ -705,6 +725,7 @@ function DevOps() {
         targetSubfolder,
         upgradeMode,
         useTempDb,
+        enableSmartSeeding,
         dbInitScript: enableDbInit ? dbInitScript : '',
         dbInitType: enableDbInit ? dbInitType : 'none',
       });
@@ -840,6 +861,7 @@ function DevOps() {
     formData.append('targetSubfolder', targetSubfolder);
     formData.append('upgradeMode', upgradeMode);
     formData.append('useTempDb', String(useTempDb));
+    formData.append('enableSmartSeeding', String(enableSmartSeeding));
     formData.append('dbInitScript', enableDbInit ? dbInitScript : '');
     formData.append('dbInitType', enableDbInit ? dbInitType : 'none');
 
@@ -1031,7 +1053,7 @@ function DevOps() {
         <p className="page-subtitle">Compile, secure-gate, and run application source containers dynamically — no Docker Desktop required</p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '7fr 3fr', gap: '24px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isLogExpanded ? '5fr 5fr' : '7fr 3fr', gap: '24px', alignItems: 'start', transition: 'grid-template-columns 0.3s ease' }}>
 
         {/* ── Upload Card ──────────────────────────────────────────────── */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px', height: '1250px', overflowY: 'auto', paddingRight: '12px' }}>
@@ -1266,6 +1288,260 @@ function DevOps() {
 
                       {/* .env files section */}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+{/* Temporary DB Container Provisioning Toggle for GitHub */}
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '10px',
+                        background: 'rgba(6, 182, 212, 0.03)',
+                        border: '1px solid rgba(6, 182, 212, 0.12)',
+                        borderRadius: 'var(--radius-sm)',
+                        padding: '10px',
+                        marginTop: '10px',
+                        marginBottom: '8px'
+                      }}>
+                        <input
+                          type="checkbox"
+                          id="useTempDbGit"
+                          checked={useTempDb}
+                          onChange={(e) => {
+                            const checked = e.target.checked;
+                            setUseTempDb(checked);
+                            if (!checked) {
+                              setEnableDbInit(false);
+                              setEnableSmartSeeding(false);
+                            }
+                          }}
+                          style={{ cursor: 'pointer', width: '15px', height: '15px', accentColor: 'var(--accent-cyan)', marginTop: '2px' }}
+                        />
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                          <label htmlFor="useTempDbGit" style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>
+                            Provision Temporary Database Containers
+                          </label>
+                          <span style={{ fontSize: '10.5px', color: 'var(--text-muted)', lineHeight: '1.3' }}>
+                            Automatically spin up isolated database containers. Uncheck if you connect directly to a cloud database or external service.
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Custom Database Seeding Script Accordion for GitHub */}
+                      <div style={{
+                        background: 'rgba(255, 255, 255, 0.02)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 'var(--radius-md)',
+                        padding: '12px',
+                        marginTop: '5px',
+                        marginBottom: '10px'
+                      }}>
+                        <div 
+                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: useTempDb ? 'pointer' : 'not-allowed' }} 
+                          onClick={() => {
+                            if (useTempDb) {
+                              const newVal = !enableDbInit;
+                              setEnableDbInit(newVal);
+                              if (!newVal) {
+                                setEnableSmartSeeding(false);
+                              } else {
+                                setUseTempDb(true);
+                              }
+                            }
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <input
+                              type="checkbox"
+                              checked={enableDbInit}
+                              disabled={!useTempDb}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setEnableDbInit(checked);
+                                if (!checked) {
+                                  setEnableSmartSeeding(false);
+                                } else {
+                                  setUseTempDb(true);
+                                }
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                              style={{ width: '14px', height: '14px', accentColor: 'var(--accent-cyan)', cursor: useTempDb ? 'pointer' : 'not-allowed' }}
+                            />
+                            <span style={{ fontSize: '12px', fontWeight: 600, color: useTempDb ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                              Enable Custom Database Initialization Script
+                            </span>
+                          </div>
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{enableDbInit ? '▼' : '▶'}</span>
+                        </div>
+
+                        {enableDbInit && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.06)', paddingTop: '10px' }}>
+                            
+                            {/* Database Type select + Preset Buttons row */}
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Database Type:</span>
+                                <select
+                                  value={dbInitType}
+                                  onChange={(e) => setDbInitType(e.target.value)}
+                                  style={{
+                                    background: '#040815',
+                                    border: '1px solid var(--border-subtle)',
+                                    borderRadius: 'var(--radius-sm)',
+                                    color: '#ffffff',
+                                    fontSize: '11.5px',
+                                    padding: '4px 10px',
+                                    outline: 'none'
+                                  }}
+                                >
+                                  <option value="mysql" style={{ background: '#040815', color: '#ffffff' }}>MySQL (SQL)</option>
+                                  <option value="postgres" style={{ background: '#040815', color: '#ffffff' }}>PostgreSQL (SQL)</option>
+                                  <option value="mongodb" style={{ background: '#040815', color: '#ffffff' }}>MongoDB (NoSQL)</option>
+                                  <option value="sqlite" style={{ background: '#040815', color: '#ffffff' }}>SQLite (SQL)</option>
+                                  <option value="mariadb" style={{ background: '#040815', color: '#ffffff' }}>MariaDB (SQL)</option>
+                                  <option value="mssql" style={{ background: '#040815', color: '#ffffff' }}>SQL Server (SQL)</option>
+                                  <option value="oracle" style={{ background: '#040815', color: '#ffffff' }}>Oracle Database (SQL)</option>
+                                  <option value="cassandra" style={{ background: '#040815', color: '#ffffff' }}>Cassandra (NoSQL)</option>
+                                  <option value="redis" style={{ background: '#040815', color: '#ffffff' }}>Redis (NoSQL)</option>
+                                </select>
+                              </div>
+
+                              <div style={{ display: 'flex', gap: '6px' }}>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (dbInitType === 'mongodb') {
+                                      setDbInitScript(`db.users.insertOne({ username: "admin", password: "admin123" });\ndb.threats.insertMany([\n  { id: "ALT-101", type: "SQL Injection", severity: "High" },\n  { id: "ALT-102", type: "Brute Force SSH", severity: "Critical" }\n]);`);
+                                    } else if (dbInitType === 'redis') {
+                                      setDbInitScript(`HMSET user:admin username admin password admin123 role admin\nSADD users admin`);
+                                    } else if (dbInitType === 'cassandra') {
+                                      setDbInitScript(`CREATE KEYSPACE IF NOT EXISTS preview_keyspace WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};\nUSE preview_keyspace;\nCREATE TABLE IF NOT EXISTS users (username text PRIMARY KEY, password text);\nINSERT INTO users (username, password) VALUES ('admin', 'admin123');`);
+                                    } else if (dbInitType === 'sqlite') {
+                                      setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  username TEXT NOT NULL UNIQUE,\n  password TEXT NOT NULL\n);\nINSERT OR IGNORE INTO users (username, password) VALUES ('admin', 'admin123');`);
+                                    } else if (dbInitType === 'mssql') {
+                                      setDbInitScript(`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='users' AND xtype='U')\nBEGIN\n  CREATE TABLE users (id INT IDENTITY(1,1) PRIMARY KEY, username NVARCHAR(255) UNIQUE, password NVARCHAR(255));\n  INSERT INTO users (username, password) VALUES ('admin', 'admin123');\nEND;`);
+                                    } else if (dbInitType === 'oracle') {
+                                      setDbInitScript(`DECLARE\n  c INT;\nBEGIN\n  SELECT COUNT(*) INTO c FROM user_tables WHERE table_name = 'USERS';\n  IF c = 0 THEN\n    EXECUTE IMMEDIATE 'CREATE TABLE users (username VARCHAR2(255) PRIMARY KEY, password VARCHAR2(255))';\n  END IF;\n  EXECUTE IMMEDIATE 'INSERT INTO users (username, password) VALUES (''admin'', ''admin123'')';\nEND;\n/`);
+                                    } else {
+                                      setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  username VARCHAR(255) NOT NULL UNIQUE,\n  password VARCHAR(255) NOT NULL\n);\n\nINSERT INTO users (username, password) VALUES ('admin', 'admin123') ON DUPLICATE KEY UPDATE password=VALUES(password);`);
+                                    }
+                                  }}
+                                  style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.25)', borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)', padding: '2px 6px', fontSize: '10px', cursor: 'pointer' }}
+                                >
+                                  💡 Load Preset
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setDbInitScript('')}
+                                  style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.25)', borderRadius: 'var(--radius-sm)', color: '#f87171', padding: '2px 6px', fontSize: '10px', cursor: 'pointer' }}
+                                >
+                                  Clear
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Smart Seeding Checkbox (Grandchild on its own separate block row) */}
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'flex-start',
+                              gap: '8px',
+                              background: 'rgba(34, 211, 238, 0.02)',
+                              border: '1px solid rgba(34, 211, 238, 0.1)',
+                              borderRadius: 'var(--radius-sm)',
+                              padding: '8px 10px',
+                              marginTop: '4px',
+                              marginBottom: '4px'
+                            }}>
+                              <input
+                                type="checkbox"
+                                id="enableSmartSeedingCheckboxGit"
+                                checked={enableSmartSeeding}
+                                disabled={!useTempDb || !enableDbInit}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setEnableSmartSeeding(checked);
+                                  if (checked) {
+                                    setEnableDbInit(true);
+                                    setUseTempDb(true);
+                                  }
+                                }}
+                                style={{ width: '13px', height: '13px', accentColor: 'var(--accent-cyan)', marginTop: '2px', cursor: (useTempDb && enableDbInit) ? 'pointer' : 'not-allowed' }}
+                              />
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                <label htmlFor="enableSmartSeedingCheckboxGit" style={{ fontSize: '11px', fontWeight: 600, color: (useTempDb && enableDbInit) ? 'var(--text-primary)' : 'var(--text-muted)', cursor: (useTempDb && enableDbInit) ? 'pointer' : 'not-allowed' }}>
+                                  Enable Smart Table/Collection Detection & Seeding
+                                </label>
+                                <span style={{ fontSize: '10px', color: 'var(--text-muted)', lineHeight: '1.3' }}>
+                                  Automatically scans files during deployment to discover tables and generate init seeds.
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Initialization Script Input Area */}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                                Initialization Script / Commands:
+                              </label>
+                              <div style={{ position: 'relative', width: '100%', minHeight: '130px' }}>
+                                <textarea
+                                  value={dbInitScript}
+                                  onChange={(e) => setDbInitScript(e.target.value)}
+                                  onScroll={handleTextareaScroll}
+                                  placeholder={
+                                    dbInitType === 'mongodb'
+                                      ? '// Enter MongoDB query sequence:\ndb.users.insertOne({ username: "admin", password: "admin123" });'
+                                      : '/* Enter SQL command sequence: */\nCREATE TABLE IF NOT EXISTS users (...);\nINSERT INTO users ...;'
+                                  }
+                                  rows={6}
+                                  style={{
+                                    width: '100%',
+                                    height: '130px',
+                                    background: 'transparent',
+                                    border: '1px solid var(--border-subtle)',
+                                    borderRadius: 'var(--radius-sm)',
+                                    color: 'transparent',
+                                    caretColor: '#ffffff',
+                                    fontFamily: 'var(--font-mono), monospace',
+                                    fontSize: '11.5px',
+                                    padding: '10px',
+                                    outline: 'none',
+                                    resize: 'vertical',
+                                    position: 'relative',
+                                    zIndex: 2,
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-all',
+                                    lineHeight: '1.5',
+                                    boxSizing: 'border-box'
+                                  }}
+                                />
+                                <pre
+                                  dangerouslySetInnerHTML={{ __html: highlightCode(dbInitScript, dbInitType) || `<span style="color: var(--text-muted); font-style: italic;">\${dbInitType === 'mongodb' ? '// Enter MongoDB queries...' : '/* Enter SQL commands... */'}</span>` }}
+                                  style={{
+                                    position: 'absolute',
+                                    top: 0,
+                                    left: 0,
+                                    width: '100%',
+                                    height: '100%',
+                                    background: '#020617',
+                                    border: '1px solid transparent',
+                                    borderRadius: 'var(--radius-sm)',
+                                    fontFamily: 'var(--font-mono), monospace',
+                                    fontSize: '11.5px',
+                                    padding: '10px',
+                                    margin: 0,
+                                    pointerEvents: 'none',
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-all',
+                                    overflow: 'hidden',
+                                    zIndex: 1,
+                                    lineHeight: '1.5',
+                                    boxSizing: 'border-box',
+                                    textAlign: 'left',
+                                    color: '#ffffff'
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                             <FileText size={13} style={{ color: 'var(--accent-cyan)' }} />
@@ -1342,6 +1618,60 @@ function DevOps() {
                             onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
                           >
                             🐍 Python (Django)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# SQLite Config\nPORT=3001\nSQLITE_DB=preview_db.sqlite\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            💾 SQLite
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# MariaDB Config\nPORT=3001\nMARIADB_HOST=127.0.0.1\nMARIADB_PORT=3306\nMARIADB_USER=root\nMARIADB_PASSWORD=\nMARIADB_DB=preview_db\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            💠 MariaDB
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# SQL Server Config\nPORT=3001\nMSSQL_HOST=127.0.0.1\nMSSQL_PORT=1433\nMSSQL_USER=sa\nMSSQL_PASSWORD=YourStrongPassword123\nMSSQL_DB=preview_db\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            🖲️ SQL Server
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# Oracle Config\nPORT=3001\nORACLE_HOST=127.0.0.1\nORACLE_PORT=1521\nORACLE_USER=system\nORACLE_PASSWORD=oracle\nORACLE_SERVICE=ORCL\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            🅾️ Oracle DB
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# Cassandra Config\nPORT=3001\nCASSANDRA_HOST=127.0.0.1\nCASSANDRA_PORT=9042\nCASSANDRA_KEYSPACE=preview_keyspace\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            🌌 Cassandra
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEnvFiles([{ path: '.env', content: '# Redis Config\nPORT=3001\nREDIS_HOST=127.0.0.1\nREDIS_PORT=6379\nREDIS_PASSWORD=\nJWT_SECRET=supersecret' }])}
+                            style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                          >
+                            ❤️ Redis
                           </button>
                         </div>
                         <div style={{ fontSize: '11.5px', color: 'var(--accent-cyan)', background: 'rgba(6,182,212,0.04)', border: '1px solid rgba(6,182,212,0.15)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginTop: '4px', lineHeight: '1.4' }}>
@@ -1629,17 +1959,24 @@ function DevOps() {
                }}>
                  <input
                    type="checkbox"
-                   id="useTempDbGit"
+                   id="useTempDbZip"
                    checked={useTempDb}
-                   onChange={(e) => setUseTempDb(e.target.checked)}
+                   onChange={(e) => {
+                     const checked = e.target.checked;
+                     setUseTempDb(checked);
+                     if (!checked) {
+                       setEnableDbInit(false);
+                       setEnableSmartSeeding(false);
+                     }
+                   }}
                    style={{ cursor: 'pointer', width: '15px', height: '15px', accentColor: 'var(--accent-cyan)', marginTop: '2px' }}
                  />
                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                   <label htmlFor="useTempDbGit" style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>
+                   <label htmlFor="useTempDbZip" style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>
                      Provision Temporary Database Containers
                    </label>
                    <span style={{ fontSize: '10.5px', color: 'var(--text-muted)', lineHeight: '1.3' }}>
-                     Automatically spin up isolated MySQL/PostgreSQL/MongoDB containers. Uncheck if you connect directly to a cloud database (e.g. Atlas, Neon) or external service.
+                     Automatically spin up isolated database containers. Uncheck if you connect directly to a cloud database or external service.
                    </span>
                  </div>
                </div>
@@ -1653,16 +1990,38 @@ function DevOps() {
                  marginTop: '5px',
                  marginBottom: '10px'
                }}>
-                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }} onClick={() => setEnableDbInit(!enableDbInit)}>
+                 <div 
+                   style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: useTempDb ? 'pointer' : 'not-allowed' }} 
+                   onClick={() => {
+                     if (useTempDb) {
+                       const newVal = !enableDbInit;
+                       setEnableDbInit(newVal);
+                       if (!newVal) {
+                         setEnableSmartSeeding(false);
+                       } else {
+                         setUseTempDb(true);
+                       }
+                     }
+                   }}
+                 >
                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                      <input
                        type="checkbox"
                        checked={enableDbInit}
-                       onChange={(e) => setEnableDbInit(e.target.checked)}
+                       disabled={!useTempDb}
+                       onChange={(e) => {
+                         const checked = e.target.checked;
+                         setEnableDbInit(checked);
+                         if (!checked) {
+                           setEnableSmartSeeding(false);
+                         } else {
+                           setUseTempDb(true);
+                         }
+                       }}
                        onClick={(e) => e.stopPropagation()}
-                       style={{ width: '14px', height: '14px', accentColor: 'var(--accent-cyan)' }}
+                       style={{ width: '14px', height: '14px', accentColor: 'var(--accent-cyan)', cursor: useTempDb ? 'pointer' : 'not-allowed' }}
                      />
-                     <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                     <span style={{ fontSize: '12px', fontWeight: 600, color: useTempDb ? 'var(--text-primary)' : 'var(--text-muted)' }}>
                        Enable Custom Database Initialization Script
                      </span>
                    </div>
@@ -1671,34 +2030,54 @@ function DevOps() {
 
                  {enableDbInit && (
                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.06)', paddingTop: '10px' }}>
-                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                       <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Database Type:</span>
-                       <select
-                         value={dbInitType}
-                         onChange={(e) => setDbInitType(e.target.value)}
-                         style={{
-                           background: '#040815',
-                           border: '1px solid var(--border-subtle)',
-                           borderRadius: 'var(--radius-sm)',
-                           color: '#ffffff',
-                           fontSize: '11.5px',
-                           padding: '4px 10px',
-                           outline: 'none'
-                         }}
-                       >
-                         <option value="mysql" style={{ background: '#040815', color: '#ffffff' }}>MySQL (SQL)</option>
-                         <option value="postgres" style={{ background: '#040815', color: '#ffffff' }}>PostgreSQL (SQL)</option>
-                         <option value="mongodb" style={{ background: '#040815', color: '#ffffff' }}>MongoDB (NoSQL)</option>
-                       </select>
+                     
+                     {/* Database Type select + Preset Buttons row */}
+                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                         <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Database Type:</span>
+                         <select
+                           value={dbInitType}
+                           onChange={(e) => setDbInitType(e.target.value)}
+                           style={{
+                             background: '#040815',
+                             border: '1px solid var(--border-subtle)',
+                             borderRadius: 'var(--radius-sm)',
+                             color: '#ffffff',
+                             fontSize: '11.5px',
+                             padding: '4px 10px',
+                             outline: 'none'
+                           }}
+                         >
+                           <option value="mysql" style={{ background: '#040815', color: '#ffffff' }}>MySQL (SQL)</option>
+                           <option value="postgres" style={{ background: '#040815', color: '#ffffff' }}>PostgreSQL (SQL)</option>
+                           <option value="mongodb" style={{ background: '#040815', color: '#ffffff' }}>MongoDB (NoSQL)</option>
+                           <option value="sqlite" style={{ background: '#040815', color: '#ffffff' }}>SQLite (SQL)</option>
+                           <option value="mariadb" style={{ background: '#040815', color: '#ffffff' }}>MariaDB (SQL)</option>
+                           <option value="mssql" style={{ background: '#040815', color: '#ffffff' }}>SQL Server (SQL)</option>
+                           <option value="oracle" style={{ background: '#040815', color: '#ffffff' }}>Oracle Database (SQL)</option>
+                           <option value="cassandra" style={{ background: '#040815', color: '#ffffff' }}>Cassandra (NoSQL)</option>
+                           <option value="redis" style={{ background: '#040815', color: '#ffffff' }}>Redis (NoSQL)</option>
+                         </select>
+                       </div>
 
-                       <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
+                       <div style={{ display: 'flex', gap: '6px' }}>
                          <button
                            type="button"
                            onClick={() => {
                              if (dbInitType === 'mongodb') {
                                setDbInitScript(`db.users.insertOne({ username: "admin", password: "admin123" });\ndb.threats.insertMany([\n  { id: "ALT-101", type: "SQL Injection", severity: "High" },\n  { id: "ALT-102", type: "Brute Force SSH", severity: "Critical" }\n]);`);
+                             } else if (dbInitType === 'redis') {
+                               setDbInitScript(`HMSET user:admin username admin password admin123 role admin\nSADD users admin`);
+                             } else if (dbInitType === 'cassandra') {
+                               setDbInitScript(`CREATE KEYSPACE IF NOT EXISTS preview_keyspace WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};\nUSE preview_keyspace;\nCREATE TABLE IF NOT EXISTS users (username text PRIMARY KEY, password text);\nINSERT INTO users (username, password) VALUES ('admin', 'admin123');`);
+                             } else if (dbInitType === 'sqlite') {
+                               setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  username TEXT NOT NULL UNIQUE,\n  password TEXT NOT NULL\n);\nINSERT OR IGNORE INTO users (username, password) VALUES ('admin', 'admin123');`);
+                             } else if (dbInitType === 'mssql') {
+                               setDbInitScript(`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='users' AND xtype='U')\nBEGIN\n  CREATE TABLE users (id INT IDENTITY(1,1) PRIMARY KEY, username NVARCHAR(255) UNIQUE, password NVARCHAR(255));\n  INSERT INTO users (username, password) VALUES ('admin', 'admin123');\nEND;`);
+                             } else if (dbInitType === 'oracle') {
+                               setDbInitScript(`DECLARE\n  c INT;\nBEGIN\n  SELECT COUNT(*) INTO c FROM user_tables WHERE table_name = 'USERS';\n  IF c = 0 THEN\n    EXECUTE IMMEDIATE 'CREATE TABLE users (username VARCHAR2(255) PRIMARY KEY, password VARCHAR2(255))';\n  END IF;\n  EXECUTE IMMEDIATE 'INSERT INTO users (username, password) VALUES (''admin'', ''admin123'')';\nEND;\n/`);
                              } else {
-                               setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  username VARCHAR(255) NOT NULL,\n  password VARCHAR(255) NOT NULL\n);\n\nINSERT INTO users (username, password) VALUES ('admin', 'admin123');`);
+                               setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  username VARCHAR(255) NOT NULL UNIQUE,\n  password VARCHAR(255) NOT NULL\n);\n\nINSERT INTO users (username, password) VALUES ('admin', 'admin123') ON DUPLICATE KEY UPDATE password=VALUES(password);`);
                              }
                            }}
                            style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.25)', borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)', padding: '2px 6px', fontSize: '10px', cursor: 'pointer' }}
@@ -1715,6 +2094,44 @@ function DevOps() {
                        </div>
                      </div>
 
+                     {/* Smart Seeding Checkbox (Grandchild on its own separate block row) */}
+                     <div style={{
+                       display: 'flex',
+                       alignItems: 'flex-start',
+                       gap: '8px',
+                       background: 'rgba(34, 211, 238, 0.02)',
+                       border: '1px solid rgba(34, 211, 238, 0.1)',
+                       borderRadius: 'var(--radius-sm)',
+                       padding: '8px 10px',
+                       marginTop: '4px',
+                       marginBottom: '4px'
+                     }}>
+                       <input
+                         type="checkbox"
+                         id="enableSmartSeedingCheckboxZip"
+                         checked={enableSmartSeeding}
+                         disabled={!useTempDb || !enableDbInit}
+                         onChange={(e) => {
+                           const checked = e.target.checked;
+                           setEnableSmartSeeding(checked);
+                           if (checked) {
+                             setEnableDbInit(true);
+                             setUseTempDb(true);
+                           }
+                         }}
+                         style={{ width: '13px', height: '13px', accentColor: 'var(--accent-cyan)', marginTop: '2px', cursor: (useTempDb && enableDbInit) ? 'pointer' : 'not-allowed' }}
+                       />
+                       <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                         <label htmlFor="enableSmartSeedingCheckboxZip" style={{ fontSize: '11px', fontWeight: 600, color: (useTempDb && enableDbInit) ? 'var(--text-primary)' : 'var(--text-muted)', cursor: (useTempDb && enableDbInit) ? 'pointer' : 'not-allowed' }}>
+                           Enable Smart Table/Collection Detection & Seeding
+                         </label>
+                         <span style={{ fontSize: '10px', color: 'var(--text-muted)', lineHeight: '1.3' }}>
+                           Automatically scans your files during deployment to discover tables, find the user credentials structure, and draft optimal initialization queries.
+                         </span>
+                       </div>
+                     </div>
+
+                     {/* Initialization Script Input Area */}
                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                        <label style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                          Initialization Script / Commands:
@@ -1726,8 +2143,8 @@ function DevOps() {
                            onScroll={handleTextareaScroll}
                            placeholder={
                              dbInitType === 'mongodb'
-                               ? `// Enter MongoDB query sequence:\ndb.users.insertOne({ username: "admin", password: "admin123" });`
-                               : `/* Enter SQL command sequence: */\nCREATE TABLE IF NOT EXISTS users (...);\nINSERT INTO users ...;`
+                               ? '// Enter MongoDB query sequence:\ndb.users.insertOne({ username: "admin", password: "admin123" });'
+                               : '/* Enter SQL command sequence: */\nCREATE TABLE IF NOT EXISTS users (...);\nINSERT INTO users ...;'
                            }
                            rows={6}
                            style={{
@@ -1752,7 +2169,7 @@ function DevOps() {
                            }}
                          />
                          <pre
-                           dangerouslySetInnerHTML={{ __html: highlightCode(dbInitScript, dbInitType) || `<span style="color: var(--text-muted); font-style: italic;">${dbInitType === 'mongodb' ? '// Enter MongoDB queries...' : '/* Enter SQL commands... */'}</span>` }}
+                           dangerouslySetInnerHTML={{ __html: highlightCode(dbInitScript, dbInitType) || `<span style="color: var(--text-muted); font-style: italic;">\${dbInitType === 'mongodb' ? '// Enter MongoDB queries...' : '/* Enter SQL commands... */'}</span>` }}
                            style={{
                              position: 'absolute',
                              top: 0,
@@ -1782,7 +2199,8 @@ function DevOps() {
                    </div>
                  )}
                </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+
+               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <FileText size={13} style={{ color: 'var(--accent-cyan)' }} />
                   <label style={labelStyle}>Environment Files (.env)</label>
@@ -2110,9 +2528,67 @@ function DevOps() {
               >
                 {isPipelineLogCollapsed ? 'Expand' : 'Collapse'}
               </button>
+              <button
+                type="button"
+                onClick={() => setIsLogExpanded(!isLogExpanded)}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-secondary)',
+                  cursor: 'pointer',
+                  fontSize: '11px',
+                  padding: '3px 8px',
+                  borderRadius: 'var(--radius-sm)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px'
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+              >
+                {isLogExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                {isLogExpanded ? 'Normal' : 'Expand Width'}
+              </button>
             </div>
           </div>{!isPipelineLogCollapsed && (
             <>
+              {showBirdAgent && (
+                <div style={{
+                  display: 'flex',
+                  gap: '12px',
+                  padding: '16px',
+                  margin: '12px 0',
+                  background: 'rgba(59, 130, 246, 0.08)',
+                  border: '1px solid rgba(59, 130, 246, 0.2)',
+                  borderRadius: 'var(--radius-md)',
+                  alignItems: 'center',
+                  animation: 'floating 3s ease-in-out infinite'
+                }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: '50%',
+                    background: 'var(--grad-brand)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: '0 0 10px rgba(59, 130, 246, 0.4)'
+                  }}>
+                    <Bird size={24} color="#fff" />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px', fontSize: '13px' }}>
+                      Self-Healing Agent
+                    </div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '12px', fontStyle: 'italic' }}>
+                      "{birdMessage}"
+                    </div>
+                    <div style={{ fontSize: '10px', color: 'var(--accent-cyan)', marginTop: '6px', fontWeight: 500 }}>
+                      * Restricted to compilation and DB sandboxes only. ML guardrails active.
+                    </div>
+                  </div>
+                </div>
+              )}
 
           {!activeJobStatus ? (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>

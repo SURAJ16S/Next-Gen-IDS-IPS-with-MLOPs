@@ -12,16 +12,22 @@ module.exports = {
   },
   buildImage: 'python:3.12-slim',
   runCommand: 'pip install -r requirements.txt && python manage.py migrate', // Default global fallback
-  getPreviewCommand: (workDir) => {
+  getPreviewCommand: (workDir, isDocker = false) => {
     // Check for local virtual environment Python first to ensure dependencies are loaded
     const unixVenv = path.join(workDir, '.venv', 'bin', 'python');
     const winVenv = path.join(workDir, '.venv', 'Scripts', 'python.exe');
     
     let pythonCmd = 'python';
-    if (fs.existsSync(unixVenv)) {
-      pythonCmd = '.venv/bin/python'; // Relative Unix path inside container
-    } else if (fs.existsSync(winVenv)) {
-      pythonCmd = '.venv/Scripts/python'; // Relative Windows path
+    if (fs.existsSync(path.join(workDir, '.venv'))) {
+      if (isDocker) {
+        pythonCmd = '.venv/bin/python'; // Relative Unix path inside container
+      } else {
+        if (fs.existsSync(unixVenv)) {
+          pythonCmd = '.venv/bin/python'; // Relative Unix path inside container
+        } else if (fs.existsSync(winVenv)) {
+          pythonCmd = '.venv/Scripts/python'; // Relative Windows path
+        }
+      }
     }
 
     if (fs.existsSync(path.join(workDir, 'manage.py'))) {

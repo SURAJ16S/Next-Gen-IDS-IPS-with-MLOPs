@@ -16,6 +16,9 @@ import Settings from './pages/Settings';
 import NodesPage from './pages/NodesPage';
 import Fixtures from './pages/Fixtures';
 import Profile from './pages/Profile';
+import GithubCallbackRelay from './pages/GithubCallbackRelay';
+
+import Agent from './pages/Agent';
 
 function App() {
   return (
@@ -25,6 +28,7 @@ function App() {
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/verify-otp" element={<VerifyOtp />} />
       <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/github-callback" element={<GithubCallbackRelay />} />
       <Route
         path="/"
         element={
@@ -39,6 +43,7 @@ function App() {
         <Route path="analytics" element={<Analytics />} />
         <Route path="logs" element={<Logs />} />
         <Route path="devops" element={<DevOps />} />
+        <Route path="agent" element={<Agent />} />
         <Route path="nodes" element={<NodesPage />} />
         <Route path="fixtures" element={<Fixtures />} />
         <Route path="settings" element={<Settings />} />

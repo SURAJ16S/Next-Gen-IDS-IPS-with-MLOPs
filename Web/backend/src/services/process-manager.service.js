@@ -198,6 +198,9 @@ const getDockerInstance = async () => {
 // In-memory registry: jobId -> { process/container, port, deploymentId, type: 'process' | 'container' }
 const runningPreviews = new Map();
 
+// Track currently allocated or reserving ports globally to prevent race conditions during concurrent builds
+const allocatedPorts = new Set();
+
 // Ports permanently reserved by this project (never suggest these)
 const RESERVED_PORTS = new Set([3000, 5000, 5173, 8080, 27017, 5432]);
 
@@ -221,9 +224,24 @@ const isPortAvailable = (port) => {
 const suggestPort = async () => {
   for (let port = 3001; port <= 3999; port++) {
     if (RESERVED_PORTS.has(port)) continue;
-    if (runningPreviews.has(port)) continue; // already allocated
+    if (allocatedPorts.has(port)) continue;
+    
+    // Check if port is already active in running previews
+    let active = false;
+    for (const entry of runningPreviews.values()) {
+      if (entry && entry.port === port) {
+        active = true;
+        break;
+      }
+    }
+    if (active) continue;
+
     const available = await isPortAvailable(port);
-    if (available) return port;
+    if (available) {
+      // Pre-reserve the port immediately to prevent concurrent pipeline runs from grabbing it
+      allocatedPorts.add(port);
+      return port;
+    }
   }
   return null; // all ports busy
 };
@@ -360,6 +378,7 @@ const spawnHostPreview = async (jobId, deploymentId, workDir, framework, port) =
   });
 
   child.on('close', async (code) => {
+    allocatedPorts.delete(port);
     runningPreviews.delete(jobId);
     await logPreview(deploymentId, jobId, `[PREVIEW] Host process exited with code ${code}.`);
     await Deployment.findByIdAndUpdate(deploymentId, { previewStatus: 'stopped', previewPid: null });
@@ -675,7 +694,7 @@ const path = require('path');
 const net = require('net');
 
 const PREVIEW_PORT = process.env.PORT || 3001;
-const BACKEND_PORT = 3002;
+const BACKEND_PORT = 5001;
 const CLIENT_DIST = path.resolve(__dirname, 'client/dist');
 const CLIENT_BUILD = path.resolve(__dirname, 'client/build');
 
@@ -825,7 +844,7 @@ server.listen(PREVIEW_PORT, () => {
       const serverStartCmd = [cmd, ...finalArgs].join(' ');
       containerCmd = [
         'sh', '-c',
-        `cd ${absClientPath} && npm install --prefer-offline --no-audit --no-fund --ignore-scripts --include=dev --legacy-peer-deps && npm run build && cd /project && PORT=${port} node devops-proxy.js & cd ${absServerPath} && PORT=3002 SERVER_PORT=3002 ${serverStartCmd}`
+        `cd ${absClientPath} && npm install --prefer-offline --no-audit --no-fund --ignore-scripts --include=dev --legacy-peer-deps && npm run build && cd /project && PORT=${port} node devops-proxy.js & cd ${absServerPath} && PORT=5001 SERVER_PORT=5001 ${serverStartCmd}`
       ];
       await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo. Will build React client at ${absClientPath} before starting server at ${absServerPath}.`);
     }
@@ -1147,6 +1166,7 @@ server.listen(PREVIEW_PORT, () => {
         // Wait for container to exit in the background.
         // Wrap everything in try-catches to be completely crash-safe.
         container.wait(async () => {
+          allocatedPorts.delete(port);
           runningPreviews.delete(jobId);
           await logPreview(deploymentId, jobId, `[PREVIEW] Preview container exited/stopped.`);
           await Deployment.findByIdAndUpdate(deploymentId, { previewStatus: 'stopped', previewPid: null });
@@ -1241,6 +1261,9 @@ const stopPreview = async (jobId) => {
     }
   }
 
+  if (entry && entry.port) {
+    allocatedPorts.delete(entry.port);
+  }
   runningPreviews.delete(jobId);
   await Deployment.findOneAndUpdate({ jobId }, { previewStatus: 'stopped', previewPid: null });
   return true;

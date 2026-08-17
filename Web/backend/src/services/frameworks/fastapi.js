@@ -70,17 +70,23 @@ module.exports = {
   buildImage: 'python:3.12-slim',
   // Default runCommand (overridden via getConfig)
   runCommand: 'python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt',
-  getPreviewCommand: (workDir) => {
+  getPreviewCommand: (workDir, isDocker = false) => {
     // Prefer local venv for isolation and speed (packages already cached)
     const unixUvicorn = path.join(workDir, '.venv', 'bin', 'uvicorn');
     const winUvicorn = path.join(workDir, '.venv', 'Scripts', 'uvicorn.exe');
     const appModule = findAppModule(workDir);
 
     let uvicornCmd = 'uvicorn';
-    if (fs.existsSync(unixUvicorn)) {
-      uvicornCmd = '.venv/bin/uvicorn';
-    } else if (fs.existsSync(winUvicorn)) {
-      uvicornCmd = '.venv/Scripts/uvicorn';
+    if (fs.existsSync(path.join(workDir, '.venv'))) {
+      if (isDocker) {
+        uvicornCmd = '.venv/bin/uvicorn';
+      } else {
+        if (fs.existsSync(unixUvicorn)) {
+          uvicornCmd = '.venv/bin/uvicorn';
+        } else if (fs.existsSync(winUvicorn)) {
+          uvicornCmd = '.venv/Scripts/uvicorn';
+        }
+      }
     }
 
     const hasPoetry = fs.existsSync(path.join(workDir, 'poetry.lock'));
@@ -89,10 +95,10 @@ module.exports = {
     let cmd = uvicornCmd;
     let args = [appModule, '--host', '0.0.0.0', '--port', '${PORT:-8000}'];
     
-    if (hasPoetry && fs.existsSync(path.join(workDir, '.venv', 'bin', 'poetry'))) {
+    if (hasPoetry && (isDocker || fs.existsSync(path.join(workDir, '.venv', 'bin', 'poetry')))) {
       cmd = '.venv/bin/poetry';
       args = ['run', 'uvicorn', ...args];
-    } else if (hasPipfile && fs.existsSync(path.join(workDir, '.venv', 'bin', 'pipenv'))) {
+    } else if (hasPipfile && (isDocker || fs.existsSync(path.join(workDir, '.venv', 'bin', 'pipenv')))) {
       cmd = '.venv/bin/pipenv';
       args = ['run', 'uvicorn', ...args];
     }

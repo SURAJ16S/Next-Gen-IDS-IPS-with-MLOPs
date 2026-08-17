@@ -9,6 +9,7 @@ const {
   getMe,
   githubLoginRedirect,
   githubLoginCallback,
+  linkGithubAccount,
 } = require('../controllers/auth.controller');
 const { protect } = require('../middleware/auth.middleware');
 const { validateLogin, validateRegister } = require('../middleware/auth.validation');
@@ -25,5 +26,6 @@ router.get('/me', protect, getMe);
 // GitHub OAuth Login/Signup
 router.get('/github', githubLoginRedirect);
 router.get('/github/callback', githubLoginCallback);
+router.post('/github/link', linkGithubAccount);
 
 module.exports = router;

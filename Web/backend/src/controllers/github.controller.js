@@ -39,13 +39,17 @@ const zipDirectory = (sourceDir, outPath) =>
 // ─── 1. Return the GitHub OAuth authorization URL ─────────────────────────────
 const getGithubAuthUrl = (req, res) => {
   // Embed the user's JWT into `state` so we can re-identify them in the callback
-  const state = req.headers.authorization?.split(' ')[1] || '';
+  const userJwt = req.headers.authorization?.split(' ')[1] || '';
+  // Encode both the action and the user's JWT inside state
+  const state = jwt.sign({ action: 'devops_link', id_token: userJwt }, JWT_SECRET, { expiresIn: '15m' });
   const params = new URLSearchParams({
     client_id:    GITHUB_CLIENT_ID,
     redirect_uri: GITHUB_CALLBACK_URL,
-    scope:        'repo read:user',   // repo = public + private repos
+    scope:        'repo read:user user:email',
     state,
     allow_signup: 'false',
+    // Force GitHub account selector so user can switch accounts
+    prompt:       'select_account',
   });
   res.json({ url: `https://github.com/login/oauth/authorize?${params}` });
 };
@@ -55,7 +59,11 @@ const githubOAuthCallback = async (req, res) => {
   const { code, state, error } = req.query;
 
   if (error) {
-    return res.redirect(`${FRONTEND_URL}/devops?github=denied`);
+    const isLogin = (() => { try { return jwt.verify(state, JWT_SECRET)?.action === 'login'; } catch (_) { return false; } })();
+    return res.redirect(isLogin
+      ? `${FRONTEND_URL}/login?error=github_denied`
+      : `${FRONTEND_URL}/devops?github=denied`
+    );
   }
 
   if (!code) {
@@ -63,7 +71,7 @@ const githubOAuthCallback = async (req, res) => {
   }
 
   try {
-    // Exchange code → access_token
+    // Exchange code → access_token (only once, regardless of flow)
     const tokenRes = await axios.post(
       'https://github.com/login/oauth/access_token',
       { client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code, redirect_uri: GITHUB_CALLBACK_URL },
@@ -75,32 +83,118 @@ const githubOAuthCallback = async (req, res) => {
       return res.redirect(`${FRONTEND_URL}/devops?github=error&msg=token_exchange_failed`);
     }
 
-    // Get GitHub user info
-    const ghUser = await axios.get('https://api.github.com/user', {
+    // Get GitHub user info (needed by both flows)
+    const ghUserRes = await axios.get('https://api.github.com/user', {
       headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'IDPS-DevOps' },
     });
-    const githubUsername = ghUser.data.login;
+    const ghUser = ghUserRes.data;
+    const githubUsername = ghUser.login;
 
-    // Re-identify our user from the `state` JWT
-    let userId;
+    // Decode state JWT
+    let decoded;
     try {
-      const decoded = jwt.verify(state, JWT_SECRET);
-      userId = decoded.id;
+      decoded = jwt.verify(state, JWT_SECRET);
     } catch (_) {
       return res.redirect(`${FRONTEND_URL}/devops?github=error&msg=invalid_state`);
     }
 
-    // Save encrypted token + GitHub username
+    // ── LOGIN FLOW ─────────────────────────────────────────────────────────────
+    if (decoded.action === 'login') {
+      const crypto = require('crypto');
+
+      // Fetch verified email from GitHub
+      let email = ghUser.email;
+      if (!email) {
+        try {
+          const emailsRes = await axios.get('https://api.github.com/user/emails', {
+            headers: { Authorization: `Bearer ${access_token}`, 'User-Agent': 'IDPS-Auth' },
+          });
+          const primary = emailsRes.data.find(e => e.primary && e.verified);
+          if (primary) email = primary.email;
+        } catch (_) {}
+      }
+      if (!email) email = `${githubUsername}@github.com`;
+
+      // 1. Already linked by githubUsername → log in directly
+      let user = await User.findOne({ githubUsername });
+
+      if (!user) {
+        // 2. Email exists but unlinked → prompt for password to link
+        user = await User.findOne({ email });
+        if (user) {
+          const linkToken = jwt.sign(
+            { email, githubUsername, githubAccessToken: access_token },
+            JWT_SECRET,
+            { expiresIn: '15m' }
+          );
+          return res.redirect(
+            `${FRONTEND_URL}/login?action=link_github` +
+            `&email=${encodeURIComponent(email)}` +
+            `&githubUsername=${encodeURIComponent(githubUsername)}` +
+            `&linkToken=${linkToken}`
+          );
+        }
+
+        // 3. Completely new user → prefill register form
+        const nameParts = (ghUser.name || githubUsername).split(' ');
+        const firstName = nameParts[0] || githubUsername;
+        const lastName  = nameParts.slice(1).join(' ') || ' ';
+        const githubRegToken = jwt.sign(
+          { email, githubUsername, githubAccessToken: access_token },
+          JWT_SECRET,
+          { expiresIn: '15m' }
+        );
+        return res.redirect(
+          `${FRONTEND_URL}/register?action=github_signup` +
+          `&email=${encodeURIComponent(email)}` +
+          `&githubUsername=${encodeURIComponent(githubUsername)}` +
+          `&firstName=${encodeURIComponent(firstName)}` +
+          `&lastName=${encodeURIComponent(lastName)}` +
+          `&githubRegToken=${githubRegToken}`
+        );
+      }
+
+      // Already linked — refresh the token
+      user.githubAccessToken = access_token;
+      await user.save();
+
+      const loginToken = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '30d' });
+      const userJSON = encodeURIComponent(JSON.stringify({
+        _id:       user._id,
+        firstName: user.firstName,
+        lastName:  user.lastName,
+        username:  user.username,
+        email:     user.email,
+        role:      user.role,
+      }));
+      return res.redirect(`${FRONTEND_URL}/login?token=${loginToken}&user=${userJSON}`);
+    }
+
+    // ── DEVOPS LINK FLOW ───────────────────────────────────────────────────────
+    // Decode the nested user JWT to extract userId
+    let userId;
+    try {
+      const userDecoded = jwt.verify(decoded.id_token, JWT_SECRET);
+      userId = userDecoded.id;
+    } catch (_) {
+      // Legacy: state was the raw JWT (id field directly)
+      userId = decoded.id;
+    }
+
+    if (!userId) {
+      return res.redirect(`${FRONTEND_URL}/devops?github=error&msg=invalid_state`);
+    }
+
     await User.findByIdAndUpdate(userId, {
       githubAccessToken: access_token,
       githubUsername,
     });
 
-    // Redirect back — popup will detect this and close itself
-    res.redirect(`${FRONTEND_URL}/devops?github=linked`);
+    // Redirect to popup relay page — it will postMessage to opener then self-close
+    res.redirect(`${FRONTEND_URL}/github-callback?result=linked&username=${encodeURIComponent(githubUsername)}`);
   } catch (err) {
     console.error('GitHub OAuth callback error:', err.message);
-    res.redirect(`${FRONTEND_URL}/devops?github=error&msg=server_error`);
+    res.redirect(`${FRONTEND_URL}/github-callback?result=error`);
   }
 };
 
@@ -161,7 +255,7 @@ const getGithubRepos = async (req, res) => {
 
 // ─── 5. Import a repo (clone → zip → pipeline) ───────────────────────────────
 const importGithubRepo = async (req, res) => {
-  const { repoFullName, branch = 'main', projectName, previewPort: rawPort, sessionId = '', envFiles: rawEnv = '[]', targetSubfolder = '', upgradeMode = 'automatic', useTempDb = true, dbInitScript = '', dbInitType = 'none' } = req.body;
+  const { repoFullName, branch = 'main', projectName, previewPort: rawPort, sessionId = '', envFiles: rawEnv = '[]', targetSubfolder = '', upgradeMode = 'automatic', useTempDb = true, dbInitScript = '', dbInitType = 'none', enableSmartSeeding = false } = req.body;
 
   if (!repoFullName) {
     return res.status(400).json({ message: 'repoFullName is required.' });
@@ -203,6 +297,7 @@ const importGithubRepo = async (req, res) => {
       useTempDb: useTempDb === true || useTempDb === 'true',
       dbInitScript,
       dbInitType,
+      enableSmartSeeding: enableSmartSeeding === true || enableSmartSeeding === 'true',
       deploymentType: 'github',
     });
 

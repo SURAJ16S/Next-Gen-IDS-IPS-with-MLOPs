@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { getGithubStatus, getGithubUserProfile, getGithubBranches, getGithubAuthUrl, unlinkGithub } from '../services/api';
 import {
   User, Mail, Shield, ShieldCheck, MapPin, Briefcase, Link2,
@@ -11,6 +11,14 @@ function Profile() {
   const [githubData, setGithubData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState(null); // { msg, type: 'success'|'error' }
+  const toastTimer = useRef(null);
+
+  const showToast = (msg, type = 'success') => {
+    setToast({ msg, type });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 4000);
+  };
 
   // Repos branch selector
   const [expandedRepo, setExpandedRepo] = useState(null);
@@ -54,18 +62,33 @@ function Profile() {
     try {
       const res = await getGithubAuthUrl();
       const popup = window.open(res.data.url, 'github-oauth', 'width=600,height=700,scrollbars=yes');
+
+      const onMessage = (event) => {
+        if (event.origin !== window.location.origin) return;
+        if (event.data?.type !== 'GITHUB_OAUTH') return;
+        window.removeEventListener('message', onMessage);
+        if (!popup.closed) popup.close();
+        if (event.data.result === 'linked') {
+          showToast(`✓ GitHub account @${event.data.username} connected!`);
+          fetchProfileData();
+        } else {
+          showToast('GitHub connection failed. Please try again.', 'error');
+        }
+      };
+      window.addEventListener('message', onMessage);
+
+      // Fallback: if popup is closed without postMessage (user manually closed)
       const poll = setInterval(() => {
-        try {
-          if (!popup || popup.closed) {
-            clearInterval(poll);
-            fetchProfileData();
-          }
-        } catch (_) {}
+        if (!popup || popup.closed) {
+          clearInterval(poll);
+          window.removeEventListener('message', onMessage);
+        }
       }, 500);
     } catch (_) {
-      alert('Failed to initiate GitHub connect.');
+      showToast('Failed to initiate GitHub connect.', 'error');
     }
   };
+
 
   // Unlink GitHub
   const handleUnlink = async () => {
@@ -110,7 +133,24 @@ function Profile() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1100px', margin: '0 auto' }}>
-      
+
+      {/* Toast Notification */}
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: '24px', right: '24px', zIndex: 9999,
+          background: toast.type === 'error' ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)',
+          border: `1px solid ${toast.type === 'error' ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.4)'}`,
+          color: toast.type === 'error' ? '#f87171' : '#4ade80',
+          padding: '12px 20px', borderRadius: '10px', fontSize: '14px', fontWeight: 500,
+          backdropFilter: 'blur(10px)', boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          display: 'flex', alignItems: 'center', gap: '10px', maxWidth: '360px',
+          animation: 'slideInRight 0.3s ease',
+        }}>
+          <span style={{ fontSize: '18px' }}>{toast.type === 'error' ? '✕' : '✓'}</span>
+          {toast.msg}
+        </div>
+      )}
+
       {/* Page Title */}
       <div>
         <h1 className="page-title">User Profile</h1>

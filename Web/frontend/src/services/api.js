@@ -19,6 +19,7 @@ export const registerUser = (data) => api.post('/auth/register', data);
 export const forgotPassword = (data) => api.post('/auth/forgot-password', data);
 export const verifyOtp = (data) => api.post('/auth/verify-otp', data);
 export const resetPassword = (data) => api.post('/auth/reset-password', data);
+export const linkGithubAccount = (data) => api.post('/auth/github/link', data);
 
 // Dashboard
 export const getDashboardStats = () => api.get('/dashboard/stats');
@@ -58,6 +59,18 @@ export const startDeploymentPreview = (id) => api.post(`/devops/${id}/start-prev
 export const changeDeploymentPort = (id, previewPort) => api.post(`/devops/${id}/change-port`, { previewPort });
 export const executeDeploymentDbQuery = (id, query, dbType) => api.post(`/devops/${id}/run-query`, { query, dbType });
 export const deleteDeployment = (id) => api.delete(`/devops/${id}`);
+export const getWorkspaceFiles = (id) => api.get(`/devops/${id}/files`);
+export const getWorkspaceFileContent = (id, path) => api.get(`/devops/${id}/files/content?path=${encodeURIComponent(path)}`);
+export const saveWorkspaceFile = (id, path, content) => api.post(`/devops/${id}/files/save`, { path, content });
+export const getDbCollections = (id, dbType) => api.get(`/devops/${id}/db/collections?dbType=${dbType}`);
+export const getDbCollectionData = (id, collection, dbType) => api.get(`/devops/${id}/db/collection/${collection}?dbType=${dbType}`);
+export const insertDbRecord = (id, collection, record, dbType) => api.post(`/devops/${id}/db/insert?dbType=${dbType}`, { collection, record });
+export const executeAgentChat = (id, message, chatId) => api.post(`/devops/${id}/agent/chat`, { message, chatId });
+export const updateAgentPermission = (id, permission) => api.post(`/devops/${id}/agent/permission`, { permission });
+export const executePendingCommands = (id, commands, chatId) => api.post(`/devops/${id}/agent/exec-pending`, { commands, chatId });
+export const getChatsList = (id) => api.get(`/devops/${id}/agent/chats`);
+export const createChatThread = (id, title) => api.post(`/devops/${id}/agent/chats`, { title });
+export const getChatMessages = (id, chatId) => api.get(`/devops/${id}/agent/chats/${chatId}`);
 
 // GitHub OAuth
 export const getGithubAuthUrl  = ()     => api.get('/devops/github/auth-url');

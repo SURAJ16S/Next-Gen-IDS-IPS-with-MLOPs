@@ -89,26 +89,116 @@ const zipDirectory = (sourceDir, outPath, excludePatterns = []) => {
   });
 };
 
+const getWorkspaceSourceFiles = (dir, rootDir = dir) => {
+  const exts = ['.js', '.ts', '.py', '.rb', '.php', '.java', '.go', '.cs', '.json', '.rs', '.toml', '.xml', '.gradle', '.config', '.env', '.html', '.css'];
+  const ignoreDirs = new Set(['node_modules', '.git', 'dist', 'build', 'target', 'vendor', '.security-reports', 'venv', '.venv']);
+  const files = {};
+  
+  const walk = (currentDir) => {
+    try {
+      const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          if (!ignoreDirs.has(entry.name)) {
+            walk(fullPath);
+          }
+        } else {
+          const ext = path.extname(entry.name).toLowerCase();
+          const isSourceFile = exts.includes(ext) || entry.name === 'Dockerfile' || entry.name === 'Makefile' || entry.name === 'package.json';
+          if (isSourceFile) {
+            try {
+              const stats = fs.statSync(fullPath);
+              if (stats.size < 1024 * 100) {
+                const relPath = path.relative(rootDir, fullPath).replace(/\\/g, '/');
+                const content = fs.readFileSync(fullPath, 'utf8');
+                files[relPath] = content;
+              }
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+  };
+  
+  walk(dir);
+  return files;
+};
+
+const getRelevantWorkspaceFiles = (errorLogs, allFilesMap) => {
+  const relevantFiles = {};
+  
+  // 1. Core configurations that should always be included for context
+  const coreConfigs = ['package.json', 'tsconfig.json', 'Cargo.toml', 'requirements.txt', 'go.mod', 'composer.json', 'Gemfile'];
+  const normalizedLogs = errorLogs.replace(/\\/g, '/');
+  
+  for (const filePath of Object.keys(allFilesMap)) {
+    const fileName = path.basename(filePath);
+    
+    // Always include core config files (from anywhere in the workspace)
+    if (coreConfigs.includes(fileName)) {
+      relevantFiles[filePath] = allFilesMap[filePath];
+      continue;
+    }
+
+    // Escape file name for regex search safety
+    const escapedName = fileName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    // Match the exact filename in the logs
+    const regex = new RegExp(`(?:^|\\s|[\"'(]|/|\\\\|[a-zA-Z]:)${escapedName}(?:\\s|:|\\(|\\)|,|$)`, 'i');
+    
+    if (regex.test(normalizedLogs)) {
+      relevantFiles[filePath] = allFilesMap[filePath];
+    }
+  }
+
+  // 3. Fallback: if we found no files mentioned in the logs (other than configs), return a small subset
+  if (Object.keys(relevantFiles).filter(f => !coreConfigs.includes(path.basename(f))).length === 0) {
+    let count = 0;
+    for (const [filePath, content] of Object.entries(allFilesMap)) {
+      if (!relevantFiles[filePath]) {
+        relevantFiles[filePath] = content;
+        count++;
+        if (count >= 10) break;
+      }
+    }
+  }
+
+  return relevantFiles;
+};
+
 const runHostCommand = (cmd, cwd, deploymentId, jobId, stepName) => {
   return new Promise((resolve, reject) => {
     logToJob(deploymentId, jobId, `Starting Step: ${stepName} directly on local host...`);
     logToJob(deploymentId, jobId, `[${stepName}] Running: ${cmd}`);
     const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
     const child = exec(cmd, { cwd, shell });
+    const outputLogs = [];
 
     child.stdout.on('data', (data) => {
       data.toString().split('\n').forEach(line => {
-        if (line.trim()) logToJob(deploymentId, jobId, `[${stepName}] ${line.trim()}`);
+        if (line.trim()) {
+          const l = `[${stepName}] ${line.trim()}`;
+          logToJob(deploymentId, jobId, l);
+          outputLogs.push(l);
+        }
       });
     });
     child.stderr.on('data', (data) => {
       data.toString().split('\n').forEach(line => {
-        if (line.trim()) logToJob(deploymentId, jobId, `[${stepName}] [STDERR] ${line.trim()}`);
+        if (line.trim()) {
+          const l = `[${stepName}] [STDERR] ${line.trim()}`;
+          logToJob(deploymentId, jobId, l);
+          outputLogs.push(l);
+        }
       });
     });
     child.on('close', (code) => {
-      if (code !== 0) reject(new Error(`Host execution of '${cmd}' exited with code ${code}`));
-      else { logToJob(deploymentId, jobId, `Step Completed: ${stepName}`); resolve(); }
+      if (code !== 0) {
+        const err = new Error(`Host execution of '${cmd}' exited with code ${code}`);
+        err.logs = outputLogs.join('\n');
+        reject(err);
+      }
+      else { logToJob(deploymentId, jobId, `Step Completed: ${stepName}`); resolve(outputLogs.join('\n')); }
     });
   });
 };
@@ -116,6 +206,7 @@ const runHostCommand = (cmd, cwd, deploymentId, jobId, stepName) => {
 const runContainerCommand = (image, cmd, binds, deploymentId, jobId, stepName) => {
   return new Promise((resolve, reject) => {
     logToJob(deploymentId, jobId, `Starting Step: ${stepName} using container ${image}...`);
+    const outputLogs = [];
     docker.createContainer({
       Image: image,
       Cmd: cmd,
@@ -132,7 +223,11 @@ const runContainerCommand = (image, cmd, binds, deploymentId, jobId, stepName) =
           buffer = lines.pop();
           lines.forEach(line => {
             const clean = line.replace(/[\u0000-\u001F\u007F-\u009F]/g, '').trim();
-            if (clean) logToJob(deploymentId, jobId, `[${stepName}] ${clean}`);
+            if (clean) {
+              const l = `[${stepName}] ${clean}`;
+              logToJob(deploymentId, jobId, l);
+              outputLogs.push(l);
+            }
           });
         });
         container.start((err) => {
@@ -140,8 +235,12 @@ const runContainerCommand = (image, cmd, binds, deploymentId, jobId, stepName) =
           container.wait((err, data) => {
             if (err) { container.remove(); return reject(err); }
             container.remove(() => {
-              if (data.StatusCode !== 0) reject(new Error(`Container exited with non-zero: ${data.StatusCode}`));
-              else { logToJob(deploymentId, jobId, `Step Completed: ${stepName}`); resolve(); }
+              if (data.StatusCode !== 0) {
+                const compileErr = new Error(`Container exited with non-zero: ${data.StatusCode}`);
+                compileErr.logs = outputLogs.join('\n');
+                reject(compileErr);
+              }
+              else { logToJob(deploymentId, jobId, `Step Completed: ${stepName}`); resolve(outputLogs.join('\n')); }
             });
           });
         });
@@ -533,78 +632,260 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
 
 
     // ── Step 5: Build ────────────────────────────────────────────────────────
-    if (dockerAvailable) {
-      const bind = `${path.resolve(targetBuildDir)}:/workspace`;
-      const binds = [bind];
+    let buildAttempts = 0;
+    const maxRetries = 3;
+    let buildSuccess = false;
 
-      // Inject dependency package manager caching binds
+    while (buildAttempts <= maxRetries) {
       try {
-        const fw = (detection.framework || '').toLowerCase();
-        const cacheBinds = [];
-
-        // PHP (Composer) — map to Composer's home dir
-        if (['php', 'symfony'].includes(fw)) {
-          const cDir = path.join(CACHE_BASE_DIR, 'composer');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/root/.composer`);
-        }
-        // Python (pip/poetry/pipenv)
-        else if (['flask', 'fastapi', 'django'].includes(fw)) {
-          const cDir = path.join(CACHE_BASE_DIR, 'pip');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/root/.cache`);
-        }
-        // Go module cache
-        else if (['gin', 'fiber', 'echo-go'].includes(fw)) {
-          const cDir = path.join(CACHE_BASE_DIR, 'go');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/root/go/pkg/mod`);
-        }
-        // Ruby gems
-        else if (['rails', 'sinatra'].includes(fw)) {
-          const cDir = path.join(CACHE_BASE_DIR, 'ruby-gems');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/usr/local/bundle`);
-        }
-        // .NET / Blazor NuGet packages
-        else if (['dotnet', 'blazor'].includes(fw)) {
-          const cDir = path.join(CACHE_BASE_DIR, 'nuget');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/root/.nuget`);
-        }
-        // Java Maven local repo
-        else if (['spring', 'quarkus'].includes(fw)) {
-          const cDir = path.join(CACHE_BASE_DIR, 'maven');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/root/.m2`);
-        }
-        // Elixir / Phoenix mix deps
-        else if (fw === 'phoenix') {
-          const cDir = path.join(CACHE_BASE_DIR, 'mix');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/root/.mix`);
-        }
-        // NPM-based frameworks
-        else if (fw !== 'generic' && fw !== 'rust') {
-          const cDir = path.join(CACHE_BASE_DIR, 'npm');
-          if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-          cacheBinds.push(`${path.resolve(cDir)}:/root/.npm`);
+        if (buildAttempts > 0) {
+          logToJob(deploymentId, jobId, `[SELF-HEALING] Retrying build (attempt ${buildAttempts + 1}/${maxRetries + 1})...`);
+        } else {
+          logToJob(deploymentId, jobId, 'Starting compilation/build step...');
         }
 
-        binds.push(...cacheBinds);
-      } catch (cacheErr) {
-        logToJob(deploymentId, jobId, `[!] Failed to mount cache folders: ${cacheErr.message}`);
+        if (dockerAvailable) {
+          const bind = `${path.resolve(targetBuildDir)}:/workspace`;
+          const binds = [bind];
+
+          // Inject dependency package manager caching binds
+          try {
+            const fw = (detection.framework || '').toLowerCase();
+            const cacheBinds = [];
+
+            // PHP (Composer) — map to Composer's home dir
+            if (['php', 'symfony'].includes(fw)) {
+              const cDir = path.join(CACHE_BASE_DIR, 'composer');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/root/.composer`);
+            }
+            // Python (pip/poetry/pipenv)
+            else if (['flask', 'fastapi', 'django'].includes(fw)) {
+              const cDir = path.join(CACHE_BASE_DIR, 'pip');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/root/.cache`);
+            }
+            // Go module cache
+            else if (['gin', 'fiber', 'echo-go'].includes(fw)) {
+              const cDir = path.join(CACHE_BASE_DIR, 'go');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/root/go/pkg/mod`);
+            }
+            // Ruby gems
+            else if (['rails', 'sinatra'].includes(fw)) {
+              const cDir = path.join(CACHE_BASE_DIR, 'ruby-gems');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/usr/local/bundle`);
+            }
+            // .NET / Blazor NuGet packages
+            else if (['dotnet', 'blazor'].includes(fw)) {
+              const cDir = path.join(CACHE_BASE_DIR, 'nuget');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/root/.nuget`);
+            }
+            // Java Maven local repo
+            else if (['spring', 'quarkus'].includes(fw)) {
+              const cDir = path.join(CACHE_BASE_DIR, 'maven');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/root/.m2`);
+            }
+            // Elixir / Phoenix mix deps
+            else if (fw === 'phoenix') {
+              const cDir = path.join(CACHE_BASE_DIR, 'mix');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/root/.mix`);
+            }
+            // NPM-based frameworks
+            else if (fw !== 'generic' && fw !== 'rust') {
+              const cDir = path.join(CACHE_BASE_DIR, 'npm');
+              if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+              cacheBinds.push(`${path.resolve(cDir)}:/root/.npm`);
+            }
+
+            binds.push(...cacheBinds);
+          } catch (cacheErr) {
+            logToJob(deploymentId, jobId, `[!] Failed to mount cache folders: ${cacheErr.message}`);
+          }
+
+          await ensureDockerImage(detection.buildImage, deploymentId, jobId);
+          await runContainerCommand(detection.buildImage, ['sh', '-c', detection.runCommand], binds, deploymentId, jobId, 'COMPILE/BUILD');
+        } else {
+          let hostCmd = detection.runCommand;
+          if (detection.framework === 'rust') {
+            hostCmd = 'cargo build --release';
+          }
+          await runHostCommand(hostCmd, targetBuildDir, deploymentId, jobId, 'COMPILE/BUILD');
+        }
+        buildSuccess = true;
+        break; // Exit the loop on successful build
+      } catch (err) {
+        const buildErrorLogs = err.logs || err.message || String(err) || '';
+        logToJob(deploymentId, jobId, `[SELF-HEALING] Build step failed (attempt ${buildAttempts + 1}/${maxRetries + 1}).`);
+
+        if (buildAttempts >= maxRetries) {
+          logToJob(deploymentId, jobId, `[SELF-HEALING] Reached maximum retry limit (${maxRetries}). Failing build.`);
+          throw err; // throw original compile error to trigger outer catch diagnostics/cleanup
+        }
+
+        // Proactive tsconfig.json relaxation to try and fix TS errors before LLM
+        const tsconfigPath = path.join(targetBuildDir, 'tsconfig.json');
+        if (fs.existsSync(tsconfigPath) && buildAttempts === 0 && (buildErrorLogs.includes('error TS') || buildErrorLogs.includes('TypeScript Compiler Error'))) {
+          logToJob(deploymentId, jobId, `[SELF-HEALING] Proactively relaxing tsconfig.json compiler options to bypass typescript strictness...`);
+          try {
+            const configText = fs.readFileSync(tsconfigPath, 'utf8');
+            const stripJsonComments = (jsonStr) => {
+              return jsonStr.replace(/\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g, (m, g) => g ? "" : m);
+            };
+            const cleaned = stripJsonComments(configText);
+            const tsconfigObj = JSON.parse(cleaned || '{}');
+            
+            if (!tsconfigObj.compilerOptions) {
+              tsconfigObj.compilerOptions = {};
+            }
+            tsconfigObj.compilerOptions.strict = false;
+            tsconfigObj.compilerOptions.noEmitOnError = false;
+            tsconfigObj.compilerOptions.skipLibCheck = true;
+            tsconfigObj.compilerOptions.noImplicitAny = false;
+            tsconfigObj.compilerOptions.strictNullChecks = false;
+            
+            fs.writeFileSync(tsconfigPath, JSON.stringify(tsconfigObj, null, 2), 'utf8');
+            logToJob(deploymentId, jobId, `  ↪ Successfully relaxed tsconfig.json options. Retrying compilation...`);
+            buildAttempts++;
+            continue; // Retry compilation immediately
+          } catch (tsconfigErr) {
+            logToJob(deploymentId, jobId, `  [!] Failed to proactively relax tsconfig.json: ${tsconfigErr.message}`);
+          }
+        }
+
+        logToJob(deploymentId, jobId, `[SELF-HEALING] Intercepted error. Querying LLM to diagnose and generate patches...`);
+        try {
+          const { generateHealingPatches } = require('./llm.service');
+          const workspaceFiles = getWorkspaceSourceFiles(targetBuildDir);
+          const relevantFiles = getRelevantWorkspaceFiles(buildErrorLogs, workspaceFiles);
+          const diagnoses = analyzeLogsAndDiagnose(buildErrorLogs);
+
+          logToJob(deploymentId, jobId, `[SELF-HEALING] Filtered context to ${Object.keys(relevantFiles).length}/${Object.keys(workspaceFiles).length} relevant source file(s).`);
+          logToJob(deploymentId, jobId, `[SELF-HEALING] Querying LLM with compile logs and ${diagnoses.length} diagnostic hint(s)...`);
+          const llmResponse = await generateHealingPatches(buildErrorLogs, relevantFiles, diagnoses);
+
+          // Parse patches using regex
+          const patchRegex = /<patch\s+file=["']([^"']+)["']\s*>([\s\S]*?)<\/patch>/g;
+          let match;
+          const patches = [];
+          const llmPatchedFiles = {};
+          while ((match = patchRegex.exec(llmResponse)) !== null) {
+            const relativePath = match[1];
+            const rawContent = match[2];
+            // Remove one leading newline and one trailing newline if they exist to keep indentation clean
+            const cleanContent = rawContent
+              .replace(/^\r?\n|^\n/, '')
+              .replace(/\r?\n$|\n$/, '');
+            patches.push({ relativePath, content: cleanContent });
+            
+            const normalizedRelPath = relativePath.replace(/\\/g, '/');
+            llmPatchedFiles[normalizedRelPath] = cleanContent;
+          }
+
+          // Unconditional Auto-TS-Ignore for TS errors to guarantee they are bypassed
+          if (buildErrorLogs.includes('error TS') || buildErrorLogs.includes('TypeScript Compiler Error')) {
+            logToJob(deploymentId, jobId, `[SELF-HEALING] Applying Auto-TS-Ignore to bypass fatal TypeScript compilation errors...`);
+            
+            // Extract all TS errors: e.g. Csrc/controllers/blogController.ts(742,12): error TS2339
+            const tsErrorRegex = /([a-zA-Z0-9_\-\.\/]+)\((\d+),\d+\):\s*error TS/g;
+            let match;
+            const filesToPatch = {};
+
+            while ((match = tsErrorRegex.exec(buildErrorLogs)) !== null) {
+              const rawTsPath = match[1];
+              const lineNum = parseInt(match[2], 10);
+              
+              // Clean stray leading characters from tsc TTY output (e.g. Csrc -> src)
+              const srcIdx = rawTsPath.indexOf('src/');
+              const cleanTsPath = srcIdx !== -1 ? rawTsPath.slice(srcIdx) : rawTsPath;
+              const normalizedTsPath = cleanTsPath.replace(/\\/g, '/');
+              
+              // If LLM patched this file in the current iteration, do not apply Auto-TS-Ignore
+              // using old/outdated line numbers. We will let the LLM patch take effect.
+              // If the compiler still fails on the new code, the next compile attempt
+              // will provide the updated line numbers.
+              const isLlmPatched = Object.keys(llmPatchedFiles).some(lpKey => 
+                lpKey.endsWith(normalizedTsPath) || normalizedTsPath.endsWith(lpKey)
+              );
+              if (isLlmPatched) {
+                logToJob(deploymentId, jobId, `  ↪ Skipping Auto-TS-Ignore for LLM-patched file: ${normalizedTsPath} (allowing LLM patch to build first)`);
+                continue;
+              }
+
+              // Find matching workspace file (supporting bidirectional matching due to TTY / Docker workspace path differences)
+              for (const [relPath, content] of Object.entries(relevantFiles)) {
+                const normalizedRelPath = relPath.replace(/\\/g, '/');
+                if (normalizedRelPath.endsWith(normalizedTsPath) || normalizedTsPath.endsWith(normalizedRelPath)) {
+                  if (!filesToPatch[relPath]) filesToPatch[relPath] = { content, linesToIgnore: [] };
+                  filesToPatch[relPath].linesToIgnore.push(lineNum);
+                }
+              }
+            }
+
+            for (const [relPath, data] of Object.entries(filesToPatch)) {
+              let lines = data.content.split(/\r?\n/);
+              // Sort descending to not mess up line numbers when inserting
+              const uniqueLines = [...new Set(data.linesToIgnore)].sort((a, b) => b - a);
+              let applied = false;
+              
+              for (const ln of uniqueLines) {
+                const targetIdx = ln - 1;
+                if (targetIdx >= 0 && targetIdx < lines.length) {
+                  if (!lines[targetIdx - 1]?.includes('@ts-ignore')) {
+                    lines.splice(targetIdx, 0, '    // @ts-ignore');
+                    applied = true;
+                  }
+                }
+              }
+
+              if (applied) {
+                patches.push({ relativePath: relPath, content: lines.join('\n') });
+                logToJob(deploymentId, jobId, `  ↪ Auto-TS-Ignore applied successfully: ${relPath}`);
+              }
+            }
+          }
+
+          if (patches.length === 0) {
+            logToJob(deploymentId, jobId, `[SELF-HEALING] LLM did not propose any file patches. Falling back to default error handler.`);
+            throw new Error('NO_PATCHES');
+          }
+
+          logToJob(deploymentId, jobId, `[SELF-HEALING] LLM generated ${patches.length} patch(es). Applying patches...`);
+          for (const patch of patches) {
+            const resolvedPath = path.join(targetBuildDir, patch.relativePath);
+            
+            // Validate that the target file resides within the workspace target directory (security)
+            if (!resolvedPath.startsWith(path.resolve(targetBuildDir))) {
+              logToJob(deploymentId, jobId, `[SELF-HEALING] [Warning] Rejected attempt to write outside workspace: ${patch.relativePath}`);
+              continue;
+            }
+
+            // Create directories if missing
+            fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+
+            // Create a backup file (.bak) if file exists and has not been backed up yet
+            const backupPath = resolvedPath + '.bak';
+            if (fs.existsSync(resolvedPath) && !fs.existsSync(backupPath)) {
+              fs.copyFileSync(resolvedPath, backupPath);
+            }
+
+            // Write healed file content
+            fs.writeFileSync(resolvedPath, patch.content, 'utf8');
+            logToJob(deploymentId, jobId, `  ↪ Successfully patched: ${patch.relativePath} (${patch.content.length} bytes)`);
+          }
+
+          buildAttempts++;
+        } catch (healErr) {
+          if (healErr.message !== 'NO_PATCHES') {
+            logToJob(deploymentId, jobId, `[SELF-HEALING] [Warning] Skipping self-healing: ${healErr.message}`);
+          }
+          throw err; // throw original compile error to fall back to old workflow
+        }
       }
-
-
-      await ensureDockerImage(detection.buildImage, deploymentId, jobId);
-      await runContainerCommand(detection.buildImage, ['sh', '-c', detection.runCommand], binds, deploymentId, jobId, 'COMPILE/BUILD');
-    } else {
-      let hostCmd = detection.runCommand;
-      if (detection.framework === 'rust') {
-        hostCmd = 'cargo build --release';
-      }
-      await runHostCommand(hostCmd, targetBuildDir, deploymentId, jobId, 'COMPILE/BUILD');
     }
 
     // ── Step 6: Security scans ───────────────────────────────────────────────
