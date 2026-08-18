@@ -21,6 +21,7 @@ const devopsChatSchema = new mongoose.Schema(
           }
         ],
         rolledBack: { type: Boolean, default: false },
+        durationSec: { type: Number },
         createdAt: { type: Date, default: Date.now }
       }
     ]

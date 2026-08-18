@@ -891,10 +891,17 @@ const getWorkspaceFiles = async (req, res) => {
       
       const files = fs.readdirSync(dirPath);
       for (const file of files) {
-        if (file === 'node_modules' || file === '.git' || file === 'dist' || file === 'build') continue;
+        if (['node_modules', '.git', 'dist', 'build', '.venv', '__pycache__', '.security-reports'].includes(file)) continue;
         const fullPath = path.join(dirPath, file);
         const relPath = path.join(relativeDir, file).replace(/\\/g, '/');
-        const isDir = fs.statSync(fullPath).isDirectory();
+        
+        let isDir;
+        try {
+          isDir = fs.statSync(fullPath).isDirectory();
+        } catch (err) {
+          // If stat fails (e.g. permission error, broken symlink), skip this file
+          continue;
+        }
         
         tree.push({
           name: file,
@@ -1386,10 +1393,18 @@ const getFlatWorkspaceFiles = (dirPath, relativeDir = '') => {
   try {
     const files = fs.readdirSync(dirPath);
     for (const file of files) {
-      if (['node_modules', '.git', 'dist', 'build', '.security-reports'].includes(file)) continue;
+      if (['node_modules', '.git', 'dist', 'build', '.venv', '__pycache__', '.security-reports'].includes(file)) continue;
       const fullPath = path.join(dirPath, file);
       const relPath = path.join(relativeDir, file).replace(/\\/g, '/');
-      if (fs.statSync(fullPath).isDirectory()) {
+      
+      let isDir;
+      try {
+        isDir = fs.statSync(fullPath).isDirectory();
+      } catch (err) {
+        continue;
+      }
+      
+      if (isDir) {
         list = list.concat(getFlatWorkspaceFiles(fullPath, relPath));
       } else {
         list.push(relPath);
@@ -1442,8 +1457,10 @@ const executeAgentChat = async (req, res) => {
     }
 
     // Run the ReAct agent chat loop
+    const startTime = Date.now();
     const { runAgentChatLoop } = require('../services/agent-loop.service');
     const result = await runAgentChatLoop(deployment, chatSession, message);
+    const durationSec = parseFloat(((Date.now() - startTime) / 1000).toFixed(1));
 
     // Save final response in database messages archive
     chatSession.messages.push({
@@ -1454,7 +1471,8 @@ const executeAgentChat = async (req, res) => {
       role: 'agent',
       text: result.message,
       pendingAction: result.pendingExec ? { commands: result.commands } : undefined,
-      patches: result.patches
+      patches: result.patches,
+      durationSec
     });
     await chatSession.save();
 
@@ -1463,7 +1481,8 @@ const executeAgentChat = async (req, res) => {
       pendingExec: result.pendingExec, 
       commands: result.commands, 
       patches: result.patches, 
-      chatId: result.chatId 
+      chatId: result.chatId,
+      durationSec
     });
   } catch (error) {
     console.error('Error in agent chat:', error);

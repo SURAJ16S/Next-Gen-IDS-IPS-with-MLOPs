@@ -419,6 +419,16 @@ export default function Agent() {
   const [isAgentTyping, setIsAgentTyping] = useState(false);
   const [expandedDiffs, setExpandedDiffs] = useState({});
 
+  // Page-level WebSocket connection for streaming thoughts
+  const socketRef = useRef(null);
+  useEffect(() => {
+    const socket = io('http://localhost:5000');
+    socketRef.current = socket;
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
   // Draggable chat sidebar
   const [chatSidebarWidth, setChatSidebarWidth] = useState(320);
   const isDraggingRef = useRef(false);
@@ -634,7 +644,17 @@ export default function Agent() {
 
     if (!customMessage) setChatInput('');
     
-    setChatMessages(prev => [...prev, { role: 'user', text }]);
+    // We add user message AND a placeholder agent streaming message
+    setChatMessages(prev => [
+      ...prev, 
+      { role: 'user', text },
+      { 
+        role: 'agent', 
+        text: '<thought>Initializing reasoning engine...</thought>', 
+        isStreaming: true, 
+        durationSec: 0 
+      }
+    ]);
     setIsAgentTyping(true);
 
     if (abortControllerRef.current) {
@@ -643,21 +663,95 @@ export default function Agent() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
+    // Start local timer for the live progress indicator
+    const startStreamingTime = Date.now();
+    const timerInterval = setInterval(() => {
+      const elapsed = parseFloat(((Date.now() - startStreamingTime) / 1000).toFixed(1));
+      setChatMessages(prev => {
+        const copy = [...prev];
+        const lastIdx = copy.length - 1;
+        if (lastIdx >= 0 && copy[lastIdx].role === 'agent' && copy[lastIdx].isStreaming) {
+          copy[lastIdx] = {
+            ...copy[lastIdx],
+            durationSec: elapsed
+          };
+        }
+        return copy;
+      });
+    }, 200);
+
+    // Setup socket listener for agent iterations
+    const listener = (data) => {
+      setChatMessages(prev => {
+        const copy = [...prev];
+        const lastIdx = copy.length - 1;
+        if (lastIdx >= 0 && copy[lastIdx].role === 'agent' && copy[lastIdx].isStreaming) {
+          let updatedText = data.assistantText;
+          if (data.executionLogs) {
+            const logsFormatted = `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash\n${data.executionLogs}\n\`\`\``;
+            if (updatedText.includes('</thought>')) {
+              updatedText = updatedText.replace('</thought>', `${logsFormatted}\n</thought>`);
+            } else if (updatedText.includes('</thinking>')) {
+              updatedText = updatedText.replace('</thinking>', `${logsFormatted}\n</thinking>`);
+            } else {
+              updatedText += `\n\n<thought>${logsFormatted}</thought>`;
+            }
+          }
+          copy[lastIdx] = {
+            ...copy[lastIdx],
+            text: updatedText
+          };
+        }
+        return copy;
+      });
+    };
+
+    // Setup socket listener for token chunks
+    const tokenListener = (data) => {
+      setChatMessages(prev => {
+        const copy = [...prev];
+        const lastIdx = copy.length - 1;
+        if (lastIdx >= 0 && copy[lastIdx].role === 'agent' && copy[lastIdx].isStreaming) {
+          let currentText = copy[lastIdx].text;
+          if (currentText === '<thought>Initializing reasoning engine...</thought>') {
+            currentText = '';
+          }
+          copy[lastIdx] = {
+            ...copy[lastIdx],
+            text: currentText + data.token
+          };
+        }
+        return copy;
+      });
+    };
+
+    socketRef.current?.on(`agent:thinking:${selectedId}`, listener);
+    socketRef.current?.on(`agent:token:${selectedId}`, tokenListener);
+
     try {
       const res = await executeAgentChat(selectedId, text, activeChatId, { signal: controller.signal });
-      const { message, pendingExec, commands, chatId, patches } = res.data;
+      const { message, pendingExec, commands, chatId, patches, durationSec } = res.data;
       
       if (chatId && chatId !== activeChatId) {
         setActiveChatId(chatId);
       }
       
-      setChatMessages(prev => [...prev, { 
-        role: 'agent', 
-        text: message, 
-        pendingAction: pendingExec ? { commands } : null,
-        patches: patches && patches.length > 0 ? patches : null,
-        rolledBack: false
-      }]);
+      setChatMessages(prev => {
+        const copy = [...prev];
+        const lastIdx = copy.length - 1;
+        if (lastIdx >= 0 && copy[lastIdx].role === 'agent') {
+          copy[lastIdx] = {
+            role: 'agent',
+            text: message,
+            pendingAction: pendingExec ? { commands } : null,
+            patches: patches && patches.length > 0 ? patches : null,
+            rolledBack: false,
+            durationSec: durationSec || parseFloat(((Date.now() - startStreamingTime) / 1000).toFixed(1)),
+            isStreaming: false
+          };
+        }
+        return copy;
+      });
 
       // Reload chats list to get new titles without selecting
       const listRes = await getChatsList(selectedId);
@@ -673,12 +767,45 @@ export default function Agent() {
         handleSelectCollection(activeCollection);
       }
     } catch (err) {
+      clearInterval(timerInterval);
+      socketRef.current?.off(`agent:thinking:${selectedId}`, listener);
+      socketRef.current?.off(`agent:token:${selectedId}`, tokenListener);
+
       if (err.name === 'CanceledError' || axios.isCancel(err)) {
-        setChatMessages(prev => [...prev, { role: 'agent', text: '⚠️ *Thinking paused/execution stopped by user.*' }]);
+        setChatMessages(prev => {
+          const copy = [...prev];
+          const lastIdx = copy.length - 1;
+          if (lastIdx >= 0 && copy[lastIdx].role === 'agent') {
+            copy[lastIdx] = {
+              role: 'agent',
+              text: '⚠️ *Thinking paused/execution stopped by user.*',
+              isStreaming: false
+            };
+          } else {
+            copy.push({ role: 'agent', text: '⚠️ *Thinking paused/execution stopped by user.*' });
+          }
+          return copy;
+        });
       } else {
-        setChatMessages(prev => [...prev, { role: 'agent', text: `Failed to talk to DevOps Agent: ${err.message}` }]);
+        setChatMessages(prev => {
+          const copy = [...prev];
+          const lastIdx = copy.length - 1;
+          if (lastIdx >= 0 && copy[lastIdx].role === 'agent') {
+            copy[lastIdx] = {
+              role: 'agent',
+              text: `Failed to talk to DevOps Agent: ${err.message}`,
+              isStreaming: false
+            };
+          } else {
+            copy.push({ role: 'agent', text: `Failed to talk to DevOps Agent: ${err.message}` });
+          }
+          return copy;
+        });
       }
     } finally {
+      clearInterval(timerInterval);
+      socketRef.current?.off(`agent:thinking:${selectedId}`, listener);
+      socketRef.current?.off(`agent:token:${selectedId}`, tokenListener);
       if (abortControllerRef.current === controller) {
         abortControllerRef.current = null;
       }
@@ -1303,7 +1430,10 @@ export default function Agent() {
           borderRadius: '8px', 
           border: '1px solid var(--border-subtle)', 
           display: 'flex', 
-          flexDirection: 'column'
+          flexDirection: 'column',
+          height: '100%',
+          minHeight: 0,
+          overflow: 'hidden'
         }}>
           {/* Chat header */}
           <div style={{ 
@@ -1441,7 +1571,8 @@ export default function Agent() {
                     alignItems: 'flex-start',
                     gap: '8px',
                     alignSelf: isUser ? 'flex-end' : 'flex-start',
-                    maxWidth: '85%'
+                    maxWidth: '85%',
+                    minWidth: 0
                   }}
                 >
                   {/* Undo Button on the LEFT of user query bubbles */}
@@ -1481,7 +1612,8 @@ export default function Agent() {
                       display: 'flex',
                       flexDirection: 'column',
                       gap: '8px',
-                      flex: 1
+                      flex: 1,
+                      minWidth: 0
                     }}
                   >
                     {/* Diff pill + Rollback button for agent messages with patches */}
@@ -1664,17 +1796,25 @@ export default function Agent() {
                       if (!msg.text) return null;
                       const { thoughts, cleanText } = parseThoughts(msg.text);
                       if (thoughts) {
+                        const duration = msg.durationSec !== undefined ? msg.durationSec : null;
+                        const summaryText = msg.isStreaming 
+                          ? `Thinking Process (Worked for ${duration || 0}s...)`
+                          : `Thinking Process (Worked for ${duration || 0}s)`;
+
                         return (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            <details style={{
-                              background: 'rgba(0,0,0,0.15)',
-                              border: '1px solid var(--border-subtle)',
-                              borderRadius: '6px',
-                              padding: '6px 10px',
-                              fontSize: '12px'
-                            }}>
+                            <details 
+                              open={msg.isStreaming}
+                              style={{
+                                background: 'rgba(0,0,0,0.15)',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: '6px',
+                                padding: '6px 10px',
+                                fontSize: '12px'
+                              }}
+                            >
                               <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontWeight: 500, outline: 'none' }}>
-                                Thinking Process...
+                                {summaryText}
                               </summary>
                               <div style={{ marginTop: '6px', whiteSpace: 'pre-wrap', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: '11px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '6px' }}>
                                 {thoughts}

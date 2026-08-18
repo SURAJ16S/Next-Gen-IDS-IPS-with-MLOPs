@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: devops-system
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      - job_name: 'devops-backend'
+        static_configs:
+          - targets: ['host.minikube.internal:5000', '172.17.0.1:5000']
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-prometheus
+  namespace: devops-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: devops-prometheus
+  template:
+    metadata:
+      labels:
+        app: devops-prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        ports:
+        - containerPort: 9090
+          name: prometheus
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/prometheus/prometheus.yml
+          subPath: prometheus.yml
+      volumes:
+      - name: config-volume
+        configMap:
+          name: prometheus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devops-prometheus-service
+  namespace: devops-system
+spec:
+  selector:
+    app: devops-prometheus
+  ports:
+  - protocol: TCP
+    port: 9090
+    targetPort: 9090
