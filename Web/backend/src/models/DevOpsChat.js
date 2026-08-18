@@ -11,6 +11,16 @@ const devopsChatSchema = new mongoose.Schema(
         pendingAction: {
           commands: [{ type: String }]
         },
+        patches: [
+          {
+            file: { type: String },
+            previousContent: { type: String },
+            isNewFile: { type: Boolean },
+            added: { type: Number },
+            removed: { type: Number }
+          }
+        ],
+        rolledBack: { type: Boolean, default: false },
         createdAt: { type: Date, default: Date.now }
       }
     ]

@@ -9,11 +9,47 @@ const upload = require('../middleware/upload.middleware');
 const { runPipeline } = require('../services/pipeline-runner.service');
 const { suggestPort, stopPreview, getRunningPreviews } = require('../services/process-manager.service');
 
+const cleanDockerOutput = (rawBuffer) => {
+  if (!Buffer.isBuffer(rawBuffer)) {
+    rawBuffer = Buffer.from(rawBuffer);
+  }
+  let offset = 0;
+  let cleanText = '';
+  
+  while (offset < rawBuffer.length) {
+    if (offset + 8 <= rawBuffer.length) {
+      const type = rawBuffer[offset];
+      if (type === 1 || type === 2) {
+        const size = rawBuffer.readUInt32BE(offset + 4);
+        if (size > 0 && offset + 8 + size <= rawBuffer.length) {
+          cleanText += rawBuffer.toString('utf8', offset + 8, offset + 8 + size);
+          offset += 8 + size;
+          continue;
+        }
+      }
+    }
+    cleanText += rawBuffer.toString('utf8', offset, offset + 1);
+    offset += 1;
+  }
+  return cleanText;
+};
+
 // ─── Existing handlers ────────────────────────────────────────────────────────
 
 const getDeployments = async (req, res) => {
   try {
-    const deployments = await Deployment.find({}, '-envFiles.content')
+    const query = {
+      $or: [
+        { deployedBy: req.user._id },
+        {
+          deploymentType: 'github',
+          collaborators: req.user.githubUsername || '__NO_USERNAME__',
+          'githubPermissions.allowCollaboratorVisibility': { $ne: false }
+        }
+      ]
+    };
+
+    const deployments = await Deployment.find(query, '-envFiles.content -buildLogs')
       .populate('deployedBy', 'firstName lastName email role')
       .sort({ createdAt: -1 });
     res.json(deployments);
@@ -116,6 +152,17 @@ const getDeploymentStatus = async (req, res) => {
   try {
     const deployment = await Deployment.findById(req.params.id);
     if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    
+    let buildLogs = [];
+    try {
+      const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+      const logFilePath = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId, 'pipeline.log');
+      if (fs.existsSync(logFilePath)) {
+        const fileContent = fs.readFileSync(logFilePath, 'utf8');
+        buildLogs = fileContent.split('\n').filter(Boolean);
+      }
+    } catch (_) {}
+
     res.json({
       id: deployment._id,
       projectName: deployment.projectName,
@@ -123,7 +170,7 @@ const getDeploymentStatus = async (req, res) => {
       architectureDetected: deployment.architectureDetected,
       status: deployment.status,
       vulnerabilitiesFound: deployment.vulnerabilitiesFound,
-      buildLogs: deployment.buildLogs,
+      buildLogs: buildLogs.length > 0 ? buildLogs : (deployment.buildLogs || []),
       scanReport: deployment.scanReport,
       previewPort: deployment.previewPort,
       previewStatus: deployment.previewStatus,
@@ -258,7 +305,7 @@ const deleteDeployment = async (req, res) => {
     // 1. Stop any running preview container/process
     const { stopPreview } = require('../services/process-manager.service');
     try {
-      await stopPreview(deployment.jobId);
+      await stopPreview(deployment.jobId, true);
     } catch (_) {}
 
     const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
@@ -568,7 +615,7 @@ const changeDeploymentPort = async (req, res) => {
 
     // Stop current preview if running
     const { stopPreview, spawnPreview } = require('../services/process-manager.service');
-    await stopPreview(deployment.jobId);
+    await stopPreview(deployment.jobId, true);
 
     // Update DB
     deployment.previewPort = newPort;
@@ -584,7 +631,7 @@ const changeDeploymentPort = async (req, res) => {
           let content = envFile.content || '';
           
           // Replace port variable values
-          content = content.replace(/(PORT|SERVER_PORT|APP_PORT|HTTP_PORT)=\d+/gi, `$1=${newPort}`);
+          content = content.replace(/\b(PORT|SERVER_PORT|APP_PORT|HTTP_PORT)=\d+/gi, `$1=${newPort}`);
           
           // Replace local URLs referring to the old port
           if (oldPort) {
@@ -640,27 +687,92 @@ const changeDeploymentPort = async (req, res) => {
 
     await deployment.save();
 
-    // 3. Trigger rebuild and restart the preview with the new configuration
-    const { detectFramework } = require('../services/framework-detector.service');
-    const targetSubfolder = deployment.targetSubfolder || '';
-    const detection = detectFramework(extractDir, targetSubfolder);
-    const targetBuildDir = detection.targetDir;
+    const isCurrentlyRunning = deployment.previewStatus === 'running';
 
-    // Trigger preview (compiles client/server in background)
-    spawnPreview(deployment.jobId, deployment._id, targetBuildDir, detection.framework, newPort)
-      .catch(err => {
-        console.error(`Failed to restart preview for job ${deployment.jobId}:`, err);
+    if (isCurrentlyRunning) {
+      // 3. Trigger rebuild and restart the preview with the new configuration
+      const { detectFramework } = require('../services/framework-detector.service');
+      const targetSubfolder = deployment.targetSubfolder || '';
+      const detection = detectFramework(extractDir, targetSubfolder);
+      const targetBuildDir = detection.targetDir;
+
+      // Trigger preview (compiles client/server in background)
+      spawnPreview(deployment.jobId, deployment._id, targetBuildDir, detection.framework, newPort)
+        .catch(err => {
+          console.error(`Failed to restart preview for job ${deployment.jobId}:`, err);
+        });
+
+      res.json({ 
+        message: 'Port updated successfully. Rebuilding and restarting preview...', 
+        port: newPort,
+        deployment 
       });
-
-    res.json({ 
-      message: 'Port updated successfully. Rebuilding and restarting preview...', 
-      port: newPort,
-      deployment 
-    });
+    } else {
+      res.json({ 
+        message: 'Port updated successfully in database and workspace config.', 
+        port: newPort,
+        deployment 
+      });
+    }
   } catch (error) {
     console.error('Error changing port:', error);
     res.status(500).json({ message: error.message });
   }
+};
+
+const getRemoteMongoUri = async (deployment) => {
+  if (deployment && deployment.jobId) {
+    try {
+      const Docker = require('dockerode');
+      const activeDocker = new Docker();
+      const previewContainer = activeDocker.getContainer(`devops-preview-${deployment.jobId}`);
+      const inspect = await previewContainer.inspect();
+      const envVars = inspect.Config.Env || [];
+      for (const env of envVars) {
+        const match = env.match(/^MONGODB_URI=(.+)$/i);
+        if (match) {
+          const uri = match[1].trim();
+          if (!uri.includes('localhost') && !uri.includes('127.0.0.1') && !uri.includes('devops-db-mongodb')) {
+            return uri;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (!deployment || !deployment.envFiles || deployment.envFiles.length === 0) return null;
+  const sortedEnvFiles = [...deployment.envFiles].sort((a, b) => {
+    const aLower = (a.path || '').toLowerCase();
+    const bLower = (b.path || '').toLowerCase();
+    const aIsServer = aLower.includes('server') || aLower.includes('backend');
+    const bIsServer = bLower.includes('server') || bLower.includes('backend');
+    if (aIsServer && !bIsServer) return -1;
+    if (!aIsServer && bIsServer) return 1;
+    return 0;
+  });
+
+  for (const envFile of sortedEnvFiles) {
+    if (!envFile.content) continue;
+    const lines = envFile.content.split('\n');
+    for (const line of lines) {
+      const match = line.match(/^\s*MONGODB_URI\s*=\s*(.+)$/i);
+      if (match) {
+        let uri = match[1].trim();
+        if ((uri.startsWith('"') && uri.endsWith('"')) || (uri.startsWith("'") && uri.endsWith("'"))) {
+          uri = uri.slice(1, -1);
+        }
+        const commentIdx = uri.indexOf('#');
+        if (commentIdx !== -1) {
+          uri = uri.substring(0, commentIdx).trim();
+        }
+        if (uri.includes('localhost') || uri.includes('127.0.0.1') || uri.includes('devops-db-mongodb')) {
+          continue;
+        }
+        return uri;
+      }
+    }
+  }
+  return null;
 };
 
 
@@ -737,13 +849,16 @@ const executeDeploymentDbQuery = async (req, res) => {
 
     const delimiter = '__DB_QUERY_EOF__';
     if (dbType === 'mysql') {
-      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\nmysql -u root -D "${dbName}" < /tmp/run.sql`];
+      const wrappedQuery = `START TRANSACTION;\n${query}\nCOMMIT;`;
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${wrappedQuery}\n${delimiter}\nmysql -u root --bail -D "${dbName}" < /tmp/run.sql`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else if (dbType === 'postgres') {
-      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\npsql -U postgres -d "${dbName}" < /tmp/run.sql`];
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\npsql -U postgres -d "${dbName}" --single-transaction < /tmp/run.sql`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else if (dbType === 'mongodb') {
-      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.js\n${query}\n${delimiter}\nmongosh "${dbName}" --quiet /tmp/run.js`];
+      const remoteUri = await getRemoteMongoUri(deployment);
+      const connectionString = remoteUri || dbName;
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/run.js`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else {
       return res.status(400).json({ message: `Unsupported database type: ${dbType}` });
@@ -844,6 +959,15 @@ const saveWorkspaceFile = async (req, res) => {
     if (!resolvedPath.startsWith(path.resolve(extractDir))) {
       return res.status(403).json({ message: 'Access denied' });
     }
+
+    const { scanContentForCredentials } = require('../services/credential-scanner.service');
+    const findings = scanContentForCredentials(content || '', filePath);
+    if (findings.length > 0) {
+      return res.status(400).json({
+        message: `Security Blocked: Potential credential/secret leak detected in ${filePath}.`,
+        findings
+      });
+    }
     
     fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
     fs.writeFileSync(resolvedPath, content || '', 'utf8');
@@ -880,21 +1004,26 @@ const getDbCollections = async (req, res) => {
     }
     
     const runExec = async (cmd) => {
-      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false });
       const stream = await exec.start();
       return new Promise((resolve) => {
-        let output = '';
-        stream.on('data', chunk => { output += chunk.toString(); });
-        stream.on('end', () => resolve(output.trim()));
+        const chunks = [];
+        stream.on('data', chunk => { chunks.push(chunk); });
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer).trim());
+        });
         stream.on('error', () => resolve(''));
       });
     };
     
     const dbName = 'preview_db';
     if (dbType === 'mongodb') {
+      const remoteUri = await getRemoteMongoUri(deployment);
+      const connectionString = remoteUri || dbName;
       const delimiter = '__DB_QUERY_EOF__';
       const query = `printjson(db.getCollectionNames())`;
-      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/collections.js\n${query}\n${delimiter}\nmongosh "${dbName}" --quiet /tmp/collections.js`];
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/collections.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/collections.js`];
       const output = await runExec(cmd);
       try {
         const collections = JSON.parse(output);
@@ -918,6 +1047,38 @@ const getDbCollections = async (req, res) => {
       const output = await runExec(cmd);
       const tables = output.split(/\s+/).map(s => s.trim()).filter(Boolean);
       return res.json(tables);
+    } else if (dbType === 'mssql') {
+      const query = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' FOR JSON PATH;";
+      const cmd = ['/opt/mssql-tools/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Sa_password123', '-C', '-d', dbName, '-Q', query, '-y', '0'];
+      const output = await runExec(cmd);
+      try {
+        const startIdx = output.indexOf('[');
+        const endIdx = output.lastIndexOf(']');
+        if (startIdx !== -1 && endIdx !== -1) {
+          const arr = JSON.parse(output.substring(startIdx, endIdx + 1));
+          return res.json(arr.map(t => t.TABLE_NAME));
+        }
+      } catch (_) {}
+      const lines = output.split('\n').map(s => s.trim()).filter(s => s && !s.startsWith('---') && !s.startsWith('TABLE_NAME'));
+      return res.json(lines);
+    } else if (dbType === 'oracle') {
+      const query = "SET PAGESIZE 0 FEEDBACK OFF HEADING OFF;\nSELECT table_name FROM user_tables;\nEXIT;";
+      const delimiter = '__DB_QUERY_EOF__';
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/collections.sql\n${query}\n${delimiter}\nsqlplus -S system/oracle_password123@localhost/XE @/tmp/collections.sql`];
+      const output = await runExec(cmd);
+      const lines = output.split('\n').map(s => s.trim()).filter(Boolean);
+      return res.json(lines);
+    } else if (dbType === 'cassandra') {
+      const query = `SELECT table_name FROM system_schema.tables WHERE keyspace_name = '${dbName}';`;
+      const cmd = ['cqlsh', '-e', query];
+      const output = await runExec(cmd);
+      const lines = output.split('\n').slice(3).map(s => s.trim()).filter(s => s && !s.startsWith('---') && !s.startsWith('('));
+      return res.json(lines);
+    } else if (dbType === 'redis') {
+      const cmd = ['redis-cli', 'KEYS', '*'];
+      const output = await runExec(cmd);
+      const lines = output.split('\n').map(s => s.trim()).filter(Boolean);
+      return res.json(lines);
     }
     res.json([]);
   } catch (error) {
@@ -950,25 +1111,30 @@ const getDbCollectionData = async (req, res) => {
     }
     
     const runExec = async (cmd) => {
-      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false });
       const stream = await exec.start();
       return new Promise((resolve) => {
-        let output = '';
-        stream.on('data', chunk => { output += chunk.toString(); });
-        stream.on('end', () => resolve(output.trim()));
+        const chunks = [];
+        stream.on('data', chunk => { chunks.push(chunk); });
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer).trim());
+        });
         stream.on('error', () => resolve(''));
       });
     };
     
     const dbName = 'preview_db';
     if (dbType === 'mongodb') {
+      const remoteUri = await getRemoteMongoUri(deployment);
+      const connectionString = remoteUri || dbName;
       const delimiter = '__DB_QUERY_EOF__';
-      const query = `printjson(db.${collection}.find().limit(50).toArray())`;
-      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/docs.js\n${query}\n${delimiter}\nmongosh "${dbName}" --quiet /tmp/docs.js`];
+      const query = `print(JSON.stringify(db.${collection}.find().limit(50).toArray()))`;
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/docs.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/docs.js`];
       const output = await runExec(cmd);
       try {
         const docs = JSON.parse(output);
-        return res.json(docs);
+        return res.json(maskPIIData(docs));
       } catch (_) {
         return res.json([]);
       }
@@ -984,14 +1150,14 @@ const getDbCollectionData = async (req, res) => {
         headers.forEach((h, i) => { obj[h] = values[i] || null; });
         return obj;
       });
-      return res.json(rows);
+      return res.json(maskPIIData(rows));
     } else if (dbType === 'postgres') {
       const query = `SELECT json_agg(t) FROM (SELECT * FROM "${collection}" LIMIT 50) t;`;
       const cmd = ['psql', '-U', 'postgres', '-d', dbName, '-t', '-c', query];
       const output = await runExec(cmd);
       try {
         const data = JSON.parse(output);
-        return res.json(data || []);
+        return res.json(maskPIIData(data || []));
       } catch (_) {
         return res.json([]);
       }
@@ -999,10 +1165,81 @@ const getDbCollectionData = async (req, res) => {
       const cmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 -header -json "$sqliteFile" "select * from \`${collection}\` limit 50;"`];
       const output = await runExec(cmd);
       try {
-        return res.json(JSON.parse(output) || []);
+        return res.json(maskPIIData(JSON.parse(output) || []));
       } catch (_) {
         return res.json([]);
       }
+    } else if (dbType === 'mssql') {
+      const query = `SELECT TOP 50 * FROM [${collection}] FOR JSON PATH;`;
+      const cmd = ['/opt/mssql-tools/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Sa_password123', '-C', '-d', dbName, '-Q', query, '-y', '0'];
+      const output = await runExec(cmd);
+      try {
+        const startIdx = output.indexOf('[');
+        const endIdx = output.lastIndexOf(']');
+        if (startIdx !== -1 && endIdx !== -1) {
+          const arr = JSON.parse(output.substring(startIdx, endIdx + 1));
+          return res.json(maskPIIData(arr || []));
+        }
+      } catch (_) {}
+      return res.json([]);
+    } else if (dbType === 'oracle') {
+      const query = `SET PAGESIZE 0 FEEDBACK OFF HEADING OFF;\nSELECT * FROM ${collection} FETCH FIRST 50 ROWS ONLY;\nEXIT;`;
+      const delimiter = '__DB_QUERY_EOF__';
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/query.sql\n${query}\n${delimiter}\nsqlplus -S system/oracle_password123@localhost/XE @/tmp/query.sql`];
+      const output = await runExec(cmd);
+      const lines = output.split('\n').map(s => s.trim()).filter(Boolean);
+      return res.json(lines.map(line => ({ record: line })));
+    } else if (dbType === 'cassandra') {
+      const query = `SELECT * FROM ${collection} LIMIT 50;`;
+      const cmd = ['cqlsh', '-e', query];
+      const output = await runExec(cmd);
+      const lines = output.split('\n').filter(Boolean);
+      if (lines.length <= 3) return res.json([]);
+      const headers = lines[1].split('|').map(s => s.trim());
+      const rows = lines.slice(3).map(line => {
+        const values = line.split('|').map(s => s.trim());
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = values[i] || null; });
+        return obj;
+      });
+      return res.json(maskPIIData(rows));
+    } else if (dbType === 'redis') {
+      const typeCmd = ['redis-cli', 'TYPE', collection];
+      const type = await runExec(typeCmd);
+      if (type === 'string') {
+        const valCmd = ['redis-cli', 'GET', collection];
+        const val = await runExec(valCmd);
+        return res.json([{ key: collection, type: 'string', value: val }]);
+      } else if (type === 'hash') {
+        const valCmd = ['redis-cli', 'HGETALL', collection];
+        const valOutput = await runExec(valCmd);
+        const lines = valOutput.split('\n').map(s => s.trim()).filter(Boolean);
+        const obj = {};
+        for (let i = 0; i < lines.length; i += 2) {
+          if (lines[i]) obj[lines[i]] = lines[i+1] || null;
+        }
+        return res.json([obj]);
+      } else if (type === 'list') {
+        const valCmd = ['redis-cli', 'LRANGE', collection, '0', '50'];
+        const valOutput = await runExec(valCmd);
+        const lines = valOutput.split('\n').map(s => s.trim()).filter(Boolean);
+        return res.json(lines.map((val, idx) => ({ index: idx, value: val })));
+      } else if (type === 'set') {
+        const valCmd = ['redis-cli', 'SMEMBERS', collection];
+        const valOutput = await runExec(valCmd);
+        const lines = valOutput.split('\n').map(s => s.trim()).filter(Boolean);
+        return res.json(lines.map(val => ({ value: val })));
+      } else if (type === 'zset') {
+        const valCmd = ['redis-cli', 'ZRANGE', collection, '0', '50', 'WITHSCORES'];
+        const valOutput = await runExec(valCmd);
+        const lines = valOutput.split('\n').map(s => s.trim()).filter(Boolean);
+        const arr = [];
+        for (let i = 0; i < lines.length; i += 2) {
+          if (lines[i]) arr.push({ value: lines[i], score: lines[i+1] || null });
+        }
+        return res.json(arr);
+      }
+      return res.json([]);
     }
     res.json([]);
   } catch (error) {
@@ -1037,21 +1274,33 @@ const insertDbRecord = async (req, res) => {
     }
     
     const runExec = async (cmd) => {
-      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true });
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false });
       const stream = await exec.start();
       return new Promise((resolve) => {
-        let output = '';
-        stream.on('data', chunk => { output += chunk.toString(); });
-        stream.on('end', () => resolve(output.trim()));
+        const chunks = [];
+        stream.on('data', chunk => { chunks.push(chunk); });
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer).trim());
+        });
         stream.on('error', () => resolve(''));
       });
     };
     
     const dbName = 'preview_db';
+
+    try {
+      await validateDbRecord(container, dbType, dbName, collection, record, deployment);
+    } catch (valErr) {
+      return res.status(400).json({ message: `Validation Failed: ${valErr.message}` });
+    }
+
     if (dbType === 'mongodb') {
+      const remoteUri = await getRemoteMongoUri(deployment);
+      const connectionString = remoteUri || dbName;
       const delimiter = '__DB_QUERY_EOF__';
-      const query = `printjson(db.${collection}.insertOne(${JSON.stringify(record)}))`;
-      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/insert.js\n${query}\n${delimiter}\nmongosh "${dbName}" --quiet /tmp/insert.js`];
+      const query = `print(JSON.stringify(db.${collection}.insertOne(${JSON.stringify(record)})))`;
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/insert.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/insert.js`];
       const output = await runExec(cmd);
       return res.json({ success: true, output });
     } else if (dbType === 'mysql' || dbType === 'mariadb' || dbType === 'postgres' || dbType === 'sqlite') {
@@ -1076,6 +1325,53 @@ const insertDbRecord = async (req, res) => {
       
       const output = await runExec(cmd);
       return res.json({ success: true, output });
+    } else if (dbType === 'mssql') {
+      const keys = Object.keys(record);
+      const values = Object.values(record).map(val => {
+        if (val === null) return 'NULL';
+        if (typeof val === 'number') return val;
+        return `'${String(val).replace(/'/g, "''")}'`;
+      });
+      const sql = `INSERT INTO [${collection}] (${keys.map(k => `[${k}]`).join(', ')}) VALUES (${values.join(', ')});`;
+      const cmd = ['/opt/mssql-tools/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Sa_password123', '-C', '-d', dbName, '-Q', sql];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'oracle') {
+      const keys = Object.keys(record);
+      const values = Object.values(record).map(val => {
+        if (val === null) return 'NULL';
+        if (typeof val === 'number') return val;
+        return `'${String(val).replace(/'/g, "''")}'`;
+      });
+      const sql = `INSERT INTO ${collection} (${keys.join(', ')}) VALUES (${values.join(', ')});\nCOMMIT;\nEXIT;`;
+      const delimiter = '__DB_QUERY_EOF__';
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/insert.sql\n${sql}\n${delimiter}\nsqlplus -S system/oracle_password123@localhost/XE @/tmp/insert.sql`];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'cassandra') {
+      const keys = Object.keys(record);
+      const values = Object.values(record).map(val => {
+        if (val === null) return 'NULL';
+        if (typeof val === 'number') return val;
+        return `'${String(val).replace(/'/g, "''")}'`;
+      });
+      const sql = `INSERT INTO ${collection} (${keys.join(', ')}) VALUES (${values.join(', ')});`;
+      const cmd = ['cqlsh', '-e', sql];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'redis') {
+      let cmd = [];
+      const fields = Object.keys(record);
+      if (fields.length === 1 && fields[0] === 'value') {
+        cmd = ['redis-cli', 'SET', collection, String(record.value)];
+      } else {
+        cmd = ['redis-cli', 'HSET', collection];
+        fields.forEach(f => {
+          cmd.push(f, String(record[f]));
+        });
+      }
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
     }
     
     res.status(400).json({ message: 'Unsupported database type' });
@@ -1084,15 +1380,50 @@ const insertDbRecord = async (req, res) => {
   }
 };
 
+const getFlatWorkspaceFiles = (dirPath, relativeDir = '') => {
+  let list = [];
+  if (!fs.existsSync(dirPath)) return list;
+  try {
+    const files = fs.readdirSync(dirPath);
+    for (const file of files) {
+      if (['node_modules', '.git', 'dist', 'build', '.security-reports'].includes(file)) continue;
+      const fullPath = path.join(dirPath, file);
+      const relPath = path.join(relativeDir, file).replace(/\\/g, '/');
+      if (fs.statSync(fullPath).isDirectory()) {
+        list = list.concat(getFlatWorkspaceFiles(fullPath, relPath));
+      } else {
+        list.push(relPath);
+      }
+    }
+  } catch (_) {}
+  return list;
+};
+
+const isReadOnlyCommand = (command) => {
+  if (!command || typeof command !== 'string') return false;
+  const cmd = command.toLowerCase().trim();
+  
+  if (/[><]/.test(cmd)) return false;
+  
+  const subParts = cmd.split(/[;&|]/).map(s => s.trim()).filter(Boolean);
+  if (subParts.length === 0) return false;
+  
+  const readKeywords = ['cat', 'ls', 'find', 'grep', 'pwd', 'head', 'tail', 'echo', 'printenv', 'file', 'stat', 'which', 'type', 'du', 'df'];
+  for (const part of subParts) {
+    const firstWord = part.split(/\s+/)[0];
+    if (!readKeywords.includes(firstWord)) {
+      return false;
+    }
+  }
+  return true;
+};
+
 // ─── AI DevOps Agent Chat-Exec Handlers ────────────────────────────────────────
 
 const executeAgentChat = async (req, res) => {
   try {
     const deployment = await Deployment.findById(req.params.id);
     if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
-    
-    const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
-    const extractDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId);
     
     const { message, chatId } = req.body;
     if (!message) return res.status(400).json({ message: 'Message is required' });
@@ -1110,218 +1441,98 @@ const executeAgentChat = async (req, res) => {
       await chatSession.save();
     }
 
-    // Read package.json to understand workspace dependencies
-    let pkgDetails = 'No package.json found';
-    try {
-      const pkgPath = path.join(extractDir, 'package.json');
-      if (fs.existsSync(pkgPath)) {
-        pkgDetails = fs.readFileSync(pkgPath, 'utf8');
-      } else {
-        const serverPkgPath = path.join(extractDir, 'server', 'package.json');
-        if (fs.existsSync(serverPkgPath)) {
-          pkgDetails = fs.readFileSync(serverPkgPath, 'utf8');
-        }
-      }
-    } catch (_) {}
+    // Run the ReAct agent chat loop
+    const { runAgentChatLoop } = require('../services/agent-loop.service');
+    const result = await runAgentChatLoop(deployment, chatSession, message);
 
-    const axios = require('axios');
-    const systemPrompt = `You are a DevOps AI Developer Assistant inside a container workspace environment.
-You help developers write code, design databases, and perform operational tasks like database seeding, record insertion, or workspace script execution.
-
-Current context:
-- Project Tech Stack: ${deployment.techStackDetected || 'MERN'}
-- Database type: ${deployment.dbInitType || 'mongodb'}
-- Project Package Details:
-${pkgDetails}
-
-YOUR DYNAMIC ABILITIES:
-1. File patches: You can create or modify files inside the container's workspace. Wrap the full content inside a <patch file="relative/path/to/file">...</patch> tag. Make sure the relative path is correct.
-2. Executing scripts/commands: You can run terminal commands directly inside the active preview container (which has Python, Node, curl, etc. installed). Wrap the command inside an <exec command="command" /> tag.
-   - Example: To run a python script, use <exec command="python script.py" />
-   - Example: To install an npm package, use <exec command="npm install package" />
-3. TOKEN EFFICIENCY & COMPATIBILITY REQUIREMENT: If the user asks you to insert database data, do NOT write massive JS loops or hardcode queries inside application controllers. Instead, create a standalone seeding script (e.g. seed_data.js or seed_data.py) using a <patch> tag, and trigger it using an <exec> tag.
-   - CRITICAL WARNING: The preview container DOES NOT have 'ts-node' installed. If you create helper scripts, ALWAYS write them in plain JavaScript (e.g. seed.js) and run them with 'node seed.js', or write them in Python (e.g. seed.py) and run them with 'python seed.py'. Under no circumstances should you output a ts script and run it via ts-node, as it will crash with command not found!
-
-Explain clearly what changes you have made and summarize any execution stdout/stderr results.`;
-
-    const userPrompt = `User Prompt: ${message}`;
-    
-    let url = '';
-    let headers = { 'Content-Type': 'application/json' };
-    let model = '';
-    let isOllama = false;
-
-    const groqKey = process.env.GROQ_API_KEY;
-    const hfKey = process.env.HUGGINGFACE_API_KEY;
-
-    if (groqKey && groqKey.trim() !== '') {
-      url = 'https://api.groq.com/openai/v1/chat/completions';
-      headers['Authorization'] = `Bearer ${groqKey}`;
-      model = process.env.GROQ_MODEL || 'qwen-2.5-coder-32b';
-    } else if (hfKey && hfKey.trim() !== '') {
-      url = 'https://api-inference.huggingface.co/v1/chat/completions';
-      headers['Authorization'] = `Bearer ${hfKey}`;
-      model = process.env.HUGGINGFACE_MODEL || 'Qwen/Qwen2.5-Coder-32B-Instruct';
-    } else {
-      const ollamaHost = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
-      url = `${ollamaHost}/v1/chat/completions`;
-      model = process.env.OLLAMA_MODEL || 'qwen2.5-coder:7b';
-      isOllama = true;
-    }
-
-    // Convert persistent message logs to Chat Completion context history
-    const formattedHistory = chatSession.messages.map(m => ({
-      role: m.role === 'agent' ? 'assistant' : 'user',
-      content: m.text
-    })).slice(-15);
-
-    const payload = {
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...formattedHistory,
-        { role: 'user', content: userPrompt }
-      ],
-      temperature: 0.2
-    };
-
-    if (isOllama) {
-      payload.options = { num_ctx: 32768 };
-    }
-
-    const response = await axios.post(url, payload, { headers, timeout: 90000 });
-    const assistantText = response.data.choices[0].message.content;
-
-    // Parse and apply <patch> tags
-    const patches = [];
-    const patchRegex = /<patch\s+file="([^"]+)">([\s\S]*?)<\/patch>/g;
-    let match;
-    while ((match = patchRegex.exec(assistantText)) !== null) {
-      const relPath = match[1];
-      const code = match[2];
-      const targetAbsPath = path.resolve(extractDir, relPath);
-      if (targetAbsPath.startsWith(path.resolve(extractDir))) {
-        fs.mkdirSync(path.dirname(targetAbsPath), { recursive: true });
-        fs.writeFileSync(targetAbsPath, code, 'utf8');
-        patches.push(relPath);
-      }
-    }
-
-    const execRegex = /<exec\s+command="([^"]+)"\s*\/>/g;
-    const commandsToRun = [];
-    while ((match = execRegex.exec(assistantText)) !== null) {
-      commandsToRun.push(match[1]);
-    }
-
-    // Push user query to DB first
+    // Save final response in database messages archive
     chatSession.messages.push({
       role: 'user',
       text: message
     });
-
-    const execPermission = deployment.execPermission || 'ask';
-
-    if (commandsToRun.length > 0) {
-      if (execPermission === 'never') {
-        let finalMessage = assistantText;
-        if (patches.length > 0) {
-          finalMessage += `\n\n**[AI Agent applied patches to files]:**\n${patches.map(p => ` - \`${p}\``).join('\n')}`;
-        }
-        finalMessage += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash\n[Execution blocked: User has disabled command execution for this agent]\n\`\`\``;
-        
-        chatSession.messages.push({
-          role: 'agent',
-          text: finalMessage
-        });
-        await chatSession.save();
-
-        return res.json({ 
-          message: finalMessage, 
-          pendingExec: false, 
-          commands: [], 
-          patches,
-          chatId: chatSession._id
-        });
-      }
-
-      if (execPermission === 'ask') {
-        let finalMessage = assistantText;
-        if (patches.length > 0) {
-          finalMessage += `\n\n**[AI Agent applied patches to files]:**\n${patches.map(p => ` - \`${p}\``).join('\n')}`;
-        }
-
-        chatSession.messages.push({
-          role: 'agent',
-          text: finalMessage,
-          pendingAction: { commands: commandsToRun }
-        });
-        await chatSession.save();
-
-        return res.json({ 
-          message: finalMessage, 
-          pendingExec: true, 
-          commands: commandsToRun, 
-          patches,
-          chatId: chatSession._id
-        });
-      }
-    }
-
-    // Default to running if permission is 'always' or no commands
-    let execLogs = '';
-    if (commandsToRun.length > 0 && execPermission === 'always') {
-      const Docker = require('dockerode');
-      const activeDocker = new Docker();
-      const targetContainerName = `devops-preview-${deployment.jobId}`;
-      const container = activeDocker.getContainer(targetContainerName);
-      
-      let isContainerRunning = false;
-      try {
-        const inspect = await container.inspect();
-        isContainerRunning = inspect.State.Running;
-      } catch (_) {}
-
-      for (const cmd of commandsToRun) {
-        execLogs += `\n$ ${cmd}\n`;
-        if (isContainerRunning) {
-          const exec = await container.exec({ Cmd: ['sh', '-c', cmd], AttachStdout: true, AttachStderr: true });
-          const stream = await exec.start();
-          const out = await new Promise((resolve) => {
-            let buffer = '';
-            stream.on('data', chunk => { buffer += chunk.toString(); });
-            stream.on('end', () => resolve(buffer));
-            stream.on('error', () => resolve(''));
-          });
-          execLogs += out;
-        } else {
-          const { execSync } = require('child_process');
-          try {
-            const out = execSync(cmd, { cwd: extractDir, env: process.env }).toString();
-            execLogs += out;
-          } catch (e) {
-            execLogs += `Execution failed: ${e.message}\n${e.stderr ? e.stderr.toString() : ''}`;
-          }
-        }
-      }
-    }
-
-    let finalMessage = assistantText;
-    if (patches.length > 0) {
-      finalMessage += `\n\n**[AI Agent applied patches to files]:**\n${patches.map(p => ` - \`${p}\``).join('\n')}`;
-    }
-    if (execLogs) {
-      finalMessage += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash${execLogs}\`\`\``;
-    }
-
     chatSession.messages.push({
       role: 'agent',
-      text: finalMessage
+      text: result.message,
+      pendingAction: result.pendingExec ? { commands: result.commands } : undefined,
+      patches: result.patches
     });
     await chatSession.save();
 
-    res.json({ message: finalMessage, pendingExec: false, commands: [], patches, chatId: chatSession._id });
+    res.json({ 
+      message: result.message, 
+      pendingExec: result.pendingExec, 
+      commands: result.commands, 
+      patches: result.patches, 
+      chatId: result.chatId 
+    });
   } catch (error) {
     console.error('Error in agent chat:', error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * Rollback patches applied by the AI agent by restoring the previous file content.
+ * Expects: { patches: [{ file, previousContent, isNewFile }], chatId, messageIndex }
+ */
+const rollbackAgentPatches = async (req, res) => {
+  try {
+    const deployment = await Deployment.findById(req.params.id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+
+    const { patches, chatId, messageIndex } = req.body;
+    if (!patches || !Array.isArray(patches) || patches.length === 0) {
+      return res.status(400).json({ message: 'Patches array is required' });
+    }
+
+    const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+    const extractDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId);
+    const rolledBack = [];
+    const errors = [];
+
+    for (const patch of patches) {
+      const { file, previousContent, isNewFile } = patch;
+      const targetAbsPath = path.resolve(extractDir, file);
+
+      // Security: ensure path doesn't escape the build dir
+      if (!targetAbsPath.startsWith(path.resolve(extractDir))) {
+        errors.push({ file, error: 'Path traversal attempt blocked' });
+        continue;
+      }
+
+      try {
+        if (isNewFile) {
+          // File was newly created — delete it on rollback
+          if (fs.existsSync(targetAbsPath)) {
+            fs.unlinkSync(targetAbsPath);
+          }
+        } else if (previousContent !== null && previousContent !== undefined) {
+          // File was modified — restore previous content
+          fs.mkdirSync(path.dirname(targetAbsPath), { recursive: true });
+          fs.writeFileSync(targetAbsPath, previousContent, 'utf8');
+        }
+        rolledBack.push(file);
+      } catch (err) {
+        errors.push({ file, error: err.message });
+      }
+    }
+
+    // Persist rolled back state in database if chat context is provided
+    if (chatId && messageIndex !== undefined) {
+      const chatSession = await DevOpsChat.findById(chatId);
+      if (chatSession && chatSession.messages[messageIndex]) {
+        chatSession.messages[messageIndex].rolledBack = true;
+        await chatSession.save();
+      }
+    }
+
+    res.json({
+      message: `Rolled back ${rolledBack.length} file(s)`,
+      rolledBack,
+      errors
+    });
+  } catch (error) {
+    console.error('Error in rollback:', error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -1345,13 +1556,76 @@ const updateAgentPermission = async (req, res) => {
   }
 };
 
+/**
+ * Rollback the chat history by deleting all messages starting from the specified index.
+ * Automatically rolls back any files changed by the deleted messages.
+ */
+const undoChatMessages = async (req, res) => {
+  try {
+    const { chatId, messageIndex } = req.body;
+    if (!chatId || messageIndex === undefined) {
+      return res.status(400).json({ message: 'chatId and messageIndex are required' });
+    }
+
+    const chatSession = await DevOpsChat.findById(chatId);
+    if (!chatSession) {
+      return res.status(404).json({ message: 'Chat thread not found' });
+    }
+
+    const deployment = await Deployment.findById(chatSession.deploymentId);
+    if (!deployment) {
+      return res.status(404).json({ message: 'Associated deployment not found' });
+    }
+
+    if (messageIndex >= 0 && messageIndex < chatSession.messages.length) {
+      // Find all agent messages to delete that have active patches
+      const messagesToDelete = chatSession.messages.slice(messageIndex);
+      const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+      const extractDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId);
+
+      for (const msg of messagesToDelete) {
+        if (msg.role === 'agent' && msg.patches && msg.patches.length > 0 && !msg.rolledBack) {
+          for (const patch of msg.patches) {
+            const { file, previousContent, isNewFile } = patch;
+            const targetAbsPath = path.resolve(extractDir, file);
+
+            // Path traversal guard
+            if (targetAbsPath.startsWith(path.resolve(extractDir))) {
+              try {
+                if (isNewFile) {
+                  if (fs.existsSync(targetAbsPath)) {
+                    fs.unlinkSync(targetAbsPath);
+                  }
+                } else if (previousContent !== null && previousContent !== undefined) {
+                  fs.mkdirSync(path.dirname(targetAbsPath), { recursive: true });
+                  fs.writeFileSync(targetAbsPath, previousContent, 'utf8');
+                }
+              } catch (err) {
+                console.error(`[UNDO] Failed to rollback file ${file}:`, err.message);
+              }
+            }
+          }
+        }
+      }
+
+      chatSession.messages = chatSession.messages.slice(0, messageIndex);
+      await chatSession.save();
+    }
+
+    res.json({
+      message: 'Chat history rolled back and files reverted successfully',
+      messages: chatSession.messages
+    });
+  } catch (error) {
+    console.error('Error in undo chat:', error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const executePendingCommands = async (req, res) => {
   try {
     const deployment = await Deployment.findById(req.params.id);
     if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
-    
-    const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
-    const extractDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId);
     
     const { commands, chatId } = req.body;
     if (!commands || !Array.isArray(commands)) {
@@ -1363,45 +1637,80 @@ const executePendingCommands = async (req, res) => {
     const targetContainerName = `devops-preview-${deployment.jobId}`;
     const container = activeDocker.getContainer(targetContainerName);
     
-    let execLogs = '';
     let isContainerRunning = false;
     try {
       const inspect = await container.inspect();
       isContainerRunning = inspect.State.Running;
     } catch (_) {}
     
+    if (!isContainerRunning) {
+      return res.status(400).json({ message: 'Preview container is offline. Please start/restart the preview sandbox first!' });
+    }
+
     for (const cmd of commands) {
-      execLogs += `\n$ ${cmd}\n`;
-      if (isContainerRunning) {
-        const exec = await container.exec({ Cmd: ['sh', '-c', cmd], AttachStdout: true, AttachStderr: true });
-        const stream = await exec.start();
-        const out = await new Promise((resolve) => {
-          let buffer = '';
-          stream.on('data', chunk => { buffer += chunk.toString(); });
-          stream.on('end', () => resolve(buffer));
-          stream.on('error', () => resolve(''));
-        });
-        execLogs += out;
-      } else {
-        const { execSync } = require('child_process');
-        try {
-          const out = execSync(cmd, { cwd: extractDir, env: process.env }).toString();
-          execLogs += out;
-        } catch (e) {
-          execLogs += `Execution failed: ${e.message}\n${e.stderr ? e.stderr.toString() : ''}`;
-        }
+      if (!isCommandSafe(cmd)) {
+        return res.status(400).json({ message: `Security Blocked: Command contains potentially dangerous patterns and was rejected by guardrails: "${cmd}"` });
       }
     }
 
-    // Append logs to the specific message inside MongoDB chat session
+    let execLogs = '';
+    for (const cmd of commands) {
+      execLogs += `\n$ ${cmd}\n`;
+      const exec = await container.exec({ Cmd: ['sh', '-c', `cd /project 2>/dev/null || cd /workspace 2>/dev/null || true; ${cmd}`], AttachStdout: true, AttachStderr: true });
+      const stream = await exec.start();
+      const out = await new Promise((resolve) => {
+        const chunks = [];
+        stream.on('data', chunk => { chunks.push(chunk); });
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer));
+        });
+        stream.on('error', () => resolve(''));
+      });
+      execLogs += out;
+    }
+
     if (chatId) {
       const chatSession = await DevOpsChat.findById(chatId);
       if (chatSession) {
+        // Clear the pending action on the user prompt or last message
         const msg = chatSession.messages.find(m => m.pendingAction && m.pendingAction.commands && m.pendingAction.commands.length > 0);
         if (msg) {
-          msg.text += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash${execLogs}\`\`\``;
-          msg.pendingAction = undefined; // clear pending action
+          msg.pendingAction = undefined;
           await chatSession.save();
+        }
+
+        // Check if there is a saved ReAct loop state to resume
+        const { getWorkingMemory } = require('../services/agent-memory.service');
+        const savedState = await getWorkingMemory(chatId, 'react_loop_state');
+        
+        if (savedState) {
+          const { runAgentChatLoop } = require('../services/agent-loop.service');
+          // Resume the loop using the execLogs as the new observations
+          const result = await runAgentChatLoop(deployment, chatSession, '', execLogs);
+          
+          chatSession.messages.push({
+            role: 'agent',
+            text: result.message,
+            pendingAction: result.pendingExec ? { commands: result.commands } : undefined,
+            patches: result.patches
+          });
+          await chatSession.save();
+
+          return res.json({
+            execLogs,
+            message: result.message,
+            pendingExec: result.pendingExec,
+            commands: result.commands,
+            patches: result.patches,
+            chatId: result.chatId
+          });
+        } else {
+          // Fallback: append logs to the last message if no loop state is present
+          if (msg) {
+            msg.text += `\n\n**[AI Agent Terminal Output]:**\n\`\`\`bash${execLogs}\`\`\``;
+            await chatSession.save();
+          }
         }
       }
     }
@@ -1435,7 +1744,7 @@ const createChat = async (req, res) => {
       messages: [
         {
           role: 'agent',
-          text: 'Hello! I am your container DevOps AI Agent. I can help you seed the database, edit workspace code in real-time, or run Python/Shell scripts inside the preview container. Try clicking "Quick Prompts" below!'
+          text: 'Hello! I am your container DevOps AI Agent. I can help you seed the database, edit workspace code in real-time, or run Node.js/Shell scripts inside the preview container. Try clicking "Quick Prompts" below!'
         }
       ]
     });
@@ -1455,6 +1764,424 @@ const getChatMessages = async (req, res) => {
     res.json(chat);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+const isCommandSafe = (command) => {
+  if (!command || typeof command !== 'string') return false;
+  
+  const cmd = command.toLowerCase().trim();
+  
+  if (/\brm\s+-[a-z]*r[a-z]*\s+(\/($|\s|\*)|(\.\.)($|\s)|\*)/.test(cmd)) return false;
+  
+  if (/\b(nc|netcat|ncat)\b/.test(cmd)) return false;
+  if (cmd.includes('/dev/tcp') || cmd.includes('/dev/udp')) return false;
+  if (cmd.includes('bash -i') || cmd.includes('sh -i')) return false;
+  
+  if (cmd.includes('docker ') || cmd.includes('docker.sock')) return false;
+  
+  if (/\b(mkfs|dd|fdisk|parted)\b/.test(cmd) && (cmd.includes('/dev/') || cmd.includes('of='))) return false;
+  
+  if (cmd.includes('/etc/passwd') || cmd.includes('/etc/shadow') || cmd.includes('/etc/gshadow') || cmd.includes('/etc/group')) return false;
+  
+  if (cmd.includes(':(){') || cmd.includes(':|:&')) return false;
+
+  return true;
+};
+
+const validateDbRecord = async (container, dbType, dbName, collection, record, deployment) => {
+  const runExec = async (cmd) => {
+    const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false });
+    const stream = await exec.start();
+    return new Promise((resolve) => {
+      const chunks = [];
+      stream.on('data', chunk => { chunks.push(chunk); });
+      stream.on('end', () => {
+        const fullBuffer = Buffer.concat(chunks);
+        resolve(cleanDockerOutput(fullBuffer).trim());
+      });
+      stream.on('error', () => resolve(''));
+    });
+  };
+
+  if (dbType === 'sqlite') {
+    const cmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 -header -json "$sqliteFile" "PRAGMA table_info(\`${collection}\`);"`];
+    const output = await runExec(cmd);
+    try {
+      const cols = JSON.parse(output);
+      if (!Array.isArray(cols) || cols.length === 0) return null;
+      for (const col of cols) {
+        const val = record[col.name];
+        if (col.notnull && (val === undefined || val === null) && col.dflt_value === null && !col.pk) {
+          throw new Error(`Field '${col.name}' is required and cannot be null.`);
+        }
+        if (val !== undefined && val !== null) {
+          const type = col.type.toUpperCase();
+          if ((type.includes('INT') || type.includes('NUM') || type.includes('REAL') || type.includes('DOUBLE') || type.includes('FLOAT')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${col.name}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('required') || e.message.includes('Invalid type')) throw e;
+    }
+  } else if (dbType === 'postgres') {
+    const query = `SELECT json_agg(t) FROM (SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = '${collection}') t;`;
+    const cmd = ['psql', '-U', 'postgres', '-d', dbName, '-t', '-c', query];
+    const output = await runExec(cmd);
+    try {
+      const cols = JSON.parse(output);
+      if (!Array.isArray(cols) || cols.length === 0) return null;
+      for (const col of cols) {
+        const val = record[col.column_name];
+        if (col.is_nullable === 'NO' && (val === undefined || val === null)) {
+          throw new Error(`Field '${col.column_name}' is required and cannot be null.`);
+        }
+        if (val !== undefined && val !== null) {
+          const type = col.data_type.toLowerCase();
+          if ((type.includes('int') || type.includes('decimal') || type.includes('numeric') || type.includes('double') || type.includes('real')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${col.column_name}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('required') || e.message.includes('Invalid type')) throw e;
+    }
+  } else if (dbType === 'mysql' || dbType === 'mariadb') {
+    const query = `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='${dbName}' AND TABLE_NAME='${collection}';`;
+    const cmd = ['mysql', '-u', 'root', '-D', dbName, '-e', query, '-B'];
+    const output = await runExec(cmd);
+    const lines = output.split('\n').filter(Boolean);
+    if (lines.length > 1) {
+      const headers = lines[0].split('\t');
+      const cols = lines.slice(1).map(line => {
+        const values = line.split('\t');
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = values[i] || null; });
+        return obj;
+      });
+      for (const col of cols) {
+        const colName = col.COLUMN_NAME;
+        const val = record[colName];
+        if (col.IS_NULLABLE === 'NO' && (val === undefined || val === null)) {
+          throw new Error(`Field '${colName}' is required and cannot be null.`);
+        }
+        if (val !== undefined && val !== null) {
+          const type = col.DATA_TYPE.toLowerCase();
+          if ((type.includes('int') || type.includes('decimal') || type.includes('float') || type.includes('double') || type.includes('numeric')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${colName}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    }
+  } else if (dbType === 'mongodb') {
+    const remoteUri = deployment ? await getRemoteMongoUri(deployment) : null;
+    const connectionString = remoteUri || dbName;
+    const delimiter = '__DB_QUERY_EOF__';
+    const query = `print(JSON.stringify(db.${collection}.find().limit(5).toArray()))`;
+    const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/infer.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/infer.js`];
+    const output = await runExec(cmd);
+    try {
+      const docs = JSON.parse(output);
+      if (Array.isArray(docs) && docs.length > 0) {
+        const representativeDoc = docs[0];
+        for (const [key, val] of Object.entries(record)) {
+          if (representativeDoc[key] !== undefined && representativeDoc[key] !== null) {
+            const expectedType = typeof representativeDoc[key];
+            const actualType = typeof val;
+            if (expectedType !== actualType && expectedType !== 'object' && actualType !== 'object') {
+              throw new Error(`Invalid type for field '${key}': expected ${expectedType}, got ${actualType}.`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('Invalid type')) throw e;
+    }
+  } else if (dbType === 'mssql') {
+    const query = `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${collection}' FOR JSON PATH;`;
+    const cmd = ['/opt/mssql-tools/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Sa_password123', '-C', '-d', dbName, '-Q', query, '-y', '0'];
+    const output = await runExec(cmd);
+    try {
+      const startIdx = output.indexOf('[');
+      const endIdx = output.lastIndexOf(']');
+      if (startIdx !== -1 && endIdx !== -1) {
+        const cols = JSON.parse(output.substring(startIdx, endIdx + 1));
+        if (Array.isArray(cols)) {
+          for (const col of cols) {
+            const val = record[col.COLUMN_NAME];
+            if (col.IS_NULLABLE === 'NO' && (val === undefined || val === null)) {
+              throw new Error(`Field '${col.COLUMN_NAME}' is required and cannot be null.`);
+            }
+            if (val !== undefined && val !== null) {
+              const type = col.DATA_TYPE.toLowerCase();
+              if ((type.includes('int') || type.includes('decimal') || type.includes('numeric') || type.includes('float') || type.includes('double') || type.includes('real')) && isNaN(Number(val))) {
+                throw new Error(`Invalid type for field '${col.COLUMN_NAME}': expected number, got "${typeof val}".`);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (e.message.includes('required') || e.message.includes('Invalid type')) throw e;
+    }
+  } else if (dbType === 'oracle') {
+    const query = `SET PAGESIZE 0 FEEDBACK OFF HEADING OFF;\nSELECT column_name, data_type, nullable FROM user_tab_columns WHERE table_name = '${collection.toUpperCase()}';\nEXIT;`;
+    const delimiter = '__DB_QUERY_EOF__';
+    const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/infer.sql\n${query}\n${delimiter}\nsqlplus -S system/oracle_password123@localhost/XE @/tmp/infer.sql`];
+    const output = await runExec(cmd);
+    const lines = output.split('\n').map(s => s.trim()).filter(Boolean);
+    for (const line of lines) {
+      const parts = line.split(/\s+/);
+      if (parts.length >= 3) {
+        const colName = parts[0];
+        const dataType = parts[1].toLowerCase();
+        const nullable = parts[2]; // 'Y' or 'N'
+        const val = record[colName] || record[colName.toLowerCase()];
+        if (nullable === 'N' && (val === undefined || val === null)) {
+          throw new Error(`Field '${colName}' is required and cannot be null.`);
+        }
+        if (val !== undefined && val !== null) {
+          if ((dataType.includes('number') || dataType.includes('float') || dataType.includes('double') || dataType.includes('numeric')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${colName}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    }
+  } else if (dbType === 'cassandra') {
+    const query = `SELECT column_name, type FROM system_schema.columns WHERE keyspace_name = '${dbName}' AND table_name = '${collection}';`;
+    const cmd = ['cqlsh', '-e', query];
+    const output = await runExec(cmd);
+    const lines = output.split('\n').filter(Boolean);
+    if (lines.length > 3) {
+      const cols = lines.slice(3).map(line => {
+        const parts = line.split('|').map(s => s.trim());
+        return { name: parts[0], type: parts[1] || '' };
+      });
+      for (const col of cols) {
+        if (!col.name) continue;
+        const val = record[col.name];
+        if (val !== undefined && val !== null) {
+          const type = col.type.toLowerCase();
+          if ((type.includes('int') || type.includes('float') || type.includes('double') || type.includes('decimal') || type.includes('counter')) && isNaN(Number(val))) {
+            throw new Error(`Invalid type for field '${col.name}': expected number, got "${typeof val}".`);
+          }
+        }
+      }
+    }
+  }
+};
+
+const maskPIIData = (data) => {
+  if (data === null || data === undefined) return data;
+  if (Array.isArray(data)) {
+    return data.map(item => maskPIIData(item));
+  }
+  if (typeof data === 'object') {
+    const masked = {};
+    for (const [key, val] of Object.entries(data)) {
+      const lowerKey = key.toLowerCase();
+      if (typeof val === 'string') {
+        if (lowerKey.includes('email') || lowerKey.includes('mail')) {
+          masked[key] = val.replace(/^([^@]+)@(.+)$/, (m, p1, p2) => {
+            const visible = p1.substring(0, Math.min(2, p1.length));
+            return visible + '***@' + p2;
+          });
+        } else if (lowerKey.includes('phone') || lowerKey.includes('telephone') || lowerKey.includes('mobile') || lowerKey.includes('cell')) {
+          masked[key] = '[MASKED_PHONE]';
+        } else if (lowerKey.includes('password') || lowerKey.includes('pwd') || lowerKey.includes('passwd')) {
+          masked[key] = '[MASKED_PASSWORD]';
+        } else if (lowerKey.includes('ssn') || lowerKey.includes('socialsecurity')) {
+          masked[key] = '[MASKED_SSN]';
+        } else if (lowerKey.includes('card') || lowerKey.includes('creditcard') || lowerKey.includes('cvv')) {
+          masked[key] = '[MASKED_CARD]';
+        } else if (
+          lowerKey === 'name' || 
+          lowerKey === 'firstname' || 
+          lowerKey === 'lastname' || 
+          lowerKey === 'fullname' || 
+          lowerKey === 'username'
+        ) {
+          masked[key] = val.split(' ').map(part => {
+            if (part.length <= 1) return part;
+            return part[0] + '***';
+          }).join(' ');
+        } else if (
+          lowerKey.includes('address') || 
+          lowerKey.includes('street') || 
+          lowerKey.includes('city') || 
+          lowerKey.includes('zip') || 
+          lowerKey.includes('postcode')
+        ) {
+          masked[key] = '[MASKED_ADDRESS]';
+        } else {
+          masked[key] = val;
+        }
+      } else if (typeof val === 'object' && val !== null) {
+        masked[key] = maskPIIData(val);
+      } else {
+        masked[key] = val;
+      }
+    }
+    return masked;
+  }
+  return data;
+};
+
+module.exports = {
+  executeDeploymentDbQuery,
+  getDeployments,
+  createDeployment,
+  updateDeploymentStatus,
+  uploadZip,
+  getDeploymentStatus,
+  downloadArtifact,
+  getSuggestedPort,
+  getActivePreviews,
+  stopDeploymentPreview,
+  startDeploymentPreview,
+  deleteDeployment,
+  listFixtures,
+  generateFixture,
+  downloadPdfReport,
+  getFixtureReviews,
+  createFixtureReview,
+  changeDeploymentPort,
+  getWorkspaceFiles,
+  getWorkspaceFileContent,
+  saveWorkspaceFile,
+  getDbCollections,
+  getDbCollectionData,
+  insertDbRecord,
+  executeAgentChat,
+  rollbackAgentPatches,
+  updateAgentPermission,
+  undoChatMessages,
+  executePendingCommands,
+  getChats,
+  createChat,
+  getChatMessages,
+};
+
+const updateCollaboratorPermissions = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { allowCollaboratorVisibility, allowCollaboratorBuild, allowCollaboratorEditPort, allowCollaboratorDelete, allowCollaboratorChat } = req.body;
+    const deployment = await Deployment.findById(id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    
+    // Only owner can update permissions
+    if (!deployment.deployedBy || deployment.deployedBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Only the project creator can modify collaborator permissions.' });
+    }
+    
+    if (deployment.githubPermissions) {
+      if (allowCollaboratorVisibility !== undefined) deployment.githubPermissions.allowCollaboratorVisibility = allowCollaboratorVisibility;
+      if (allowCollaboratorBuild      !== undefined) deployment.githubPermissions.allowCollaboratorBuild      = allowCollaboratorBuild;
+      if (allowCollaboratorEditPort   !== undefined) deployment.githubPermissions.allowCollaboratorEditPort   = allowCollaboratorEditPort;
+      if (allowCollaboratorDelete     !== undefined) deployment.githubPermissions.allowCollaboratorDelete     = allowCollaboratorDelete;
+      if (allowCollaboratorChat       !== undefined) deployment.githubPermissions.allowCollaboratorChat       = allowCollaboratorChat;
+      deployment.markModified('githubPermissions');
+    }
+    
+    await deployment.save();
+    res.json({ message: 'Permissions updated successfully.', githubPermissions: deployment.githubPermissions });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+const syncGithubCollaborators = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deployment = await Deployment.findById(id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    if (deployment.deploymentType !== 'github' || !deployment.githubRepo) {
+      return res.status(400).json({ message: 'Not a GitHub deployment.' });
+    }
+    
+    // Get owner details for GitHub access token
+    const User = require('../models/User');
+    const owner = await User.findById(deployment.deployedBy).select('+githubAccessToken');
+    const token = owner?.githubAccessToken;
+    if (!token) {
+      return res.status(400).json({ message: 'GitHub link not found for the project creator.' });
+    }
+    
+    const [repoOwner, repoName] = deployment.githubRepo.split('/');
+    const axios = require('axios');
+    const collabsRes = await axios.get(`https://api.github.com/repos/${repoOwner}/${repoName}/collaborators`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'IDPS-DevOps',
+        Accept: 'application/vnd.github.v3+json',
+      }
+    });
+    
+    if (Array.isArray(collabsRes.data)) {
+      deployment.collaborators = collabsRes.data.map(c => c.login);
+      await deployment.save();
+      return res.json({ message: 'Collaborators synced successfully.', collaborators: deployment.collaborators });
+    }
+    res.status(500).json({ message: 'Failed to fetch collaborators list.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+const downloadSecureEnvPdf = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deployment = await Deployment.findById(id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    
+    const password = `DevOps-Env-${deployment.jobId.slice(0, 6)}`;
+    
+    const doc = new PDFDocument({
+      userPassword: password,
+      ownerPassword: 'ownerSecretPassword123',
+      permissions: {
+        printing: 'lowResolution',
+        modifying: 'none',
+        copying: 'none'
+      }
+    });
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${deployment.projectName}-secure-env.pdf"`);
+    doc.pipe(res);
+    
+    // Write PDF content
+    doc.font('Helvetica-Bold').fontSize(20).fillColor('#06b6d4').text('DevOps Secure Environment Variables', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.font('Helvetica').fontSize(11).fillColor('#9ca3af').text(`Project: ${deployment.projectName}`, { align: 'center' });
+    doc.text(`Job ID: ${deployment.jobId}`, { align: 'center' });
+    doc.text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' });
+    doc.moveDown(1.5);
+    
+    doc.font('Helvetica-Bold').fontSize(14).fillColor('#10b981').text('Decrypted Environment Variables');
+    doc.moveDown(0.5);
+    
+    if (!deployment.envFiles || deployment.envFiles.length === 0) {
+      doc.font('Helvetica-Oblique').fontSize(11).fillColor('#ef4444').text('No environment variables found for this sandbox.');
+    } else {
+      for (const file of deployment.envFiles) {
+        doc.font('Helvetica-Bold').fontSize(12).fillColor('#10b981').text(`File: ${file.path}`);
+        doc.moveDown(0.2);
+        
+        const contentLines = (file.content || '').split('\n');
+        doc.font('Courier').fontSize(10).fillColor('#1f2937');
+        for (const line of contentLines) {
+          doc.text(line);
+        }
+        doc.moveDown(1);
+      }
+    }
+    
+    doc.end();
+  } catch (err) {
+    console.error('Error generating secure env PDF:', err);
+    res.status(500).json({ message: err.message });
   }
 };
 
@@ -1484,9 +2211,14 @@ module.exports = {
   getDbCollectionData,
   insertDbRecord,
   executeAgentChat,
+  rollbackAgentPatches,
   updateAgentPermission,
+  undoChatMessages,
   executePendingCommands,
   getChats,
   createChat,
   getChatMessages,
+  updateCollaboratorPermissions,
+  syncGithubCollaborators,
+  downloadSecureEnvPdf
 };

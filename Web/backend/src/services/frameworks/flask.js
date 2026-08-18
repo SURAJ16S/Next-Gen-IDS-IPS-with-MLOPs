@@ -54,16 +54,25 @@ module.exports = {
     const winPython = path.join(workDir, '.venv', 'Scripts', 'python.exe');
     const flaskApp = findFlaskApp(workDir);
 
+    if (isDocker) {
+      return {
+        cmd: 'sh',
+        args: ['-c', `if [ ! -f .venv/.venv_completed ] || [ ! -f .venv/bin/python ]; then rm -rf .venv && python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt && touch .venv/.venv_completed; fi && .venv/bin/python -m flask run --host=0.0.0.0 --port=\${PORT:-5000}`],
+        env: {
+          FLASK_APP: flaskApp,
+          FLASK_ENV: 'production',
+          PYTHONUNBUFFERED: '1',
+          PYTHONDONTWRITEBYTECODE: '1'
+        }
+      };
+    }
+
     let pythonCmd = 'python';
     if (fs.existsSync(path.join(workDir, '.venv'))) {
-      if (isDocker) {
+      if (fs.existsSync(unixPython)) {
         pythonCmd = '.venv/bin/python';
-      } else {
-        if (fs.existsSync(unixPython)) {
-          pythonCmd = '.venv/bin/python';
-        } else if (fs.existsSync(winPython)) {
-          pythonCmd = '.venv/Scripts/python';
-        }
+      } else if (fs.existsSync(winPython)) {
+        pythonCmd = '.venv/Scripts/python';
       }
     }
 

@@ -282,6 +282,29 @@ const importGithubRepo = async (req, res) => {
     const cloneDir = path.join(os.tmpdir(), `gh-clone-${jobId}`);
     const zipPath  = path.join(os.tmpdir(), `gh-zip-${jobId}.zip`);
 
+    // Fetch collaborators from GitHub
+    let collaborators = [];
+    try {
+      const [repoOwner, repoName] = repoFullName.split('/');
+      const collabsRes = await axios.get(`https://api.github.com/repos/${repoOwner}/${repoName}/collaborators`, {
+        headers: {
+          Authorization: `Bearer ${user.githubAccessToken}`,
+          'User-Agent': 'IDPS-DevOps',
+          Accept: 'application/vnd.github.v3+json',
+        }
+      });
+      if (Array.isArray(collabsRes.data)) {
+        collaborators = collabsRes.data.map(c => c.login);
+      }
+      console.log(`Fetched collaborators for ${repoFullName}:`, collaborators);
+    } catch (err) {
+      console.warn(`[GitHub Import] Could not fetch collaborators for ${repoFullName}:`, err.message);
+      // Fallback: add the importer username itself
+      if (user.githubUsername) {
+        collaborators = [user.githubUsername];
+      }
+    }
+
     // Create deployment record immediately so frontend gets jobId
     const deployment = await Deployment.create({
       projectName:   name,
@@ -299,6 +322,13 @@ const importGithubRepo = async (req, res) => {
       dbInitType,
       enableSmartSeeding: enableSmartSeeding === true || enableSmartSeeding === 'true',
       deploymentType: 'github',
+      githubRepo: repoFullName,
+      collaborators,
+      githubPermissions: {
+        allowCollaboratorVisibility: true,
+        allowCollaboratorBuild: false,
+        allowCollaboratorChat: false
+      }
     });
 
     res.status(202).json({
@@ -323,9 +353,14 @@ const importGithubRepo = async (req, res) => {
         runPipeline(jobId, deployment._id, zipPath, previewPort, envFiles, targetSubfolder, upgradeMode);
       } catch (cloneErr) {
         console.error('[GitHub Import] Clone/zip error:', cloneErr.message);
+        try {
+          const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+          const logDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', jobId);
+          if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+          fs.writeFileSync(path.join(logDir, 'pipeline.log'), `[${new Date().toISOString()}] GitHub clone failed: ${cloneErr.message}\n`, 'utf8');
+        } catch (_) {}
         await Deployment.findByIdAndUpdate(deployment._id, {
           status: 'failed',
-          $push: { buildLogs: `[${new Date().toISOString()}] GitHub clone failed: ${cloneErr.message}` },
         });
         // Cleanup
         if (fs.existsSync(cloneDir)) fs.rmSync(cloneDir, { recursive: true, force: true });
