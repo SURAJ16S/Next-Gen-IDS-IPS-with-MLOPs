@@ -72,9 +72,37 @@ services:
     networks:
       - devops-local-net
 
+  # 7. Redis (Agent Working Memory & Cache)
+  redis:
+    image: redis:7-alpine
+    container_name: devops-local-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - devops-local-net
+
+  # 8. pgvector (Agent Semantic & Episodic Memory)
+  pgvector:
+    image: pgvector/pgvector:pg16
+    container_name: devops-local-pgvector
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_DB=agent_memory
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+    networks:
+      - devops-local-net
+
 networks:
   devops-local-net:
     name: devops-local-net
 
 volumes:
   mongo-data:
+  pgvector-data:
+

@@ -479,6 +479,25 @@ const generateSeedScript = (dbEngine, userTableCandidate, allDetectedTables = []
   // 2. Redis Generation
   if (engine === 'redis') {
     return `HMSET user:${defaultUserVal} ${usernameCol} "${defaultUserVal}" ${passwordCol} "${defaultPassVal}" role "admin"\nSADD users "${defaultUserVal}"\n`;
+  }
+
+  // 2.5. Vector Database Generation (Qdrant & Chroma)
+  if (engine === 'qdrant') {
+    return `# Create a Qdrant collection named "${candidate.tableName || 'threat_signatures'}"\n` +
+           `curl -X PUT "http://localhost:6333/collections/${candidate.tableName || 'threat_signatures'}" \\\n` +
+           `  -H "Content-Type: application/json" \\\n` +
+           `  -d '{"vectors": {"size": 4, "distance": "Cosine"}}'\n\n` +
+           `# Add a test vector point to the collection\n` +
+           `curl -X PUT "http://localhost:6333/collections/${candidate.tableName || 'threat_signatures'}/points?wait=true" \\\n` +
+           `  -H "Content-Type: application/json" \\\n` +
+           `  -d '{"points": [{"id": 1, "vector": [0.15, 0.22, 0.08, 0.95], "payload": {"rule": "SQL Injection Detect"}}]}';\n`;
+  }
+
+  if (engine === 'chroma') {
+    return `# Create a Chroma collection named "${candidate.tableName || 'alerts_vectors'}"\n` +
+           `curl -X POST "http://localhost:8000/api/v1/collections" \\\n` +
+           `  -H "Content-Type: application/json" \\\n` +
+           `  -d '{"name": "${candidate.tableName || 'alerts_vectors'}", "metadata": {"description": "IDPS Threat Alerts"}}';\n`;
   }
 
   // 3. Cassandra CQL Generation

@@ -76,16 +76,20 @@ module.exports = {
     const winUvicorn = path.join(workDir, '.venv', 'Scripts', 'uvicorn.exe');
     const appModule = findAppModule(workDir);
 
+    if (isDocker) {
+      return {
+        cmd: 'sh',
+        args: ['-c', `if [ ! -f .venv/.venv_completed ] || [ ! -f .venv/bin/python ]; then rm -rf .venv && python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt && touch .venv/.venv_completed; fi && .venv/bin/uvicorn ${appModule} --host 0.0.0.0 --port \${PORT:-8000}`],
+        env: {}
+      };
+    }
+
     let uvicornCmd = 'uvicorn';
     if (fs.existsSync(path.join(workDir, '.venv'))) {
-      if (isDocker) {
+      if (fs.existsSync(unixUvicorn)) {
         uvicornCmd = '.venv/bin/uvicorn';
-      } else {
-        if (fs.existsSync(unixUvicorn)) {
-          uvicornCmd = '.venv/bin/uvicorn';
-        } else if (fs.existsSync(winUvicorn)) {
-          uvicornCmd = '.venv/Scripts/uvicorn';
-        }
+      } else if (fs.existsSync(winUvicorn)) {
+        uvicornCmd = '.venv/Scripts/uvicorn';
       }
     }
 

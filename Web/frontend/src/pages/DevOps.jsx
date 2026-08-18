@@ -25,7 +25,7 @@ import {
   Terminal, Upload, Download, CheckCircle, AlertOctagon, Cpu, Check, Database,
   Plus, Trash2, ExternalLink, Square, FileText, Globe, Eye, EyeOff,
   RefreshCw, Search, Lock, Unlock, GitBranch, Star, Settings,
-  Bird, Maximize2, Minimize2, Bot, Send, AlertCircle
+  Bird, Maximize2, Minimize2, Bot, Send, AlertCircle, Users
 } from 'lucide-react';
 import api from '../services/api';
 
@@ -309,6 +309,11 @@ function DevOps() {
   const [currentUser, setCurrentUser] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
 
+  // States for inline port editing in Deployment History table
+  const [editingPortDeploymentId, setEditingPortDeploymentId] = useState(null);
+  const [tempPort, setTempPort] = useState('');
+  const [updatingPortId, setUpdatingPortId] = useState(null);
+
   // ── Tab state: 'zip' | 'github' ──────────────────────────────────────────
   const [uploadTab, setUploadTab] = useState('zip');
 
@@ -401,6 +406,47 @@ function DevOps() {
   // Active build job
   const [activeJobId, setActiveJobId] = useState(null);
   const [activeDeploymentId, setActiveDeploymentId] = useState(null);
+  const activeDep = deployments.find(d => d._id === activeDeploymentId);
+
+  // ── Collaborator permission helpers ─────────────────────────────────────────
+  const isOwnerOf = (d) => d?.deployedBy && currentUser &&
+    (d.deployedBy._id === currentUser._id || d.deployedBy === currentUser._id);
+
+  const isCollabOf = (d) => githubUsername &&
+    d?.collaborators?.some(c => c.toLowerCase() === githubUsername.toLowerCase());
+
+  const getBuildAccess = (d) => {
+    if (!d) return false;
+    if (isOwnerOf(d)) return true;
+    if (isCollabOf(d) && d.githubPermissions?.allowCollaboratorBuild === true) return true;
+    if (!d.deployedBy) return true; // legacy unclaimed
+    return false;
+  };
+
+  const getEditPortAccess = (d) => {
+    if (!d) return false;
+    if (isOwnerOf(d)) return true;
+    if (isCollabOf(d) && d.githubPermissions?.allowCollaboratorEditPort === true) return true;
+    if (!d.deployedBy) return true;
+    return false;
+  };
+
+  const getDeleteAccess = (d) => {
+    if (!d) return false;
+    if (isOwnerOf(d)) return true;
+    if (isCollabOf(d) && d.githubPermissions?.allowCollaboratorDelete === true) return true;
+    if (!d.deployedBy) return true;
+    return false;
+  };
+
+  const getChatAccess = (d) => {
+    if (!d) return false;
+    if (isOwnerOf(d)) return true;
+    if (isCollabOf(d) && d.githubPermissions?.allowCollaboratorChat === true) return true;
+    if (!d.deployedBy) return true;
+    return false;
+  };
+
   const [activeJobStatus, setActiveJobStatus] = useState(null);
   const [activeJobTech, setActiveJobTech] = useState('');
   const [activeJobArch, setActiveJobArch] = useState('');
@@ -1002,6 +1048,25 @@ function DevOps() {
     }
   };
 
+  // ── Inline Port Editing for Inactive Sandbox ───────────────────────────────
+  const handleInlinePortSave = async (deploymentId) => {
+    if (!tempPort || isNaN(tempPort) || Number(tempPort) < 1024 || Number(tempPort) > 65535) {
+      alert('Please enter a valid port number (1024 - 65535).');
+      return;
+    }
+    
+    setUpdatingPortId(deploymentId);
+    try {
+      await changeDeploymentPort(deploymentId, Number(tempPort));
+      setEditingPortDeploymentId(null);
+      fetchDeployments();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to update port.');
+    } finally {
+      setUpdatingPortId(null);
+    }
+  };
+
   // ── Delete Deployment ──────────────────────────────────────────────────────
   const handleDeleteDeployment = async (deploymentId, projectName) => {
     if (!window.confirm(`Are you sure you want to delete "${projectName}" and clean up all files on disk?`)) {
@@ -1047,6 +1112,52 @@ function DevOps() {
       window.URL.revokeObjectURL(url);
     } catch {
       alert('Error downloading PDF report.');
+    }
+  };
+
+  const handleDownloadSecureEnvPdf = async (deploymentId, projName) => {
+    try {
+      const res = await api.get(`/devops/${deploymentId}/env-pdf`, { responseType: 'blob' });
+      const blob = new Blob([res.data], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${projName.replace(/\s+/g, '_')}-secure-env.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      alert('Error downloading secure env PDF.');
+    }
+  };
+
+  const handleSyncCollaborators = async (deploymentId) => {
+    try {
+      const res = await api.post(`/devops/${deploymentId}/sync-collaborators`);
+      alert(res.data.message || 'Collaborators synced successfully.');
+      fetchDeployments();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to sync collaborators.');
+    }
+  };
+
+  const handleTogglePermission = async (deploymentId, key, value) => {
+    try {
+      const activeDep = deployments.find(d => d._id === deploymentId);
+      if (!activeDep) return;
+      
+      const newPerms = {
+        allowCollaboratorVisibility: activeDep.githubPermissions?.allowCollaboratorVisibility !== false,
+        allowCollaboratorBuild: activeDep.githubPermissions?.allowCollaboratorBuild === true,
+        allowCollaboratorChat: activeDep.githubPermissions?.allowCollaboratorChat === true,
+        [key]: value
+      };
+      
+      await api.post(`/devops/${deploymentId}/permissions`, newPerms);
+      fetchDeployments();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to update permissions.');
     }
   };
 
@@ -1410,6 +1521,8 @@ function DevOps() {
                                   <option value="oracle" style={{ background: '#040815', color: '#ffffff' }}>Oracle Database (SQL)</option>
                                   <option value="cassandra" style={{ background: '#040815', color: '#ffffff' }}>Cassandra (NoSQL)</option>
                                   <option value="redis" style={{ background: '#040815', color: '#ffffff' }}>Redis (NoSQL)</option>
+                                  <option value="qdrant" style={{ background: '#040815', color: '#ffffff' }}>Qdrant (Vector DB)</option>
+                                  <option value="chroma" style={{ background: '#040815', color: '#ffffff' }}>Chroma (Vector DB)</option>
                                 </select>
                               </div>
 
@@ -1427,6 +1540,10 @@ function DevOps() {
                                       setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  username TEXT NOT NULL UNIQUE,\n  password TEXT NOT NULL\n);\nINSERT OR IGNORE INTO users (username, password) VALUES ('admin', 'admin123');`);
                                     } else if (dbInitType === 'mssql') {
                                       setDbInitScript(`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='users' AND xtype='U')\nBEGIN\n  CREATE TABLE users (id INT IDENTITY(1,1) PRIMARY KEY, username NVARCHAR(255) UNIQUE, password NVARCHAR(255));\n  INSERT INTO users (username, password) VALUES ('admin', 'admin123');\nEND;`);
+                                    } else if (dbInitType === 'qdrant') {
+                                      setDbInitScript(`# Create a Qdrant collection named "threat_signatures"\ncurl -X PUT "http://localhost:6333/collections/threat_signatures" \\\n  -H "Content-Type: application/json" \\\n  -d '{"vectors": {"size": 4, "distance": "Cosine"}}'\n\n# Add a test vector point to the collection\ncurl -X PUT "http://localhost:6333/collections/threat_signatures/points?wait=true" \\\n  -H "Content-Type: application/json" \\\n  -d '{"points": [{"id": 1, "vector": [0.15, 0.22, 0.08, 0.95], "payload": {"rule": "SQL Injection Detect"}}]}';`);
+                                    } else if (dbInitType === 'chroma') {
+                                      setDbInitScript(`# Create a Chroma collection named "alerts_vectors"\ncurl -X POST "http://localhost:8000/api/v1/collections" \\\n  -H "Content-Type: application/json" \\\n  -d '{"name": "alerts_vectors", "metadata": {"description": "IDPS Threat Alerts"}}';`);
                                     } else if (dbInitType === 'oracle') {
                                       setDbInitScript(`DECLARE\n  c INT;\nBEGIN\n  SELECT COUNT(*) INTO c FROM user_tables WHERE table_name = 'USERS';\n  IF c = 0 THEN\n    EXECUTE IMMEDIATE 'CREATE TABLE users (username VARCHAR2(255) PRIMARY KEY, password VARCHAR2(255))';\n  END IF;\n  EXECUTE IMMEDIATE 'INSERT INTO users (username, password) VALUES (''admin'', ''admin123'')';\nEND;\n/`);
                                     } else {
@@ -2067,6 +2184,8 @@ function DevOps() {
                            <option value="oracle" style={{ background: '#040815', color: '#ffffff' }}>Oracle Database (SQL)</option>
                            <option value="cassandra" style={{ background: '#040815', color: '#ffffff' }}>Cassandra (NoSQL)</option>
                            <option value="redis" style={{ background: '#040815', color: '#ffffff' }}>Redis (NoSQL)</option>
+                           <option value="qdrant" style={{ background: '#040815', color: '#ffffff' }}>Qdrant (Vector DB)</option>
+                           <option value="chroma" style={{ background: '#040815', color: '#ffffff' }}>Chroma (Vector DB)</option>
                          </select>
                        </div>
 
@@ -2084,7 +2203,11 @@ function DevOps() {
                                setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  username TEXT NOT NULL UNIQUE,\n  password TEXT NOT NULL\n);\nINSERT OR IGNORE INTO users (username, password) VALUES ('admin', 'admin123');`);
                              } else if (dbInitType === 'mssql') {
                                setDbInitScript(`IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='users' AND xtype='U')\nBEGIN\n  CREATE TABLE users (id INT IDENTITY(1,1) PRIMARY KEY, username NVARCHAR(255) UNIQUE, password NVARCHAR(255));\n  INSERT INTO users (username, password) VALUES ('admin', 'admin123');\nEND;`);
-                             } else if (dbInitType === 'oracle') {
+                             } else if (dbInitType === 'qdrant') {
+                                      setDbInitScript(`# Create a Qdrant collection named "threat_signatures"\ncurl -X PUT "http://localhost:6333/collections/threat_signatures" \\\n  -H "Content-Type: application/json" \\\n  -d '{"vectors": {"size": 4, "distance": "Cosine"}}'\n\n# Add a test vector point to the collection\ncurl -X PUT "http://localhost:6333/collections/threat_signatures/points?wait=true" \\\n  -H "Content-Type: application/json" \\\n  -d '{"points": [{"id": 1, "vector": [0.15, 0.22, 0.08, 0.95], "payload": {"rule": "SQL Injection Detect"}}]}';`);
+                                    } else if (dbInitType === 'chroma') {
+                                      setDbInitScript(`# Create a Chroma collection named "alerts_vectors"\ncurl -X POST "http://localhost:8000/api/v1/collections" \\\n  -H "Content-Type: application/json" \\\n  -d '{"name": "alerts_vectors", "metadata": {"description": "IDPS Threat Alerts"}}';`);
+                                    } else if (dbInitType === 'oracle') {
                                setDbInitScript(`DECLARE\n  c INT;\nBEGIN\n  SELECT COUNT(*) INTO c FROM user_tables WHERE table_name = 'USERS';\n  IF c = 0 THEN\n    EXECUTE IMMEDIATE 'CREATE TABLE users (username VARCHAR2(255) PRIMARY KEY, password VARCHAR2(255))';\n  END IF;\n  EXECUTE IMMEDIATE 'INSERT INTO users (username, password) VALUES (''admin'', ''admin123'')';\nEND;\n/`);
                              } else {
                                setDbInitScript(`CREATE TABLE IF NOT EXISTS users (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  username VARCHAR(255) NOT NULL UNIQUE,\n  password VARCHAR(255) NOT NULL\n);\n\nINSERT INTO users (username, password) VALUES ('admin', 'admin123') ON DUPLICATE KEY UPDATE password=VALUES(password);`);
@@ -2286,6 +2409,78 @@ function DevOps() {
                   onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
                 >
                   🐍 Python (Django)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# MariaDB Config\nPORT=3001\nDB_HOST=127.0.0.1\nDB_PORT=3306\nDB_DATABASE=preview_db\nDB_USERNAME=root\nDB_PASSWORD=\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  🐬 MariaDB
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# MongoDB Config\nPORT=3001\nMONGODB_URI=mongodb://127.0.0.1:27017/preview_db\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  🍃 MongoDB
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# PostgreSQL Config\nPORT=3001\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_DATABASE=preview_db\nDB_USERNAME=postgres\nDB_PASSWORD=\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  🐘 PostgreSQL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# Cassandra Config\nPORT=3001\nCASSANDRA_HOST=127.0.0.1\nCASSANDRA_PORT=9042\nCASSANDRA_KEYSPACE=preview_keyspace\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  📡 Cassandra
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# Redis Config\nPORT=3001\nREDIS_HOST=127.0.0.1\nREDIS_PORT=6379\nREDIS_PASSWORD=\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  🛑 Redis
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# MSSQL Config\nPORT=3001\nDB_HOST=127.0.0.1\nDB_PORT=1433\nDB_DATABASE=preview_db\nDB_USERNAME=sa\nDB_PASSWORD=Password123!\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  💼 SQL Server
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# Oracle Config\nPORT=3001\nORACLE_HOST=127.0.0.1\nORACLE_PORT=1521\nORACLE_SERVICE=ORCL\nORACLE_USER=system\nORACLE_PASSWORD=oracle\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  🔴 Oracle
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEnvFiles([{ path: '.env', content: '# Vector Database Config\nPORT=3001\nQDRANT_HOST=127.0.0.1\nQDRANT_PORT=6333\nCHROMA_HOST=127.0.0.1\nCHROMA_PORT=8000\nJWT_SECRET=supersecret' }])}
+                  style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', transition: 'background 0.2s' }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
+                >
+                  📐 Qdrant / Chroma
                 </button>
               </div>
               <div style={{ fontSize: '11.5px', color: 'var(--accent-cyan)', background: 'rgba(6,182,212,0.04)', border: '1px solid rgba(6,182,212,0.15)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', marginTop: '4px', lineHeight: '1.4' }}>
@@ -2721,6 +2916,19 @@ function DevOps() {
                         >
                           <FileText size={12} /> Get PDF Report
                         </button>
+                        
+                        <button
+                          onClick={() => handleDownloadSecureEnvPdf(activeDeploymentId, projectName || 'build')}
+                          style={{
+                            background: 'rgba(6, 182, 212, 0.15)', border: '1px solid rgba(6, 182, 212, 0.4)',
+                            borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)',
+                            padding: '6px 12px', fontSize: '11px', fontWeight: 600,
+                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+                          }}
+                          title={`Download encrypted .env variables PDF. Open password: DevOps-Env-${activeJobId?.slice(0, 6)}`}
+                        >
+                          <Lock size={12} /> Secure Env PDF (Password: DevOps-Env-{activeJobId?.slice(0, 6)})
+                        </button>
                       </>
                     )}
                   </div>
@@ -2741,10 +2949,12 @@ function DevOps() {
                         {!isEditingPort && !isRebuildingPort && (
                           <button
                             onClick={() => {
+                              if (!getEditPortAccess(activeDep)) return;
                               setEditPortValue(String(previewPort));
                               setIsEditingPort(true);
                             }}
-                            title="Change sandbox preview port"
+                            disabled={!getEditPortAccess(activeDep)}
+                            title={!getEditPortAccess(activeDep) ? "Port editing restricted by owner" : "Change sandbox preview port"}
                             style={{
                               background: 'rgba(34,211,238,0.1)', border: '1px solid rgba(34,211,238,0.3)',
                               borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)',
@@ -2758,8 +2968,8 @@ function DevOps() {
 
                         <button
                           onClick={handleStopPreview}
-                          disabled={stoppingPreview}
-                          title="Stop the isolated sandbox"
+                          disabled={stoppingPreview || !getBuildAccess(activeDep)}
+                          title={!getBuildAccess(activeDep) ? "Access restricted by owner" : "Stop the isolated sandbox"}
                           style={{
                             background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
                             borderRadius: 'var(--radius-sm)', color: 'var(--sev-critical)',
@@ -2997,7 +3207,8 @@ function DevOps() {
                           <button
                             type="button"
                             onClick={() => handleRunTerminalQuery(activeDep.dbInitType)}
-                            disabled={runningQuery || !terminalQuery.trim()}
+                            disabled={runningQuery || !terminalQuery.trim() || !getBuildAccess(activeDep)}
+                            title={!getBuildAccess(activeDep) ? "Access restricted by owner" : ""}
                             style={{
                               background: 'var(--accent-cyan)',
                               border: 'none',
@@ -3037,6 +3248,112 @@ function DevOps() {
                             </pre>
                           </div>
                         )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* GitHub Collaborator Permissions Panel */}
+                  {activeDeploymentId && (() => {
+                    const activeDep = deployments.find(d => d._id === activeDeploymentId);
+                    if (!activeDep || activeDep.deploymentType !== 'github') return null;
+                    
+                    // Only display if the current logged-in user is the owner/creator
+                    const isOwner = activeDep.deployedBy && currentUser && (activeDep.deployedBy._id === currentUser._id || activeDep.deployedBy === currentUser._id);
+                    if (!isOwner) return null;
+
+                    return (
+                      <div style={{
+                        display: 'flex', flexDirection: 'column', gap: '12px',
+                        background: 'rgba(167, 139, 250, 0.03)', padding: '14px',
+                        borderRadius: 'var(--radius-md)', border: '1px solid rgba(167, 139, 250, 0.25)',
+                        marginTop: '12px'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <Users size={18} style={{ color: 'var(--accent-purple)', flexShrink: 0 }} />
+                          <div style={{ flex: 1, fontSize: '13px', color: 'var(--text-primary)', fontWeight: 600 }}>
+                            👥 GitHub Collaborator Permissions
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleSyncCollaborators(activeDep._id)}
+                            style={{
+                              background: 'rgba(255, 255, 255, 0.05)',
+                              border: '1px solid var(--border-subtle)',
+                              borderRadius: 'var(--radius-sm)',
+                              color: 'var(--text-secondary)',
+                              padding: '3px 8px',
+                              fontSize: '10.5px',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
+                            }}
+                          >
+                            <RefreshCw size={10} /> Sync
+                          </button>
+                        </div>
+                        
+                        {/* Onboarding info for collaborator workflow */}
+                        <div style={{
+                          background: 'rgba(99, 102, 241, 0.06)', border: '1px solid rgba(99, 102, 241, 0.2)',
+                          borderRadius: 'var(--radius-sm)', padding: '10px 12px', fontSize: '11.5px',
+                          color: 'var(--text-secondary)', lineHeight: '1.5'
+                        }}>
+                          <strong style={{ color: 'var(--accent-purple)' }}>ℹ️ How to add a collaborator:</strong>
+                          <ol style={{ margin: '6px 0 0 16px', padding: 0 }}>
+                            <li>Add them as a collaborator on GitHub repo <strong>{activeDep.githubRepo}</strong>.</li>
+                            <li>Ask them to log into this IDS-IPS system using <strong>that same GitHub account</strong>.</li>
+                            <li>Click <strong>Sync</strong> above to refresh the collaborator list.</li>
+                            <li>Toggle the permissions below — they take effect immediately.</li>
+                          </ol>
+                          <div style={{ marginTop: '6px', color: 'var(--text-muted)', fontSize: '11px' }}>
+                            Once logged in, they will see this build on <strong>/devops</strong> and <strong>/agent</strong> automatically (if Visibility is enabled).
+                          </div>
+                        </div>
+
+                        {/* Active collaborators list */}
+                        {activeDep.collaborators?.length > 0 ? (
+                          <div style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                            Collaborators synced from GitHub:&nbsp;
+                            {activeDep.collaborators.map((c, i) => (
+                              <span key={c} style={{
+                                background: 'rgba(167,139,250,0.12)', color: 'var(--accent-purple)',
+                                borderRadius: '4px', padding: '1px 6px', fontSize: '11px',
+                                fontWeight: 600, marginRight: '4px'
+                              }}>@{c}</span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>
+                            No collaborators synced yet. Click <strong>Sync</strong> to pull from GitHub.
+                          </div>
+                        )}
+
+                        {/* Permission toggles */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }}>
+                          {[
+                            { key: 'allowCollaboratorVisibility', label: '👁️ View sandbox (Visibility)', desc: 'Collaborator can see this deployment in /devops and /agent', defaultOn: true },
+                            { key: 'allowCollaboratorBuild',      label: '▶️ Start / Stop sandbox',       desc: 'Collaborator can start and stop the Docker preview container', defaultOn: false },
+                            { key: 'allowCollaboratorEditPort',   label: '🔌 Edit sandbox port',           desc: 'Collaborator can change the preview port', defaultOn: false },
+                            { key: 'allowCollaboratorDelete',     label: '🗑️ Delete deployment',           desc: 'Collaborator can permanently delete this build record', defaultOn: false },
+                            { key: 'allowCollaboratorChat',       label: '🤖 Chat with AI Agent',          desc: 'Collaborator can use the DevOps AI Agent on /agent page', defaultOn: false },
+                          ].map(({ key, label, desc, defaultOn }) => (
+                            <label key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                style={{ marginTop: '2px', accentColor: 'var(--accent-purple)', cursor: 'pointer' }}
+                                checked={defaultOn
+                                  ? activeDep.githubPermissions?.[key] !== false
+                                  : activeDep.githubPermissions?.[key] === true}
+                                onChange={(e) => handleTogglePermission(activeDep._id, key, e.target.checked)}
+                              />
+                              <div>
+                                <div style={{ fontSize: '12px', color: 'var(--text-primary)', fontWeight: 600 }}>{label}</div>
+                                <div style={{ fontSize: '10.5px', color: 'var(--text-muted)', marginTop: '1px' }}>{desc}</div>
+                              </div>
+                            </label>
+                          ))}
+                        </div>
                       </div>
                     );
                   })()}
@@ -3356,10 +3673,100 @@ function DevOps() {
                     <td style={{ fontWeight: 600, color: d.vulnerabilitiesFound > 0 ? 'var(--sev-critical)' : 'var(--sev-low)' }}>
                       {d.vulnerabilitiesFound} findings
                     </td>
-                    <td style={{ fontSize: '12px', color: d.previewPort ? 'var(--accent-cyan)' : 'var(--text-muted)' }}>
-                      {d.previewPort ? (
-                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>:{d.previewPort}</span>
-                      ) : '—'}
+<td style={{ fontSize: '12px', color: d.previewPort ? 'var(--accent-cyan)' : 'var(--text-muted)' }}>
+                      {editingPortDeploymentId === d._id ? (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <input
+                            type="number"
+                            min="1024"
+                            max="65535"
+                            value={tempPort}
+                            onChange={(e) => setTempPort(e.target.value)}
+                            style={{
+                              background: 'var(--bg-base, #050811)',
+                              border: '1px solid var(--border-active, rgba(6, 182, 212, 0.4))',
+                              borderRadius: '4px',
+                              color: 'var(--text-primary)',
+                              padding: '2px 4px',
+                              width: '65px',
+                              fontSize: '11.5px',
+                              fontFamily: 'var(--font-mono)',
+                              outline: 'none'
+                            }}
+                            autoFocus
+                            onKeyDown={async (e) => {
+                              if (e.key === 'Enter') {
+                                await handleInlinePortSave(d._id);
+                              } else if (e.key === 'Escape') {
+                                setEditingPortDeploymentId(null);
+                              }
+                            }}
+                          />
+                          <button
+                            onClick={() => handleInlinePortSave(d._id)}
+                            disabled={updatingPortId === d._id}
+                            title="Save Port"
+                            style={{
+                              background: 'rgba(16, 185, 129, 0.15)',
+                              border: '1px solid rgba(16, 185, 129, 0.4)',
+                              borderRadius: '4px',
+                              color: 'var(--accent-emerald, #10b981)',
+                              padding: '2px 4px',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <Check size={10} />
+                          </button>
+                          <button
+                            onClick={() => setEditingPortDeploymentId(null)}
+                            title="Cancel"
+                            style={{
+                              background: 'rgba(239, 68, 68, 0.15)',
+                              border: '1px solid rgba(239, 68, 68, 0.4)',
+                              borderRadius: '4px',
+                              color: 'var(--sev-critical, #ef4444)',
+                              padding: '2px 4px',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <Square size={8} fill="currentColor" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
+                            {d.previewPort ? `:${d.previewPort}` : '—'}
+                          </span>
+                          {d.previewStatus !== 'running' && (
+                            <button
+                              onClick={() => {
+                                setEditingPortDeploymentId(d._id);
+                                setTempPort(String(d.previewPort || 3001));
+                              }}
+                              className="port-edit-btn"
+                              title="Edit Port"
+                              onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent-cyan)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted, #9ca3af)'; }}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--text-muted, #9ca3af)',
+                                cursor: 'pointer',
+                                padding: '2px',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                transition: 'color 0.15s'
+                              }}
+                            >
+                              <Settings size={10} />
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                       {new Date(d.createdAt).toLocaleString()}
@@ -3388,8 +3795,12 @@ function DevOps() {
                                     </span>
                                     <button
                                       onClick={() => handleHistoryStop(d._id)}
+                                      disabled={!getBuildAccess(d)}
+                                      title={!getBuildAccess(d) ? "Access restricted by owner" : ""}
                                       style={{
                                         background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+                                        opacity: !getBuildAccess(d) ? 0.5 : 1,
+                                        cursor: !getBuildAccess(d) ? 'not-allowed' : 'pointer',
                                         borderRadius: 'var(--radius-sm)', color: 'var(--sev-critical)',
                                         padding: '4px 8px', fontSize: '11px', fontWeight: 600,
                                         cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px'
@@ -3401,8 +3812,12 @@ function DevOps() {
                                 ) : (
                                   <button
                                     onClick={() => handleHistoryStart(d._id, d.jobId, d.previewPort || 3001)}
+                                    disabled={!getBuildAccess(d)}
+                                    title={!getBuildAccess(d) ? "Access restricted by owner" : ""}
                                     style={{
                                       background: 'rgba(0, 194, 168, 0.1)', border: '1px solid rgba(0, 194, 168, 0.3)',
+                                      opacity: !getBuildAccess(d) ? 0.5 : 1,
+                                      cursor: !getBuildAccess(d) ? 'not-allowed' : 'pointer',
                                       borderRadius: 'var(--radius-sm)', color: 'var(--accent-teal)',
                                       padding: '4px 8px', fontSize: '11px', fontWeight: 600,
                                       cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px'
@@ -3444,12 +3859,15 @@ function DevOps() {
                         
                         <button
                           onClick={() => handleDeleteDeployment(d._id, d.projectName)}
-                          title="Delete deployment record and clean up files"
+                          disabled={!getDeleteAccess(d)}
+                          title={!getDeleteAccess(d) ? "Deletion restricted by owner" : "Delete deployment record and clean up files"}
                           style={{
                             background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)',
                             borderRadius: 'var(--radius-sm)', color: 'var(--sev-critical)',
                             padding: '4px 8px', fontSize: '11px', fontWeight: 600,
-                            cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px'
+                            cursor: !getDeleteAccess(d) ? 'not-allowed' : 'pointer',
+                            opacity: !getDeleteAccess(d) ? 0.45 : 1,
+                            display: 'inline-flex', alignItems: 'center', gap: '4px'
                           }}
                         >
                           <Trash2 size={11} /> Delete
@@ -3640,6 +4058,7 @@ function DevOps() {
               deploymentId={activeDeploymentId} 
               jobId={activeJobId} 
               birdMessage={showBirdAgent ? birdMessage : null} 
+              disabled={!getChatAccess(activeDep)}
             />
           )}
         </div>
@@ -3648,7 +4067,7 @@ function DevOps() {
   );
 }
 
-function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage }) {
+function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled }) {
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
@@ -3890,7 +4309,8 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage }) {
         <textarea
           value={chatInput}
           onChange={(e) => setChatInput(e.target.value)}
-          placeholder="Ask agent to check file or fix errors..."
+          disabled={disabled}
+          placeholder={disabled ? "Chat with AI agent is restricted by the project owner." : "Ask agent to check file or fix errors..."}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
@@ -3902,7 +4322,7 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage }) {
         />
         <button
           onClick={handleSendChat}
-          disabled={isAgentTyping}
+          disabled={isAgentTyping || disabled}
           style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', borderRadius: '4px', width: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
         >
           <Send size={12} />
