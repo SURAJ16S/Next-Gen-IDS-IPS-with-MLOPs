@@ -504,6 +504,229 @@ const getGithubUserProfile = async (req, res) => {
   }
 };
 
+// ─── 9. Publish workspace files to a new GitHub branch ───────────────────────
+const publishBranchToGithub = async (req, res) => {
+  const { id } = req.params;
+  let { branchName, repoFullName: bodyRepo } = req.body;
+
+  try {
+    const deployment = await Deployment.findById(id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found.' });
+
+    // Owner-only gate
+    if (!deployment.deployedBy || deployment.deployedBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Only the deployment owner can publish to GitHub.' });
+    }
+
+    // Limit check (max 3 branches)
+    if (deployment.publishedBranches && deployment.publishedBranches.length >= 3) {
+      return res.status(400).json({ message: 'This build has already been published to the maximum limit of 3 branches.' });
+    }
+
+    const user = await User.findById(req.user._id).select('+githubAccessToken');
+    if (!user?.githubAccessToken) {
+      return res.status(401).json({ message: 'GitHub not linked. Please reconnect GitHub.' });
+    }
+
+    // Resolve target repo: GitHub-imported builds use their linked repo; ZIP builds need repoFullName from body
+    const targetRepo = deployment.githubRepo || bodyRepo;
+    if (!targetRepo) {
+      return res.status(400).json({ message: 'No GitHub repository linked. Please provide a target repository.' });
+    }
+
+    const token = user.githubAccessToken;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'User-Agent': 'IDPS-DevOps',
+      Accept: 'application/vnd.github.v3+json',
+    };
+    const [repoOwner, repoName] = targetRepo.split('/');
+
+
+    // ── Resolve workspace path ────────────────────────────────────────────────
+    const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+    const workspaceRoot = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId);
+    if (!fs.existsSync(workspaceRoot)) {
+      return res.status(404).json({ message: 'Build workspace not found on disk. Has the build been cleaned up?' });
+    }
+
+    // ── Parse .gitignore if present ───────────────────────────────────────────
+    const gitignorePath = path.join(workspaceRoot, '.gitignore');
+    const ignorePatterns = [];
+    if (fs.existsSync(gitignorePath)) {
+      const lines = fs.readFileSync(gitignorePath, 'utf8').split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#')) ignorePatterns.push(trimmed);
+      }
+    }
+
+    // Simple glob-to-regex for basic .gitignore patterns
+    const isIgnored = (relPath) => {
+      const name = path.basename(relPath);
+      // Always exclude these system, dependency, virtualenv, and build directories
+      const alwaysExclude = [
+        'node_modules', '.git', 'dist', 'build', '__pycache__', '.env', '*.env',
+        '.venv', 'venv', 'env', 'target', 'bin', 'obj', '.gradle', '.cache',
+        '.next', 'out', '.nuxt', '.gitattributes', '.gitignore_global', '.DS_Store', 'Thumbs.db'
+      ];
+      for (const ex of alwaysExclude) {
+        if (ex.startsWith('*.')) {
+          if (name.endsWith(ex.slice(1))) return true;
+        } else if (relPath.split('/').includes(ex) || relPath === ex) return true;
+      }
+      // .env files (any .env.* or *.env)
+      if (name === '.env' || name.startsWith('.env.') || name.endsWith('.env')) return true;
+      // Check .gitignore patterns
+      for (const pattern of ignorePatterns) {
+        try {
+          const p = pattern.replace(/\./g, '\\.').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]');
+          const re = new RegExp(`(^|/)${p}(/|$)`);
+          if (re.test(relPath)) return true;
+        } catch (_) {}
+      }
+      return false;
+    };
+
+    // ── Collect all files recursively ────────────────────────────────────────
+    const allFiles = [];
+    const walk = (dir, rel = '') => {
+      if (!fs.existsSync(dir)) return;
+      let entries = [];
+      try {
+        entries = fs.readdirSync(dir);
+      } catch (err) {
+        console.warn(`[Publish walk] Cannot read directory ${dir}: ${err.message}`);
+        return;
+      }
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry);
+        const relPath = rel ? `${rel}/${entry}` : entry;
+        if (isIgnored(relPath)) continue;
+        try {
+          const stat = fs.statSync(fullPath);
+          if (stat.isDirectory()) {
+            walk(fullPath, relPath);
+          } else {
+            // Skip very large files (> 1MB) — GitHub API limit per file is ~50MB encoded
+            if (stat.size <= 1_000_000) {
+              allFiles.push({ fullPath, relPath });
+            }
+          }
+        } catch (err) {
+          console.warn(`[Publish walk] Cannot stat ${fullPath}: ${err.message}`);
+        }
+      }
+    };
+    walk(workspaceRoot);
+
+    if (allFiles.length === 0) {
+      return res.status(400).json({ message: 'No publishable files found in workspace.' });
+    }
+
+    // ── Get HEAD SHA of default branch ───────────────────────────────────────
+    let headSha;
+    try {
+      const repoRes = await axios.get(`https://api.github.com/repos/${repoOwner}/${repoName}`, { headers });
+      const defaultBranch = repoRes.data.default_branch || 'main';
+      const refRes = await axios.get(
+        `https://api.github.com/repos/${repoOwner}/${repoName}/git/ref/heads/${defaultBranch}`,
+        { headers }
+      );
+      headSha = refRes.data.object.sha;
+    } catch (err) {
+      return res.status(502).json({ message: `Failed to get repository HEAD: ${err.response?.data?.message || err.message}` });
+    }
+
+    // ── Ensure branch name is unique ─────────────────────────────────────────
+    if (!branchName || !branchName.trim()) {
+      const today = new Date().toISOString().slice(0, 10);
+      branchName = `ids-ips-build-${today}`;
+    }
+    branchName = branchName.trim().replace(/[^a-zA-Z0-9._\-/]/g, '-');
+
+    try {
+      await axios.get(
+        `https://api.github.com/repos/${repoOwner}/${repoName}/git/ref/heads/${branchName}`,
+        { headers }
+      );
+      // Branch already exists → append timestamp
+      branchName = `${branchName}-${Date.now()}`;
+    } catch (e) {
+      if (e.response?.status !== 404) {
+        return res.status(502).json({ message: `GitHub API error checking branch: ${e.response?.data?.message || e.message}` });
+      }
+      // 404 = branch does not exist — good, proceed
+    }
+
+    // ── Create the new branch ────────────────────────────────────────────────
+    await axios.post(
+      `https://api.github.com/repos/${repoOwner}/${repoName}/git/refs`,
+      { ref: `refs/heads/${branchName}`, sha: headSha },
+      { headers }
+    );
+
+    // ── Push files sequentially ──────────────────────────────────────────────
+    let fileCount = 0;
+    for (const { fullPath, relPath } of allFiles) {
+      try {
+        const content = fs.readFileSync(fullPath);
+        const b64 = content.toString('base64');
+
+        // Check if file already exists on the new branch (to get its SHA for update)
+        let existingSha;
+        try {
+          const existing = await axios.get(
+            `https://api.github.com/repos/${repoOwner}/${repoName}/contents/${relPath}?ref=${branchName}`,
+            { headers }
+          );
+          existingSha = existing.data.sha;
+        } catch (_) { /* new file */ }
+
+        const body = {
+          message: `IDS-IPS DevOps: publish build to ${branchName}`,
+          content: b64,
+          branch: branchName,
+        };
+        if (existingSha) body.sha = existingSha;
+
+        await axios.put(
+          `https://api.github.com/repos/${repoOwner}/${repoName}/contents/${relPath}`,
+          body,
+          { headers }
+        );
+        fileCount++;
+      } catch (fileErr) {
+        console.warn(`[Publish] Skipped ${relPath}: ${fileErr.response?.data?.message || fileErr.message}`);
+      }
+    }
+
+    const branchUrl = `https://github.com/${repoOwner}/${repoName}/tree/${branchName}`;
+
+    // Save branch metadata to database
+    deployment.publishedBranches = deployment.publishedBranches || [];
+    deployment.publishedBranches.push({
+      branchName,
+      branchUrl,
+      repoFullName: targetRepo,
+      publishedAt: new Date()
+    });
+    await deployment.save();
+
+    res.json({
+      message: 'Branch published successfully.',
+      branchName,
+      branchUrl,
+      fileCount,
+      repoFullName: targetRepo,
+      publishedBranches: deployment.publishedBranches, // return updated list
+    });
+  } catch (err) {
+    console.error('[Publish Branch] Error:', err.message);
+    res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   getGithubAuthUrl,
   githubOAuthCallback,
@@ -513,4 +736,5 @@ module.exports = {
   unlinkGithub,
   getGithubBranches,
   getGithubUserProfile,
+  publishBranchToGithub,
 };

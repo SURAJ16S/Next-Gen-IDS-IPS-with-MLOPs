@@ -83,6 +83,7 @@ export const getGithubRepos    = ()     => api.get('/devops/github/repos');
 export const getGithubBranches = (owner, repo) => api.get(`/devops/github/repos/${owner}/${repo}/branches`);
 export const importGithubRepo  = (data) => api.post('/devops/github/import', data);
 export const unlinkGithub      = ()     => api.post('/devops/github/unlink');
+export const publishDeploymentBranch = (id, data) => api.post(`/devops/github/${id}/publish-branch`, data);
 
 // Nodes
 export const getNodes = () => api.get('/nodes');
