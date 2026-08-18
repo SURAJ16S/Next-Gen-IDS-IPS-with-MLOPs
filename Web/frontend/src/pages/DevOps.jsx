@@ -18,7 +18,8 @@ import {
   unlinkGithub,
   getGithubBranches,
   executeDeploymentDbQuery,
-  getDeploymentStatus
+  getDeploymentStatus,
+  publishDeploymentBranch
 } from '../services/api';
 import { io } from 'socket.io-client';
 import {
@@ -446,6 +447,39 @@ function DevOps() {
     if (!d.deployedBy) return true;
     return false;
   };
+
+  const getExcludedFoldersText = (techStack) => {
+    const stack = (techStack || '').toUpperCase();
+    const base = ['.env', '.git', 'node_modules'];
+    if (stack.includes('FLASK') || stack.includes('DJANGO') || stack.includes('FASTAPI') || stack.includes('PYTHON')) {
+      return [...base, '.venv', 'venv', 'env', '__pycache__', '.pytest_cache'].join(', ');
+    }
+    if (stack.includes('SPRING') || stack.includes('QUARKUS') || stack.includes('JAVA')) {
+      return [...base, 'target', 'build', '.gradle', 'bin', 'out'].join(', ');
+    }
+    if (stack.includes('DOTNET') || stack.includes('BLAZOR') || stack.includes('C#')) {
+      return [...base, 'bin', 'obj'].join(', ');
+    }
+    if (stack.includes('RUST')) {
+      return [...base, 'target'].join(', ');
+    }
+    if (stack.includes('RUBY') || stack.includes('RAILS') || stack.includes('SINATRA')) {
+      return [...base, '.bundle', 'vendor/bundle'].join(', ');
+    }
+    if (stack.includes('PHP')) {
+      return [...base, 'vendor', 'composer.lock'].join(', ');
+    }
+    // JS/Node catchall (dist, build, .next, .nuxt, out, etc.)
+    return [...base, 'dist', 'build', '.next', '.nuxt', 'out', '.cache'].join(', ');
+  };
+
+  // Publish-to-GitHub state
+  const [showPublishPanel, setShowPublishPanel] = useState(false);
+  const [publishBranchName, setPublishBranchName] = useState('');
+  const [publishTargetRepo, setPublishTargetRepo] = useState(''); // for ZIP builds
+  const [publishingBranch, setPublishingBranch] = useState(false);
+  const [publishResult, setPublishResult] = useState(null); // { branchUrl, branchName, fileCount }
+  const [publishError, setPublishError] = useState('');
 
   const [activeJobStatus, setActiveJobStatus] = useState(null);
   const [activeJobTech, setActiveJobTech] = useState('');
@@ -1129,6 +1163,37 @@ function DevOps() {
       window.URL.revokeObjectURL(url);
     } catch {
       alert('Error downloading secure env PDF.');
+    }
+  };
+
+  const handlePublishBranch = async () => {
+    if (publishingBranch) return;
+    // For ZIP builds, need a target repo selected
+    if (activeDep?.deploymentType !== 'github' && !publishTargetRepo) {
+      setPublishError('Please select a target repository.');
+      return;
+    }
+    setPublishingBranch(true);
+    setPublishError('');
+    setPublishResult(null);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const name = publishBranchName.trim() || `ids-ips-build-${today}`;
+      const body = { branchName: name };
+      // For ZIP builds pass the selected repo; GitHub imports use their linked repo server-side
+      if (activeDep?.deploymentType !== 'github' && publishTargetRepo) {
+        body.repoFullName = publishTargetRepo;
+      }
+      const res = await publishDeploymentBranch(activeDeploymentId, body);
+      setPublishResult(res.data);
+      if (res.data.publishedBranches) {
+        setActiveDep(prev => prev ? { ...prev, publishedBranches: res.data.publishedBranches } : prev);
+      }
+      setShowPublishPanel(false);
+    } catch (err) {
+      setPublishError(err.response?.data?.message || err.message || 'Publish failed.');
+    } finally {
+      setPublishingBranch(false);
     }
   };
 
@@ -2892,7 +2957,7 @@ function DevOps() {
                     <div style={{ flex: 1, fontSize: '12px' }}>
                       <span style={{ fontWeight: 600 }}>Build successful!</span> Artifact packaged and live preview launched.
                     </div>
-                    {activeJobArtifactUrl && (
+                    {activeDeploymentId && (
                       <>
                         <button
                           onClick={() => handleDownload(activeDeploymentId, projectName || 'build')}
@@ -2917,21 +2982,254 @@ function DevOps() {
                           <FileText size={12} /> Get PDF Report
                         </button>
                         
-                        <button
-                          onClick={() => handleDownloadSecureEnvPdf(activeDeploymentId, projectName || 'build')}
-                          style={{
-                            background: 'rgba(6, 182, 212, 0.15)', border: '1px solid rgba(6, 182, 212, 0.4)',
-                            borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)',
-                            padding: '6px 12px', fontSize: '11px', fontWeight: 600,
-                            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
-                          }}
-                          title={`Download encrypted .env variables PDF. Open password: DevOps-Env-${activeJobId?.slice(0, 6)}`}
-                        >
-                          <Lock size={12} /> Secure Env PDF (Password: DevOps-Env-{activeJobId?.slice(0, 6)})
-                        </button>
+                        {isOwnerOf(activeDep) && (
+                          <button
+                            onClick={() => handleDownloadSecureEnvPdf(activeDeploymentId, projectName || 'build')}
+                            style={{
+                              background: 'rgba(6, 182, 212, 0.15)', border: '1px solid rgba(6, 182, 212, 0.4)',
+                              borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)',
+                              padding: '6px 12px', fontSize: '11px', fontWeight: 600,
+                              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+                            }}
+                            title={`Download encrypted .env variables PDF. Open password: DevOps-Env-${activeJobId?.slice(0, 6)}`}
+                          >
+                            <Lock size={12} /> Secure Env PDF (Password: DevOps-Env-{activeJobId?.slice(0, 6)})
+                          </button>
+                        )}
                       </>
                     )}
                   </div>
+
+                  {/* ── Publish to GitHub Panel (owner-only, any successfully deployed build) ── */}
+                  {activeJobStatus === 'deployed' && githubLinked && isOwnerOf(activeDep) && (
+                    <div style={{
+                      display: 'flex', flexDirection: 'column', gap: '10px',
+                      background: 'rgba(99, 102, 241, 0.06)', padding: '14px',
+                      borderRadius: 'var(--radius-md)', border: '1px solid rgba(99, 102, 241, 0.25)',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <GitBranch size={18} style={{ color: 'var(--accent-purple)', flexShrink: 0 }} />
+                        <div style={{ flex: 1, fontSize: '12.5px', color: 'var(--text-primary)', fontWeight: 600 }}>
+                          Publish to GitHub
+                        </div>
+                        {publishResult ? (
+                          <span style={{
+                            fontSize: '11px', color: 'var(--sev-low)', fontWeight: 600,
+                            background: 'rgba(34,197,94,0.12)', padding: '3px 8px',
+                            borderRadius: 'var(--radius-sm)', border: '1px solid rgba(34,197,94,0.3)'
+                          }}>✓ Published</span>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              const opening = !showPublishPanel;
+                              setShowPublishPanel(p => !p);
+                              setPublishError('');
+                              if (!publishBranchName) {
+                                const today = new Date().toISOString().slice(0, 10);
+                                setPublishBranchName(`ids-ips-build-${today}`);
+                              }
+                              // Fetch repos for the repo picker when opening (if not loaded yet)
+                              if (opening && githubRepos.length === 0 && githubLinked) {
+                                loadGithubRepos();
+                              }
+                            }}
+                            style={{
+                              background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.4)',
+                              borderRadius: 'var(--radius-sm)', color: 'var(--accent-purple)',
+                              padding: '5px 12px', fontSize: '11px', fontWeight: 600,
+                              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px'
+                            }}
+                          >
+                            <GitBranch size={11} /> {showPublishPanel ? 'Cancel' : 'Publish to New Branch'}
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Success result */}
+                      {publishResult && (
+                        <div style={{
+                          background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)',
+                          borderRadius: 'var(--radius-sm)', padding: '10px 12px',
+                          display: 'flex', flexDirection: 'column', gap: '6px'
+                        }}>
+                          <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--sev-low)' }}>
+                            ✅ Branch created: <code style={{ color: 'var(--text-primary)', background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '3px' }}>{publishResult.branchName}</code>
+                          </div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                            {publishResult.fileCount} file{publishResult.fileCount !== 1 ? 's' : ''} pushed to{' '}
+                            <strong>{publishResult.repoFullName}</strong>
+                          </div>
+                          <a
+                            href={publishResult.branchUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: '5px',
+                              fontSize: '11.5px', fontWeight: 600, color: 'var(--accent-purple)',
+                              textDecoration: 'none'
+                            }}
+                          >
+                            <ExternalLink size={11} /> View branch on GitHub
+                          </a>
+                        </div>
+                      )}
+
+                      {/* Previously published branches history */}
+                      {activeDep?.publishedBranches && activeDep.publishedBranches.length > 0 && (
+                        <div style={{
+                          background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)',
+                          borderRadius: 'var(--radius-sm)', padding: '10px 12px',
+                          display: 'flex', flexDirection: 'column', gap: '6px'
+                        }}>
+                          <div style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                            Previously Published Branches ({activeDep.publishedBranches.length}/3 max):
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            {activeDep.publishedBranches.map((pb, idx) => (
+                              <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11.5px' }}>
+                                <span style={{ color: 'var(--text-muted)' }}>
+                                  repo: <strong>{pb.repoFullName}</strong>
+                                </span>
+                                <a
+                                  href={pb.branchUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                    fontWeight: 600, color: 'var(--accent-purple)', textDecoration: 'none'
+                                  }}
+                                >
+                                  {pb.branchName} <ExternalLink size={10} />
+                                </a>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Publish form */}
+                      {showPublishPanel && !publishResult && (
+                        <div style={{
+                          background: 'rgba(99,102,241,0.04)', border: '1px solid rgba(99,102,241,0.18)',
+                          borderRadius: 'var(--radius-sm)', padding: '12px',
+                          display: 'flex', flexDirection: 'column', gap: '10px'
+                        }}>
+                          {activeDep?.publishedBranches && activeDep.publishedBranches.length >= 3 ? (
+                            <div style={{
+                              background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
+                              borderRadius: 'var(--radius-sm)', padding: '8px 10px',
+                              fontSize: '11px', color: 'var(--sev-critical)', fontWeight: 600
+                            }}>
+                              🚫 Maximum limit of 3 branch publishes reached for this build.
+                            </div>
+                          ) : (
+                            <>
+                              {/* Repo picker for ZIP uploads (GitHub imports auto-use linked repo) */}
+                              {activeDep?.deploymentType !== 'github' && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                                    Target Repository:
+                                  </label>
+                                  {reposLoading ? (
+                                    <div style={{ fontSize: '11.5px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                      <RefreshCw size={11} style={{ animation: 'spin 1s linear infinite' }} /> Fetching your repositories…
+                                    </div>
+                                  ) : githubRepos.length === 0 ? (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                      <span style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>No repos found.</span>
+                                      <button
+                                        type="button"
+                                        onClick={loadGithubRepos}
+                                        style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', color: 'var(--accent-cyan)', cursor: 'pointer', fontSize: '11px', padding: '2px 8px' }}
+                                      >
+                                        Retry
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <select
+                                      value={publishTargetRepo}
+                                      onChange={e => setPublishTargetRepo(e.target.value)}
+                                      style={{
+                                        background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-active)',
+                                        borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
+                                        padding: '5px 10px', fontSize: '12px', outline: 'none', width: '100%'
+                                      }}
+                                    >
+                                      <option value="" disabled>Select a repository…</option>
+                                      {githubRepos.map(r => (
+                                        <option key={r.id} value={r.fullName}>{r.fullName}{r.private ? ' 🔒' : ''}</option>
+                                      ))}
+                                    </select>
+                                  )}
+                                </div>
+                              )}
+
+                              {/* Warning */}
+                              <div style={{
+                                background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.25)',
+                                borderRadius: 'var(--radius-sm)', padding: '8px 10px',
+                                fontSize: '11px', color: '#f59e0b', lineHeight: '1.5'
+                              }}>
+                                ⚠️ <strong>A new branch will be created</strong> — existing branches in <strong>{activeDep?.githubRepo || 'your selected repository'}</strong> are NOT modified.
+                                <br />
+                                <span style={{ color: 'var(--text-muted)' }}>
+                                  Automatically excluded files/folders based on architecture ({activeJobTech || 'Node/JS'}):{' '}
+                                  <code style={{ color: '#f59e0b', background: 'rgba(251,191,36,0.08)', padding: '1px 5px', borderRadius: '3px' }}>
+                                    {getExcludedFoldersText(activeJobTech || activeDep?.techStackDetected)}
+                                  </code>
+                                </span>
+                              </div>
+
+                              {/* Branch name input */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <label style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                                  Branch name:
+                                </label>
+                                <input
+                                  type="text"
+                                  value={publishBranchName}
+                                  onChange={e => setPublishBranchName(e.target.value)}
+                                  placeholder={`ids-ips-build-${new Date().toISOString().slice(0, 10)}`}
+                                  style={{
+                                    flex: 1, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-active)',
+                                    borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
+                                    padding: '5px 10px', fontSize: '12px', outline: 'none', fontFamily: 'monospace'
+                                  }}
+                                />
+                              </div>
+
+                              {/* Error */}
+                              {publishError && (
+                                <div style={{ fontSize: '11.5px', color: 'var(--sev-critical)', background: 'rgba(239,68,68,0.08)', padding: '6px 10px', borderRadius: 'var(--radius-sm)' }}>
+                                  ❌ {publishError}
+                                </div>
+                              )}
+
+                              {/* Publish button */}
+                              <button
+                                onClick={handlePublishBranch}
+                                disabled={publishingBranch}
+                                style={{
+                                  background: publishingBranch ? 'rgba(99,102,241,0.3)' : 'rgba(99,102,241,0.8)',
+                                  border: 'none', borderRadius: 'var(--radius-sm)', color: '#fff',
+                                  padding: '7px 14px', fontSize: '12px', fontWeight: 700,
+                                  cursor: publishingBranch ? 'not-allowed' : 'pointer',
+                                  display: 'flex', alignItems: 'center', gap: '6px', alignSelf: 'flex-start',
+                                  opacity: publishingBranch ? 0.7 : 1, transition: 'opacity 0.2s'
+                                }}
+                              >
+                                {publishingBranch ? (
+                                  <><RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} /> Publishing…</>
+                                ) : (
+                                  <><GitBranch size={12} /> Publish Branch</>
+                                )}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Live preview panel */}
                   {previewReady && (

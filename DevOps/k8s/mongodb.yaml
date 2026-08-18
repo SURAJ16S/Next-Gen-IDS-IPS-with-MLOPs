@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: devops-mongodb
+  namespace: devops-system
+spec:
+  serviceName: devops-mongodb-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: devops-mongodb
+  template:
+    metadata:
+      labels:
+        app: devops-mongodb
+    spec:
+      containers:
+      - name: mongodb
+        image: mongo:6.0
+        ports:
+        - containerPort: 27017
+          name: mongo
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+        - name: mongo-volume
+          mountPath: /data/db
+  volumeClaimTemplates:
+  - metadata:
+      name: mongo-volume
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devops-mongodb-service
+  namespace: devops-system
+spec:
+  selector:
+    app: devops-mongodb
+  ports:
+  - protocol: TCP
+    port: 27017
+    targetPort: 27017

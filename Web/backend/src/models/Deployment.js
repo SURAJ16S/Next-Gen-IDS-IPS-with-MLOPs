@@ -126,7 +126,15 @@ const deploymentSchema = new mongoose.Schema(
       allowCollaboratorEditPort:   { type: Boolean, default: false },
       allowCollaboratorDelete:     { type: Boolean, default: false },
       allowCollaboratorChat:       { type: Boolean, default: false }
-    }
+    },
+    publishedBranches: [
+      {
+        branchName: { type: String },
+        branchUrl:  { type: String },
+        repoFullName: { type: String },
+        publishedAt: { type: Date, default: Date.now }
+      }
+    ]
   },
   { 
     timestamps: true,

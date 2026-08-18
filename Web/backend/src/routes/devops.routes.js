@@ -46,6 +46,7 @@ const {
   unlinkGithub,
   getGithubBranches,
   getGithubUserProfile,
+  publishBranchToGithub,
 } = require('../controllers/github.controller');
 const { protect } = require('../middleware/auth.middleware');
 const { checkDeploymentAccess } = require('../middleware/access.middleware');
@@ -59,6 +60,7 @@ router.get('/github/repos',    protect, getGithubRepos);
 router.get('/github/repos/:owner/:repo/branches', protect, getGithubBranches);
 router.post('/github/import',  protect, importGithubRepo);
 router.post('/github/unlink',  protect, unlinkGithub);
+router.post('/github/:id/publish-branch', protect, publishBranchToGithub);
 
 // Static routes must be declared BEFORE dynamic :id routes
 router.get('/suggest-port', protect, getSuggestedPort);

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: devops-pgvector
+  namespace: devops-system
+spec:
+  serviceName: devops-pgvector-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: devops-pgvector
+  template:
+    metadata:
+      labels:
+        app: devops-pgvector
+    spec:
+      containers:
+      - name: pgvector
+        image: pgvector/pgvector:pg16
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: agent_memory
+        - name: POSTGRES_USER
+          value: postgres
+        - name: POSTGRES_PASSWORD
+          value: postgres
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 400m
+            memory: 256Mi
+        volumeMounts:
+        - name: pgvector-volume
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: pgvector-volume
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devops-pgvector-service
+  namespace: devops-system
+spec:
+  selector:
+    app: devops-pgvector
+  ports:
+  - protocol: TCP
+    port: 5432
+    targetPort: 5432

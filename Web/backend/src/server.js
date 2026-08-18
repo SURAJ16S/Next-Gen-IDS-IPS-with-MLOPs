@@ -45,6 +45,17 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'IDPS Backend API Running', timestamp: new Date() });
 });
 
+// ─── Prometheus Metrics Scraping ──────────────────────────────────────────────
+app.get('/metrics', async (req, res) => {
+  try {
+    const { register } = require('./services/agent/metrics');
+    res.set('Content-Type', register.contentType);
+    res.end(await register.metrics());
+  } catch (err) {
+    res.status(500).end(err);
+  }
+});
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/api/auth', require('./routes/auth.routes'));
 app.use('/api/dashboard', require('./routes/dashboard.routes'));

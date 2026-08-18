@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-vault
+  namespace: devops-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: devops-vault
+  template:
+    metadata:
+      labels:
+        app: devops-vault
+    spec:
+      containers:
+      - name: vault
+        image: hashicorp/vault:latest
+        ports:
+        - containerPort: 8200
+          name: vault
+        env:
+        - name: VAULT_DEV_ROOT_TOKEN_ID
+          value: my-secure-token
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devops-vault-service
+  namespace: devops-system
+spec:
+  selector:
+    app: devops-vault
+  ports:
+  - protocol: TCP
+    port: 8200
+    targetPort: 8200
