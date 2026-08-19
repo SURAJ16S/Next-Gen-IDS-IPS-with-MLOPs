@@ -23,7 +23,7 @@ spec:
       labels:
         app: untrusted-app
     spec:
-      runtimeClassName: gvisor # CRITICAL: Enforces user-space syscall interception via runsc
+      # runtimeClassName: gvisor # Commented out for standard laptop Minikube compatibility; can be enabled on VPS
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001

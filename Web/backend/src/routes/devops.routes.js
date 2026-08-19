@@ -26,11 +26,16 @@ const {
   getDbCollectionData,
   insertDbRecord,
   executeAgentChat,
+  rollbackAgentPatches,
   updateAgentPermission,
+  undoChatMessages,
   executePendingCommands,
   getChats,
   createChat,
   getChatMessages,
+  updateCollaboratorPermissions,
+  syncGithubCollaborators,
+  downloadSecureEnvPdf
 } = require('../controllers/devops.controller');
 const {
   getGithubAuthUrl,
@@ -41,8 +46,10 @@ const {
   unlinkGithub,
   getGithubBranches,
   getGithubUserProfile,
+  publishBranchToGithub,
 } = require('../controllers/github.controller');
 const { protect } = require('../middleware/auth.middleware');
+const { checkDeploymentAccess } = require('../middleware/access.middleware');
 
 // ─── GitHub OAuth ──────────────────────────────────────────────────────────────
 router.get('/github/callback', githubOAuthCallback);
@@ -53,6 +60,7 @@ router.get('/github/repos',    protect, getGithubRepos);
 router.get('/github/repos/:owner/:repo/branches', protect, getGithubBranches);
 router.post('/github/import',  protect, importGithubRepo);
 router.post('/github/unlink',  protect, unlinkGithub);
+router.post('/github/:id/publish-branch', protect, publishBranchToGithub);
 
 // Static routes must be declared BEFORE dynamic :id routes
 router.get('/suggest-port', protect, getSuggestedPort);
@@ -65,35 +73,42 @@ router.post('/fixtures/:frameworkId/reviews', protect, createFixtureReview);
 // Deployment CRUD
 router.get('/', protect, getDeployments);
 router.post('/', protect, createDeployment);
-router.put('/:id', protect, updateDeploymentStatus);
-router.delete('/:id', protect, deleteDeployment);
+router.put('/:id', protect, checkDeploymentAccess('build'), updateDeploymentStatus);
+router.delete('/:id', protect, checkDeploymentAccess('build'), deleteDeployment);
 
 // Pipeline execution routes
 router.post('/upload', protect, uploadZip);
-router.get('/:id/status', protect, getDeploymentStatus);
-router.get('/:id/artifact', protect, downloadArtifact);
-router.get('/:id/pdf-report', protect, downloadPdfReport);
-router.post('/:id/stop-preview', protect, stopDeploymentPreview);
-router.post('/:id/start-preview', protect, startDeploymentPreview);
-router.post('/:id/change-port', protect, changeDeploymentPort);
-router.post('/:id/run-query', protect, executeDeploymentDbQuery);
+router.get('/:id/status', protect, checkDeploymentAccess('visibility'), getDeploymentStatus);
+router.get('/:id/artifact', protect, checkDeploymentAccess('visibility'), downloadArtifact);
+router.get('/:id/pdf-report', protect, checkDeploymentAccess('visibility'), downloadPdfReport);
+router.post('/:id/stop-preview', protect, checkDeploymentAccess('build'), stopDeploymentPreview);
+router.post('/:id/start-preview', protect, checkDeploymentAccess('build'), startDeploymentPreview);
+router.post('/:id/change-port', protect, checkDeploymentAccess('build'), changeDeploymentPort);
+router.post('/:id/run-query', protect, checkDeploymentAccess('build'), executeDeploymentDbQuery);
 
 // Workspace File API
-router.get('/:id/files', protect, getWorkspaceFiles);
-router.get('/:id/files/content', protect, getWorkspaceFileContent);
-router.post('/:id/files/save', protect, saveWorkspaceFile);
+router.get('/:id/files', protect, checkDeploymentAccess('visibility'), getWorkspaceFiles);
+router.get('/:id/files/content', protect, checkDeploymentAccess('visibility'), getWorkspaceFileContent);
+router.post('/:id/files/save', protect, checkDeploymentAccess('build'), saveWorkspaceFile);
 
 // Database API
-router.get('/:id/db/collections', protect, getDbCollections);
-router.get('/:id/db/collection/:collection', protect, getDbCollectionData);
-router.post('/:id/db/insert', protect, insertDbRecord);
+router.get('/:id/db/collections', protect, checkDeploymentAccess('visibility'), getDbCollections);
+router.get('/:id/db/collection/:collection', protect, checkDeploymentAccess('visibility'), getDbCollectionData);
+router.post('/:id/db/insert', protect, checkDeploymentAccess('build'), insertDbRecord);
 
 // AI Agent Chat & Permission API
-router.get('/:id/agent/chats', protect, getChats);
-router.post('/:id/agent/chats', protect, createChat);
-router.get('/:id/agent/chats/:chatId', protect, getChatMessages);
-router.post('/:id/agent/chat', protect, executeAgentChat);
-router.post('/:id/agent/permission', protect, updateAgentPermission);
-router.post('/:id/agent/exec-pending', protect, executePendingCommands);
+router.get('/:id/agent/chats', protect, checkDeploymentAccess('visibility'), getChats);
+router.post('/:id/agent/chats', protect, checkDeploymentAccess('chat'), createChat);
+router.get('/:id/agent/chats/:chatId', protect, checkDeploymentAccess('visibility'), getChatMessages);
+router.post('/:id/agent/chat', protect, checkDeploymentAccess('chat'), executeAgentChat);
+router.post('/:id/agent/chat/undo', protect, checkDeploymentAccess('chat'), undoChatMessages);
+router.post('/:id/agent/rollback', protect, checkDeploymentAccess('chat'), rollbackAgentPatches);
+router.post('/:id/agent/permission', protect, checkDeploymentAccess('chat'), updateAgentPermission);
+router.post('/:id/agent/exec-pending', protect, checkDeploymentAccess('build'), executePendingCommands);
+
+// Collaborator Roles & Secure PDF API
+router.post('/:id/permissions', protect, checkDeploymentAccess('visibility'), updateCollaboratorPermissions);
+router.post('/:id/sync-collaborators', protect, checkDeploymentAccess('visibility'), syncGithubCollaborators);
+router.get('/:id/env-pdf', protect, checkDeploymentAccess('visibility'), downloadSecureEnvPdf);
 
 module.exports = router;

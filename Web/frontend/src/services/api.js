@@ -65,7 +65,9 @@ export const saveWorkspaceFile = (id, path, content) => api.post(`/devops/${id}/
 export const getDbCollections = (id, dbType) => api.get(`/devops/${id}/db/collections?dbType=${dbType}`);
 export const getDbCollectionData = (id, collection, dbType) => api.get(`/devops/${id}/db/collection/${collection}?dbType=${dbType}`);
 export const insertDbRecord = (id, collection, record, dbType) => api.post(`/devops/${id}/db/insert?dbType=${dbType}`, { collection, record });
-export const executeAgentChat = (id, message, chatId) => api.post(`/devops/${id}/agent/chat`, { message, chatId });
+export const executeAgentChat = (id, message, chatId, config) => api.post(`/devops/${id}/agent/chat`, { message, chatId }, config);
+export const rollbackAgentPatches = (id, patches, chatId, messageIndex) => api.post(`/devops/${id}/agent/rollback`, { patches, chatId, messageIndex });
+export const undoChatMessages = (id, chatId, messageIndex) => api.post(`/devops/${id}/agent/chat/undo`, { chatId, messageIndex });
 export const updateAgentPermission = (id, permission) => api.post(`/devops/${id}/agent/permission`, { permission });
 export const executePendingCommands = (id, commands, chatId) => api.post(`/devops/${id}/agent/exec-pending`, { commands, chatId });
 export const getChatsList = (id) => api.get(`/devops/${id}/agent/chats`);
@@ -81,6 +83,7 @@ export const getGithubRepos    = ()     => api.get('/devops/github/repos');
 export const getGithubBranches = (owner, repo) => api.get(`/devops/github/repos/${owner}/${repo}/branches`);
 export const importGithubRepo  = (data) => api.post('/devops/github/import', data);
 export const unlinkGithub      = ()     => api.post('/devops/github/unlink');
+export const publishDeploymentBranch = (id, data) => api.post(`/devops/github/${id}/publish-branch`, data);
 
 // Nodes
 export const getNodes = () => api.get('/nodes');

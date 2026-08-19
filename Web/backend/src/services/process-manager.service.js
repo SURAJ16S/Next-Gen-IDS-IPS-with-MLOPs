@@ -200,6 +200,7 @@ const getDockerInstance = async () => {
 
 // In-memory registry: jobId -> { process/container, port, deploymentId, type: 'process' | 'container' }
 const runningPreviews = new Map();
+const rebuildInProgress = new Set();
 
 // Track currently allocated or reserving ports globally to prevent race conditions during concurrent builds
 const allocatedPorts = new Set();
@@ -252,9 +253,9 @@ const suggestPort = async () => {
 /**
  * Returns the preview start command for a framework.
  */
-const getPreviewCommand = async (framework, workDir) => {
+const getPreviewCommand = async (framework, workDir, isDocker = false) => {
   const plugin = plugins.find(p => p.id === framework) || generic;
-  return await plugin.getPreviewCommand(workDir);
+  return await plugin.getPreviewCommand(workDir, isDocker);
 };
 
 /**
@@ -516,6 +517,50 @@ const detectRequiredDatabases = (envVars) => {
     });
   }
 
+  // 7. Cassandra Detection
+  const hasCassandra = Object.keys(envVars).some(k => k.toUpperCase().includes('CASSANDRA')) || envString.includes('cassandra');
+  if (hasCassandra) {
+    dbs.push({
+      type: 'cassandra',
+      image: 'cassandra:4.1',
+      port: 9042,
+      env: ['MAX_HEAP_SIZE=256M', 'HEAP_NEWSIZE=64M']
+    });
+  }
+
+  // 8. SQL Server (MSSQL) Detection
+  const hasMssql = Object.keys(envVars).some(k => k.toUpperCase().includes('MSSQL') || k.toUpperCase().includes('SQLCMD') || k.toUpperCase().includes('SQLSERVER')) || envString.includes('sqlcmd') || envString.includes('mssql');
+  if (hasMssql) {
+    dbs.push({
+      type: 'mssql',
+      image: 'mcr.microsoft.com/mssql/server:2022-latest',
+      port: 1433,
+      env: ['ACCEPT_EULA=Y', 'MSSQL_SA_PASSWORD=Sa_password123', 'MSSQL_MEMORY_LIMIT_MB=512']
+    });
+  }
+
+  // 9. Oracle Detection
+  const hasOracle = Object.keys(envVars).some(k => k.toUpperCase().includes('ORACLE') || k.toUpperCase().includes('SQLPLUS')) || envString.includes('sqlplus') || envString.includes('oracle');
+  if (hasOracle) {
+    dbs.push({
+      type: 'oracle',
+      image: 'gvenzl/oracle-free:slim',
+      port: 1521,
+      env: ['ORACLE_PASSWORD=oracle_password123']
+    });
+  }
+
+  // 10. MariaDB Detection
+  const hasMariadb = Object.keys(envVars).some(k => k.toUpperCase().includes('MARIADB')) || envString.includes('mariadb');
+  if (hasMariadb) {
+    dbs.push({
+      type: 'mariadb',
+      image: 'mariadb:10.11',
+      port: 3306,
+      env: ['MARIADB_ALLOW_EMPTY_PASSWORD=yes', 'MARIADB_DATABASE=preview_db']
+    });
+  }
+
   return dbs;
 };
 
@@ -579,13 +624,13 @@ const detectDbNameFromPhp = (workDir) => {
 };
 
 const cleanupDockerResources = async (activeDocker, jobId) => {
-  const dbTypes = ['mysql', 'postgres', 'mongodb', 'redis', 'qdrant', 'chroma'];
+  const dbTypes = ['mysql', 'postgres', 'mongodb', 'redis', 'qdrant', 'chroma', 'cassandra', 'mssql', 'oracle', 'mariadb'];
   for (const dbType of dbTypes) {
     const dbContainerName = `devops-db-${dbType}-${jobId}`;
     try {
       const dbContainer = activeDocker.getContainer(dbContainerName);
       await dbContainer.stop().catch(() => {});
-      await dbContainer.remove().catch(() => {});
+      // Do NOT remove db container to preserve database files/volumes!
     } catch (_) {}
   }
   const containerName = `devops-preview-${jobId}`;
@@ -594,19 +639,17 @@ const cleanupDockerResources = async (activeDocker, jobId) => {
     await appContainer.stop().catch(() => {});
     await appContainer.remove().catch(() => {});
   } catch (_) {}
-  const networkName = `devops-net-${jobId}`;
-  try {
-    const network = activeDocker.getNetwork(networkName);
-    await network.remove().catch(() => {});
-  } catch (_) {}
+  // Do NOT remove network to keep Stopped DB container attached!
 };
 
 /**
  * Spawns the compiled app on the given port (using container mode if Docker is available, or host mode as fallback).
  */
 const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
+  rebuildInProgress.add(jobId);
   if (runningPreviews.has(jobId)) {
     await logPreview(deploymentId, jobId, `[PREVIEW] Job ${jobId} already has a running preview.`);
+    rebuildInProgress.delete(jobId);
     return;
   }
 
@@ -615,7 +658,7 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
   if (activeDocker) {
     const detection = detectFramework(workDir);
     const containerName = `devops-preview-${jobId}`;
-    const { cmd, args } = await getPreviewCommand(framework, workDir);
+    const { cmd, args } = await getPreviewCommand(framework, workDir, true);
     const finalArgs = resolvePortPlaceholder(args, port);
 
     // Auto-patch database connection hostnames and detect target DB name for PHP applications
@@ -676,6 +719,8 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
     let containerWorkDir = '/workspace';
     let absClientPath = null;
     let absServerPath = '/workspace';
+    let hostProxyDir = workDir;
+    let containerProxyDir = '/workspace';
 
     if (hasClientSibling) {
       // Mount parent dir at /project so /project/client and /project/server both exist
@@ -685,18 +730,23 @@ const spawnPreview = async (jobId, deploymentId, workDir, framework, port) => {
       absClientPath = '/project/client';
       absServerPath = `/project/${serverDirName}`;
       containerWorkDir = absServerPath;
+      hostProxyDir = parentDir;
+      containerProxyDir = '/project';
       await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo (sibling layout). Mounting parent at /project.`);
     } else if (hasClientDir) {
       absClientPath = '/workspace/client';
+      absServerPath = '/workspace';
+      hostProxyDir = workDir;
+      containerProxyDir = '/workspace';
+      await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo (nested layout). Mounting at /workspace.`);
     }
 
     // Build the startup command, chaining client build first if needed
     let containerCmd = [cmd, ...finalArgs];
     if (absClientPath && (framework === 'mern' || framework === 'express')) {
-      // Write the proxy file to the parent of absServerPath (which is /project on container, and workDir/.. on host)
+      // Write the proxy file to the proxy directory
       try {
-        const parentDirHost = path.resolve(workDir, '..');
-        const proxyPathHost = path.join(parentDirHost, 'devops-proxy.js');
+        const proxyPathHost = path.join(hostProxyDir, 'devops-proxy.js');
         const proxyCode = `const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -851,11 +901,17 @@ server.listen(PREVIEW_PORT, () => {
       }
 
       const serverStartCmd = [cmd, ...finalArgs].join(' ');
+      // Inject --max-old-space-size so Node.js has enough heap for production builds
+      // The proxy starts AFTER the client build completes (sequential &&) to avoid port
+      // being declared ready before React build finishes.
+      const nodeMemFlag = '--max-old-space-size=768';
+      // Patch node invocations in serverStartCmd to include the memory flag
+      const serverStartCmdPatched = serverStartCmd.replace(/\bnode\b/, `node ${nodeMemFlag}`);
       containerCmd = [
         'sh', '-c',
-        `cd ${absClientPath} && npm install --prefer-offline --no-audit --no-fund --ignore-scripts --include=dev --legacy-peer-deps && npm run build && cd /project && PORT=${port} node devops-proxy.js & cd ${absServerPath} && PORT=5001 SERVER_PORT=5001 ${serverStartCmd}`
+        `cd ${absClientPath} && npm install --prefer-offline --no-audit --no-fund --ignore-scripts --include=dev --legacy-peer-deps && npm run build && cd ${containerProxyDir} && PORT=${port} node ${nodeMemFlag} devops-proxy.js & cd ${absServerPath} && PORT=5001 SERVER_PORT=5001 ${serverStartCmdPatched}`
       ];
-      await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo. Will build React client at ${absClientPath} before starting server at ${absServerPath}.`);
+      await logPreview(deploymentId, jobId, `[PREVIEW] Detected MERN monorepo. Will build React client at ${absClientPath} before starting server at ${absServerPath}. Node.js heap: 768MB.`);
     }
 
     // ── Database & Network Provisioning ─────────────────────────────────────────
@@ -873,6 +929,20 @@ server.listen(PREVIEW_PORT, () => {
           requiredDbs.push({ type: 'postgres', image: 'postgres:15-alpine', port: 5432, env: ['POSTGRES_HOST_AUTH_METHOD=trust', 'POSTGRES_DB=preview_db'] });
         } else if (dbInitType === 'mongodb') {
           requiredDbs.push({ type: 'mongodb', image: 'mongo:6.0', port: 27017 });
+        } else if (dbInitType === 'cassandra') {
+          requiredDbs.push({ type: 'cassandra', image: 'cassandra:4.1', port: 9042, env: ['MAX_HEAP_SIZE=256M', 'HEAP_NEWSIZE=64M'] });
+        } else if (dbInitType === 'mssql') {
+          requiredDbs.push({ type: 'mssql', image: 'mcr.microsoft.com/mssql/server:2022-latest', port: 1433, env: ['ACCEPT_EULA=Y', 'MSSQL_SA_PASSWORD=Sa_password123', 'MSSQL_MEMORY_LIMIT_MB=512'] });
+        } else if (dbInitType === 'oracle') {
+          requiredDbs.push({ type: 'oracle', image: 'gvenzl/oracle-free:slim', port: 1521, env: ['ORACLE_PASSWORD=oracle_password123'] });
+        } else if (dbInitType === 'mariadb') {
+          requiredDbs.push({ type: 'mariadb', image: 'mariadb:10.11', port: 3306, env: ['MARIADB_ALLOW_EMPTY_PASSWORD=yes', 'MARIADB_DATABASE=preview_db'] });
+        } else if (dbInitType === 'redis') {
+          requiredDbs.push({ type: 'redis', image: 'redis:7.0-alpine', port: 6379 });
+        } else if (dbInitType === 'qdrant') {
+          requiredDbs.push({ type: 'qdrant', image: 'qdrant/qdrant:latest', port: 6333 });
+        } else if (dbInitType === 'chroma') {
+          requiredDbs.push({ type: 'chroma', image: 'chromadb/chroma:latest', port: 8000 });
         }
       }
     }
@@ -894,35 +964,45 @@ server.listen(PREVIEW_PORT, () => {
         for (const db of requiredDbs) {
           const dbContainerName = `devops-db-${db.type}-${jobId}`;
           
+          let dbContainer;
+          let dbExists = false;
           try {
-            const oldDbContainer = activeDocker.getContainer(dbContainerName);
-            await oldDbContainer.stop().catch(() => {});
-            await oldDbContainer.remove().catch(() => {});
-          } catch (_) {}
-
-          await logPreview(deploymentId, jobId, `[PREVIEW] Launching database container: ${db.image} (${dbContainerName})`);
-          await ensureDockerImage(activeDocker, db.image, deploymentId, jobId);
-
-          let dbEnv = db.env || [];
-          if (db.type === 'mysql') {
-            dbEnv = [`MYSQL_ALLOW_EMPTY_PASSWORD=yes`, `MYSQL_DATABASE=${detectedDbName}`];
-          } else if (db.type === 'postgres') {
-            dbEnv = [`POSTGRES_HOST_AUTH_METHOD=trust`, `POSTGRES_DB=${detectedDbName}`];
+            dbContainer = activeDocker.getContainer(dbContainerName);
+            await dbContainer.inspect();
+            dbExists = true;
+          } catch (_) {
+            dbExists = false;
           }
 
-          const dbContainer = await activeDocker.createContainer({
-            Image: db.image,
-            name: dbContainerName,
-            Env: dbEnv,
-            HostConfig: {
-              NetworkMode: networkName,
-              NanoCPUs: 1000000000,
-              Memory: 536870912,
-              PidsLimit: 100
+          if (dbExists) {
+            await logPreview(deploymentId, jobId, `[PREVIEW] Starting existing database container to preserve state: ${dbContainerName}`);
+            await dbContainer.start().catch(() => {});
+          } else {
+            await logPreview(deploymentId, jobId, `[PREVIEW] Creating new database container: ${db.image} (${dbContainerName})`);
+            await ensureDockerImage(activeDocker, db.image, deploymentId, jobId);
+
+            let dbEnv = db.env || [];
+            if (db.type === 'mysql') {
+              dbEnv = [`MYSQL_ALLOW_PASSWORD=yes`, `MYSQL_ALLOW_EMPTY_PASSWORD=yes`, `MYSQL_DATABASE=${detectedDbName}`];
+            } else if (db.type === 'postgres') {
+              dbEnv = [`POSTGRES_HOST_AUTH_METHOD=trust`, `POSTGRES_DB=${detectedDbName}`];
+            } else if (db.type === 'mariadb') {
+              dbEnv = [`MARIADB_ALLOW_EMPTY_PASSWORD=yes`, `MARIADB_DATABASE=${detectedDbName}`];
             }
-          });
-          
-          await dbContainer.start();
+
+            dbContainer = await activeDocker.createContainer({
+              Image: db.image,
+              name: dbContainerName,
+              Env: dbEnv,
+              HostConfig: {
+                NetworkMode: networkName,
+                NanoCPUs: 1000000000,
+                Memory: (db.type === 'cassandra' || db.type === 'mssql' || db.type === 'oracle') ? 1073741824 : 536870912, // 1GB for heavy DBs, 512MB otherwise
+                PidsLimit: 100
+              }
+            });
+            await dbContainer.start();
+          }
           await logPreview(deploymentId, jobId, `[PREVIEW] Database container is ready: ${dbContainerName}`);
 
           // Run initialization script if provided in deployment settings
@@ -971,9 +1051,9 @@ server.listen(PREVIEW_PORT, () => {
               });
             };
 
-            // Wait for database engine to accept connections (up to 15s)
+            // Wait for database engine to accept connections (up to 45s)
             let ready = false;
-            for (let i = 0; i < 15; i++) {
+            for (let i = 0; i < 45; i++) {
               try {
                 let checkCmd = [];
                 if (db.type === 'mysql') {
@@ -982,17 +1062,46 @@ server.listen(PREVIEW_PORT, () => {
                   checkCmd = ['pg_isready', '-U', 'postgres'];
                 } else if (db.type === 'mongodb') {
                   checkCmd = ['mongosh', '--eval', "db.adminCommand('ping')"];
+                } else if (db.type === 'mariadb') {
+                  checkCmd = ['mysqladmin', 'ping', '-u', 'root'];
+                } else if (db.type === 'cassandra') {
+                  checkCmd = ['nodetool', 'status'];
+                } else if (db.type === 'mssql') {
+                  checkCmd = ['/opt/mssql-tools/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Sa_password123', '-Q', 'SELECT 1'];
+                } else if (db.type === 'oracle') {
+                  checkCmd = ['sh', '-c', 'echo "EXIT;" | sqlplus -S system/oracle_password123@localhost/XE'];
+                } else if (db.type === 'redis') {
+                  checkCmd = ['redis-cli', 'ping'];
+                } else if (db.type === 'qdrant') {
+                  checkCmd = ['curl', '-f', 'http://localhost:6333/readyz'];
+                } else if (db.type === 'chroma') {
+                  checkCmd = ['curl', '-f', 'http://localhost:8000/heartbeat'];
                 }
                 
                 if (checkCmd.length > 0) {
                   const checkOut = await runDbExec(checkCmd, 5000);
-                  if (db.type === 'mysql' && checkOut.toLowerCase().includes('alive')) {
+                  if ((db.type === 'mysql' || db.type === 'mariadb') && checkOut.toLowerCase().includes('alive')) {
                     ready = true;
                     break;
                   } else if (db.type === 'postgres' && checkOut.toLowerCase().includes('accepting connections')) {
                     ready = true;
                     break;
                   } else if (db.type === 'mongodb' && checkOut.includes('ok')) {
+                    ready = true;
+                    break;
+                  } else if (db.type === 'cassandra' && checkOut.toLowerCase().includes('normal')) {
+                    ready = true;
+                    break;
+                  } else if (db.type === 'mssql' && checkOut.includes('1')) {
+                    ready = true;
+                    break;
+                  } else if (db.type === 'oracle' && !checkOut.toLowerCase().includes('error')) {
+                    ready = true;
+                    break;
+                  } else if (db.type === 'redis' && checkOut.toLowerCase().includes('pong')) {
+                    ready = true;
+                    break;
+                  } else if ((db.type === 'qdrant' || db.type === 'chroma') && !checkOut.toLowerCase().includes('error') && checkOut.length > 0) {
                     ready = true;
                     break;
                   }
@@ -1011,6 +1120,16 @@ server.listen(PREVIEW_PORT, () => {
                   scriptFile = '/tmp/init.sql';
                 } else if (db.type === 'mongodb') {
                   scriptFile = '/tmp/init.js';
+                } else if (db.type === 'cassandra') {
+                  scriptFile = '/tmp/init.cql';
+                } else if (db.type === 'redis') {
+                  scriptFile = '/tmp/init.redis';
+                } else if (db.type === 'mssql') {
+                  scriptFile = '/tmp/init.sql';
+                } else if (db.type === 'oracle') {
+                  scriptFile = '/tmp/init.sql';
+                } else if (db.type === 'qdrant' || db.type === 'chroma') {
+                  scriptFile = '/tmp/init.sh';
                 }
                 
                 if (scriptFile !== '') {
@@ -1022,10 +1141,22 @@ server.listen(PREVIEW_PORT, () => {
                   let runCmd = [];
                   if (db.type === 'mysql') {
                     runCmd = ['mysql', '-u', 'root', '-e', `CREATE DATABASE IF NOT EXISTS \`${detectedDbName}\`; USE \`${detectedDbName}\`; source ${scriptFile};`];
+                  } else if (db.type === 'mariadb') {
+                    runCmd = ['mariadb', '-u', 'root', '-e', `CREATE DATABASE IF NOT EXISTS \`${detectedDbName}\`; USE \`${detectedDbName}\`; source ${scriptFile};`];
                   } else if (db.type === 'postgres') {
                     runCmd = ['psql', '-U', 'postgres', '-d', detectedDbName, '-f', scriptFile];
                   } else if (db.type === 'mongodb') {
                     runCmd = ['mongosh', detectedDbName, scriptFile];
+                  } else if (db.type === 'cassandra') {
+                    runCmd = ['cqlsh', '-f', scriptFile];
+                  } else if (db.type === 'redis') {
+                    runCmd = ['sh', '-c', `redis-cli < ${scriptFile}`];
+                  } else if (db.type === 'mssql') {
+                    runCmd = ['/opt/mssql-tools18/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Password123!', '-i', scriptFile, '-C'];
+                  } else if (db.type === 'oracle') {
+                    runCmd = ['sqlplus', 'system/oracle@//localhost:1521/ORCL', `@${scriptFile}`];
+                  } else if (db.type === 'qdrant' || db.type === 'chroma') {
+                    runCmd = ['sh', scriptFile];
                   }
                   
                   const runOut = await runDbExec(runCmd, 15000);
@@ -1094,6 +1225,14 @@ server.listen(PREVIEW_PORT, () => {
 
     await logPreview(deploymentId, jobId, `[DOCKER-ENV-DEBUG] Generated Env: ${JSON.stringify(finalEnv)}`);
 
+    // MERN monorepo runs: npm install + npm run build (client) + server start.
+    // This easily exceeds 512MB on Node.js with large dependency trees.
+    // We use 1.5 GB for app containers to prevent OOM crashes.
+    // Health check timeout is extended for MERN (React build takes 60-120s).
+    const isMernMonorepo = (absClientPath !== null && (framework === 'mern' || framework === 'express'));
+    const containerMemoryBytes = isMernMonorepo ? 1610612736 : 1073741824; // 1.5GB for MERN, 1GB otherwise
+    const healthCheckMaxWait = isMernMonorepo ? 1_200_000 : 600_000; // 20 min for MERN build, 10 min otherwise
+
     activeDocker.createContainer({
       Image: previewImage,
       Cmd: containerCmd,
@@ -1105,9 +1244,9 @@ server.listen(PREVIEW_PORT, () => {
         },
         ExtraHosts: ['host.docker.internal:host-gateway'],
         NetworkMode: networkName,
-        NanoCPUs: 1000000000,
-        Memory: 536870912,
-        PidsLimit: 100
+        NanoCPUs: 2000000000,    // 2 vCPUs for faster React builds
+        Memory: containerMemoryBytes,
+        PidsLimit: 200            // MERN monorepo spawns more processes
       },
       ExposedPorts: {
         [`${port}/tcp`]: {}
@@ -1116,6 +1255,7 @@ server.listen(PREVIEW_PORT, () => {
       WorkingDir: containerWorkDir
     }, async (err, container) => {
       if (err) {
+        rebuildInProgress.delete(jobId);
         await logPreview(deploymentId, jobId, `[PREVIEW] Failed to create preview container: ${err.message}. Falling back to host mode.`);
         await spawnHostPreview(jobId, deploymentId, workDir, framework, port);
         return;
@@ -1138,6 +1278,7 @@ server.listen(PREVIEW_PORT, () => {
 
       container.start(async (err) => {
         if (err) {
+          rebuildInProgress.delete(jobId);
           await logPreview(deploymentId, jobId, `[PREVIEW] Failed to start preview container: ${err.message}. Falling back to host mode.`);
           try { await container.remove(); } catch (_) {}
           await spawnHostPreview(jobId, deploymentId, workDir, framework, port);
@@ -1157,8 +1298,11 @@ server.listen(PREVIEW_PORT, () => {
           previewStatus: 'running',
         });
 
-        // Wait for the containerised app to serve HTTP before declaring live
-        const health = await waitForHttpReady(port, deploymentId, jobId);
+        // Wait for the containerised app to serve HTTP before declaring live.
+        // MERN monorepo needs extra time: React client must build first, then proxy starts.
+        rebuildInProgress.delete(jobId);
+        await logPreview(deploymentId, jobId, `[HEALTH] Waiting for app on port ${port} (timeout: ${Math.round(healthCheckMaxWait / 60000)} min)…`);
+        const health = await waitForHttpReady(port, deploymentId, jobId, { maxWaitMs: healthCheckMaxWait });
         if (health.ok) {
           await Deployment.findByIdAndUpdate(deploymentId, { status: 'deployed' });
           try {
@@ -1190,17 +1334,11 @@ server.listen(PREVIEW_PORT, () => {
             io.to(`pipeline:${jobId}`).emit('preview:stopped', { jobId });
           } catch (_) {}
 
-          // Lifecycle garbage collection: clean up database containers and isolated network
-          const activeDocker = await getDockerInstance();
-          if (activeDocker) {
-            await cleanupDockerResources(activeDocker, jobId);
-          }
-
           // Run log diagnostics on container exit
+          let logsText = '';
           try {
             const logsBuffer = await container.logs({ stdout: true, stderr: true, tail: 100 });
             // Demux docker logs multiplexed format
-            let logsText = '';
             let offset = 0;
             while (offset < logsBuffer.length) {
               if (offset + 8 > logsBuffer.length) break;
@@ -1210,18 +1348,35 @@ server.listen(PREVIEW_PORT, () => {
               offset += 8 + size;
             }
             if (!logsText) logsText = logsBuffer.toString('utf8');
+          } catch (_) {
+            // Silence log errors if container has already been destroyed
+          }
 
-            const diagnoses = analyzeLogsAndDiagnose(logsText);
-            if (diagnoses.length > 0) {
-              await logPreview(deploymentId, jobId, `\n[DIAGNOSTICS] DevOps Smart Diagnosis Engine identified potential issues:`);
-              for (const d of diagnoses) {
-                await logPreview(deploymentId, jobId, `  ↪ ❌ ${d.error}:`);
-                await logPreview(deploymentId, jobId, `    👉 Solution: ${d.solution}`);
-              }
-              await logPreview(deploymentId, jobId, `\n`);
+          // Lifecycle garbage collection: clean up database containers and isolated network
+          if (rebuildInProgress.has(jobId)) {
+            await logPreview(deploymentId, jobId, `[PREVIEW] Rebuild in progress for job ${jobId}. Skipping database container cleanup.`);
+          } else {
+            const activeDocker = await getDockerInstance();
+            if (activeDocker) {
+              await cleanupDockerResources(activeDocker, jobId);
             }
-          } catch (logErr) {
-            console.error('Failed to parse container exit logs for diagnostics:', logErr);
+          }
+
+          // Run diagnostics if logs were collected
+          try {
+            if (logsText) {
+              const diagnoses = analyzeLogsAndDiagnose(logsText);
+              if (diagnoses.length > 0) {
+                await logPreview(deploymentId, jobId, `\n[DIAGNOSTICS] DevOps Smart Diagnosis Engine identified potential issues:`);
+                for (const d of diagnoses) {
+                  await logPreview(deploymentId, jobId, `  ↪ ❌ ${d.error}:`);
+                  await logPreview(deploymentId, jobId, `    👉 Solution: ${d.solution}`);
+                }
+                await logPreview(deploymentId, jobId, `\n`);
+              }
+            }
+          } catch (diagErr) {
+            console.error('Failed to run diagnostics:', diagErr);
           }
         });
       });
@@ -1235,13 +1390,15 @@ server.listen(PREVIEW_PORT, () => {
 /**
  * Kills/stops the running preview process or container for a jobId.
  */
-const stopPreview = async (jobId) => {
+const stopPreview = async (jobId, isRestart = false) => {
   const entry = runningPreviews.get(jobId);
   
   // Lifecycle garbage collection: clean up database containers and isolated network immediately
-  const activeDocker = await getDockerInstance();
-  if (activeDocker) {
-    await cleanupDockerResources(activeDocker, jobId);
+  if (!isRestart) {
+    const activeDocker = await getDockerInstance();
+    if (activeDocker) {
+      await cleanupDockerResources(activeDocker, jobId);
+    }
   }
 
   // Graceful fallback: If it's not in our map but the database shows it running, update it in DB anyway

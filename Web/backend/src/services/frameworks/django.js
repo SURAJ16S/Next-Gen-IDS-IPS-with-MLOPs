@@ -17,21 +17,25 @@ module.exports = {
     const unixVenv = path.join(workDir, '.venv', 'bin', 'python');
     const winVenv = path.join(workDir, '.venv', 'Scripts', 'python.exe');
     
+    if (isDocker) {
+      return {
+        cmd: 'sh',
+        args: ['-c', `if [ ! -f .venv/.venv_completed ] || [ ! -f .venv/bin/python ]; then rm -rf .venv && python -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt && .venv/bin/python manage.py migrate && touch .venv/.venv_completed; fi && .venv/bin/python manage.py runserver 0.0.0.0:\${PORT:-8000}`],
+        env: {}
+      };
+    }
+
     let pythonCmd = 'python';
     if (fs.existsSync(path.join(workDir, '.venv'))) {
-      if (isDocker) {
-        pythonCmd = '.venv/bin/python'; // Relative Unix path inside container
-      } else {
-        if (fs.existsSync(unixVenv)) {
-          pythonCmd = '.venv/bin/python'; // Relative Unix path inside container
-        } else if (fs.existsSync(winVenv)) {
-          pythonCmd = '.venv/Scripts/python'; // Relative Windows path
-        }
+      if (fs.existsSync(unixVenv)) {
+        pythonCmd = '.venv/bin/python';
+      } else if (fs.existsSync(winVenv)) {
+        pythonCmd = '.venv/Scripts/python';
       }
     }
 
     if (fs.existsSync(path.join(workDir, 'manage.py'))) {
-      return { cmd: pythonCmd, args: ['manage.py', 'runserver', '0'], env: {} };
+      return { cmd: pythonCmd, args: ['manage.py', 'runserver', '0.0.0.0:${PORT:-8000}'], env: {} };
     }
     return { cmd: 'echo', args: ['Django manage.py not found.'], env: {} };
   },

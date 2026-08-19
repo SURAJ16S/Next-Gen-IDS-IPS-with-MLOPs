@@ -34,6 +34,40 @@ const decrypt = (text) => {
   }
 };
 
+const zlib = require('zlib');
+
+const compress = (value) => {
+  if (!value) return value;
+  try {
+    const jsonStr = JSON.stringify(value);
+    return zlib.gzipSync(Buffer.from(jsonStr, 'utf8'));
+  } catch (_) {
+    return value;
+  }
+};
+
+const decompress = (value) => {
+  if (!value) return value;
+  let bufferToDecompress = null;
+  if (Buffer.isBuffer(value)) {
+    bufferToDecompress = value;
+  } else if (value.buffer && Buffer.isBuffer(value.buffer)) {
+    bufferToDecompress = value.buffer;
+  } else if (value._bsontype === 'Binary') {
+    bufferToDecompress = value.value(true);
+  }
+  
+  if (bufferToDecompress) {
+    try {
+      const decompressed = zlib.gunzipSync(bufferToDecompress);
+      return JSON.parse(decompressed.toString('utf8'));
+    } catch (_) {
+      return value;
+    }
+  }
+  return value;
+};
+
 const deploymentSchema = new mongoose.Schema(
   {
     projectName: { type: String, required: true },
@@ -45,7 +79,8 @@ const deploymentSchema = new mongoose.Schema(
     logs: { type: String },
     jobId: { type: String, unique: true },
     buildLogs: [{ type: String }],
-    scanReport: { type: mongoose.Schema.Types.Mixed },
+    scanReport: { type: mongoose.Schema.Types.Mixed, set: compress, get: decompress },
+
     artifactPath: { type: String },
     containerName: { type: String },
     sessionId: { type: String },
@@ -81,6 +116,25 @@ const deploymentSchema = new mongoose.Schema(
     isPruned: { type: Boolean, default: false },
     lastPreviewedAt: { type: Date },
     execPermission: { type: String, enum: ['ask', 'always', 'never'], default: 'ask' },
+    
+    // GitHub collaborator isolation fields
+    githubRepo: { type: String },
+    collaborators: [{ type: String }],
+    githubPermissions: {
+      allowCollaboratorVisibility: { type: Boolean, default: true },
+      allowCollaboratorBuild:      { type: Boolean, default: false },
+      allowCollaboratorEditPort:   { type: Boolean, default: false },
+      allowCollaboratorDelete:     { type: Boolean, default: false },
+      allowCollaboratorChat:       { type: Boolean, default: false }
+    },
+    publishedBranches: [
+      {
+        branchName: { type: String },
+        branchUrl:  { type: String },
+        repoFullName: { type: String },
+        publishedAt: { type: Date, default: Date.now }
+      }
+    ]
   },
   { 
     timestamps: true,
