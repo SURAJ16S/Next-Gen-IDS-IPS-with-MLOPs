@@ -60,6 +60,13 @@ const getDeployments = async (req, res) => {
 
 const createDeployment = async (req, res) => {
   try {
+    const { getThresholds } = require('../utils/thresholds');
+    const threshold = await getThresholds('devops');
+    const userBuildCount = await Deployment.countDocuments({ deployedBy: req.user._id });
+    if (userBuildCount >= threshold.maxBuildsPerUser) {
+      return res.status(403).json({ message: `Max builds limit of ${threshold.maxBuildsPerUser} reached. Please delete old builds or contact your administrator.` });
+    }
+
     const deployment = await Deployment.create(req.body);
     res.status(201).json(deployment);
   } catch (error) {
@@ -87,14 +94,42 @@ const uploadZip = (req, res) => {
     if (!req.file) return res.status(400).json({ message: 'Please upload a ZIP file.' });
 
     try {
+      const { getThresholds } = require('../utils/thresholds');
+      const threshold = await getThresholds('devops');
+
+      // Check max builds limit
+      const userBuildCount = await Deployment.countDocuments({ deployedBy: req.user._id });
+      if (userBuildCount >= threshold.maxBuildsPerUser) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        return res.status(403).json({ message: `Max builds limit of ${threshold.maxBuildsPerUser} reached. Please delete old builds or contact your administrator.` });
+      }
+
       const jobId = crypto.randomUUID();
       const projectName = req.body.projectName || path.basename(req.file.originalname, '.zip');
       const sessionId = req.body.sessionId || '';
 
-      // Parse preview port — default to 3001 if not provided or invalid
+      // Validate or suggest port inside allowed admin range
       let previewPort = parseInt(req.body.previewPort, 10);
-      if (!previewPort || previewPort < 1024 || previewPort > 65535) {
-        previewPort = await suggestPort() || 3001;
+      const minPort = threshold.allowedPortRangeMin || 3000;
+      const maxPort = threshold.allowedPortRangeMax || 4000;
+      
+      const net = require('net');
+      const isPortAvailable = (p) => new Promise((resolve) => {
+        const server = net.createServer();
+        server.unref();
+        server.on('error', () => resolve(false));
+        server.listen(p, '127.0.0.1', () => server.close(() => resolve(true)));
+      });
+
+      if (!previewPort || previewPort < minPort || previewPort > maxPort) {
+        previewPort = null;
+        for (let p = minPort; p <= maxPort; p++) {
+          if (await isPortAvailable(p)) {
+            previewPort = p;
+            break;
+          }
+        }
+        if (!previewPort) previewPort = minPort; // fallback
       }
 
       // Parse env files — must be valid JSON array
@@ -212,9 +247,31 @@ const downloadArtifact = async (req, res) => {
  */
 const getSuggestedPort = async (req, res) => {
   try {
-    const port = await suggestPort();
-    if (!port) return res.status(503).json({ message: 'No available ports in range 3001-3999.' });
-    res.json({ port });
+    const { getThresholds } = require('../utils/thresholds');
+    const threshold = await getThresholds('devops');
+    const minPort = threshold.allowedPortRangeMin || 3000;
+    const maxPort = threshold.allowedPortRangeMax || 4000;
+
+    const net = require('net');
+    const isPortAvailable = (p) => new Promise((resolve) => {
+      const server = net.createServer();
+      server.unref();
+      server.on('error', () => resolve(false));
+      server.listen(p, '127.0.0.1', () => server.close(() => resolve(true)));
+    });
+
+    let suggested = null;
+    for (let p = minPort; p <= maxPort; p++) {
+      if (await isPortAvailable(p)) {
+        suggested = p;
+        break;
+      }
+    }
+
+    if (!suggested) {
+      return res.status(503).json({ message: `No available ports in range ${minPort}-${maxPort}.` });
+    }
+    res.json({ port: suggested });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -259,6 +316,18 @@ const stopDeploymentPreview = async (req, res) => {
  */
 const startDeploymentPreview = async (req, res) => {
   try {
+    const { getThresholds } = require('../utils/thresholds');
+    const threshold = await getThresholds('devops');
+
+    // Check max concurrent container limit
+    const runningContainersCount = await Deployment.countDocuments({
+      deployedBy: req.user._id,
+      previewStatus: 'running'
+    });
+    if (runningContainersCount >= threshold.maxConcurrentContainers) {
+      return res.status(403).json({ message: `Max concurrent running container previews limit (${threshold.maxConcurrentContainers}) reached. Please stop a preview first.` });
+    }
+
     const deployment = await Deployment.findById(req.params.id);
     if (!deployment) return res.status(404).json({ message: 'Deployment not found.' });
 
@@ -277,11 +346,30 @@ const startDeploymentPreview = async (req, res) => {
     const detection = detectFramework(extractDir, targetSubfolder);
     const targetBuildDir = detection.targetDir;
 
-    // Get or allocate port
+    // Validate or suggest port inside allowed admin range
+    const minPort = threshold.allowedPortRangeMin || 3000;
+    const maxPort = threshold.allowedPortRangeMax || 4000;
+    
+    const net = require('net');
+    const isPortAvailable = (p) => new Promise((resolve) => {
+      const server = net.createServer();
+      server.unref();
+      server.on('error', () => resolve(false));
+      server.listen(p, '127.0.0.1', () => server.close(() => resolve(true)));
+    });
+
     let previewPort = deployment.previewPort;
-    if (!previewPort) {
-      previewPort = await suggestPort() || 3001;
+    if (!previewPort || previewPort < minPort || previewPort > maxPort) {
+      previewPort = null;
+      for (let p = minPort; p <= maxPort; p++) {
+        if (await isPortAvailable(p)) {
+          previewPort = p;
+          break;
+        }
+      }
+      if (!previewPort) previewPort = minPort; // fallback
       deployment.previewPort = previewPort;
+      await deployment.save();
     }
 
     // Spawn preview process
@@ -787,7 +875,8 @@ const executeDeploymentDbQuery = async (req, res) => {
     if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
     
     const jobId = deployment.jobId;
-    const dbContainerName = `devops-db-${dbType}-${jobId}`;
+    const isSqlite = dbType === 'sqlite';
+    const dbContainerName = isSqlite ? `devops-preview-${jobId}` : `devops-db-${dbType}-${jobId}`;
 
     const Docker = require('dockerode');
     const activeDocker = new Docker();
@@ -848,7 +937,7 @@ const executeDeploymentDbQuery = async (req, res) => {
     let output = '';
 
     const delimiter = '__DB_QUERY_EOF__';
-    if (dbType === 'mysql') {
+    if (dbType === 'mysql' || dbType === 'mariadb') {
       const wrappedQuery = `START TRANSACTION;\n${query}\nCOMMIT;`;
       const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${wrappedQuery}\n${delimiter}\nmysql -u root --bail -D "${dbName}" < /tmp/run.sql`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
@@ -859,6 +948,21 @@ const executeDeploymentDbQuery = async (req, res) => {
       const remoteUri = await getRemoteMongoUri(deployment);
       const connectionString = remoteUri || dbName;
       const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/run.js`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else if (dbType === 'sqlite') {
+      const writeAndRunCmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 "$sqliteFile" "${query.replace(/"/g, '\\"')}"`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else if (dbType === 'redis') {
+      const writeAndRunCmd = ['sh', '-c', `redis-cli ${query}`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else if (dbType === 'mssql') {
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\n/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Sa_password123 -C -d "${dbName}" -i /tmp/run.sql`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else if (dbType === 'oracle') {
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.sql\n${query}\n${delimiter}\nsqlplus -S system/oracle_password123@localhost/XE @/tmp/run.sql`];
+      output = await runExecWithTimeout(writeAndRunCmd, 15000);
+    } else if (dbType === 'cassandra') {
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.cql\n${query}\n${delimiter}\ncqlsh -f /tmp/run.cql`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else {
       return res.status(400).json({ message: `Unsupported database type: ${dbType}` });
@@ -1159,12 +1263,17 @@ const getDbCollectionData = async (req, res) => {
       });
       return res.json(maskPIIData(rows));
     } else if (dbType === 'postgres') {
-      const query = `SELECT json_agg(t) FROM (SELECT * FROM "${collection}" LIMIT 50) t;`;
-      const cmd = ['psql', '-U', 'postgres', '-d', dbName, '-t', '-c', query];
+      const query = `SELECT COALESCE(json_agg(t), '[]'::json) FROM (SELECT * FROM "${collection}" LIMIT 50) t;`;
+      const cmd = ['psql', '-U', 'postgres', '-d', dbName, '-t', '-A', '-c', query];
       const output = await runExec(cmd);
       try {
-        const data = JSON.parse(output);
-        return res.json(maskPIIData(data || []));
+        const startIdx = output.indexOf('[');
+        const endIdx = output.lastIndexOf(']');
+        if (startIdx !== -1 && endIdx !== -1) {
+          const data = JSON.parse(output.substring(startIdx, endIdx + 1));
+          return res.json(maskPIIData(data || []));
+        }
+        return res.json([]);
       } catch (_) {
         return res.json([]);
       }
@@ -1311,9 +1420,10 @@ const insertDbRecord = async (req, res) => {
       const output = await runExec(cmd);
       return res.json({ success: true, output });
     } else if (dbType === 'mysql' || dbType === 'mariadb' || dbType === 'postgres' || dbType === 'sqlite') {
-      const keys = Object.keys(record);
-      const values = Object.values(record).map(val => {
-        if (val === null) return 'NULL';
+      // Filter out null values so auto-increment/serial columns can use their DB defaults
+      const filteredEntries = Object.entries(record).filter(([, v]) => v !== null && v !== undefined);
+      const keys = filteredEntries.map(([k]) => k);
+      const values = filteredEntries.map(([, val]) => {
         if (typeof val === 'number') return val;
         return `'${String(val).replace(/'/g, "''")}'`;
       });
@@ -1387,6 +1497,223 @@ const insertDbRecord = async (req, res) => {
   }
 };
 
+const updateDbRecord = async (req, res) => {
+  try {
+    const deployment = await Deployment.findById(req.params.id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    
+    const dbType = req.query.dbType || deployment.dbInitType || 'none';
+    const { collection, pkColumn, pkValue, record } = req.body;
+    if (dbType === 'none' || !collection || !record) {
+      return res.status(400).json({ message: 'Missing database, collection, or record details.' });
+    }
+    
+    const jobId = deployment.jobId;
+    const isSqlite = dbType === 'sqlite';
+    const targetContainerName = isSqlite ? `devops-preview-${jobId}` : `devops-db-${dbType}-${jobId}`;
+    
+    const Docker = require('dockerode');
+    const activeDocker = new Docker();
+    const container = activeDocker.getContainer(targetContainerName);
+    
+    try {
+      const inspect = await container.inspect();
+      if (!inspect.State.Running) return res.status(400).json({ message: 'Database container is not running.' });
+    } catch (_) {
+      return res.status(400).json({ message: 'Database container does not exist.' });
+    }
+    
+    const runExec = async (cmd) => {
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false });
+      const stream = await exec.start();
+      return new Promise((resolve) => {
+        const chunks = [];
+        stream.on('data', chunk => { chunks.push(chunk); });
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer).trim());
+        });
+        stream.on('error', () => resolve(''));
+      });
+    };
+    
+    const dbName = 'preview_db';
+
+    if (dbType === 'mongodb') {
+      const remoteUri = await getRemoteMongoUri(deployment);
+      const connectionString = remoteUri || dbName;
+      const delimiter = '__DB_QUERY_EOF__';
+      const query = `
+        let queryObj = { _id: "${pkValue}" };
+        if ("${pkValue}".length === 24 && /^[0-9a-fA-F]+$/.test("${pkValue}")) {
+          try { queryObj = { _id: ObjectId("${pkValue}") }; } catch(e) {}
+        } else {
+          const asNum = Number("${pkValue}");
+          if (!isNaN(asNum)) {
+            queryObj = { _id: asNum };
+          }
+        }
+        print(JSON.stringify(db.${collection}.updateOne(queryObj, { $set: ${JSON.stringify(record)} })));
+      `;
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/update.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/update.js`];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'mysql' || dbType === 'mariadb' || dbType === 'postgres' || dbType === 'sqlite') {
+      const keys = Object.keys(record);
+      const setClauses = keys.map(k => {
+        const val = record[k];
+        if (val === null || val === undefined) return `\`${k}\` = NULL`;
+        if (typeof val === 'number') return `\`${k}\` = ${val}`;
+        return `\`${k}\` = '${String(val).replace(/'/g, "''")}'`;
+      }).join(', ');
+      
+      const pkValStr = typeof pkValue === 'number' || !isNaN(Number(pkValue)) ? pkValue : `'${String(pkValue).replace(/'/g, "''")}'`;
+      const sql = `UPDATE \`${collection}\` SET ${setClauses} WHERE \`${pkColumn || 'id'}\` = ${pkValStr};`;
+      
+      let cmd = [];
+      if (dbType === 'mysql' || dbType === 'mariadb') {
+        cmd = ['mysql', '-u', 'root', '-D', dbName, '-e', sql];
+      } else if (dbType === 'postgres') {
+        const pgSql = sql.replace(/`/g, '"');
+        cmd = ['psql', '-U', 'postgres', '-d', dbName, '-c', pgSql];
+      } else if (dbType === 'sqlite') {
+        const liteSql = sql.replace(/`/g, '"');
+        cmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 "$sqliteFile" "${liteSql}"`];
+      }
+      
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'mssql') {
+      const keys = Object.keys(record);
+      const setClauses = keys.map(k => {
+        const val = record[k];
+        if (val === null || val === undefined) return `[${k}] = NULL`;
+        if (typeof val === 'number') return `[${k}] = ${val}`;
+        return `[${k}] = '${String(val).replace(/'/g, "''")}'`;
+      }).join(', ');
+      const pkValStr = typeof pkValue === 'number' || !isNaN(Number(pkValue)) ? pkValue : `'${String(pkValue).replace(/'/g, "''")}'`;
+      const sql = `UPDATE [${collection}] SET ${setClauses} WHERE [${pkColumn || 'id'}] = ${pkValStr};`;
+      const cmd = ['/opt/mssql-tools/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Sa_password123', '-C', '-d', dbName, '-Q', sql];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'redis') {
+      const typeCmd = ['redis-cli', 'TYPE', collection];
+      const type = await runExec(typeCmd);
+      let cmd = [];
+      if (type === 'hash') {
+        cmd = ['redis-cli', 'HSET', collection];
+        Object.keys(record).forEach(f => {
+          cmd.push(f, String(record[f]));
+        });
+      } else {
+        cmd = ['redis-cli', 'SET', collection, String(record.value || JSON.stringify(record))];
+      }
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    }
+    
+    res.status(400).json({ message: 'Unsupported database type' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const deleteDbRecord = async (req, res) => {
+  try {
+    const deployment = await Deployment.findById(req.params.id);
+    if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
+    
+    const dbType = req.query.dbType || deployment.dbInitType || 'none';
+    const { collection, pkColumn, pkValue } = req.body;
+    if (dbType === 'none' || !collection || pkValue === undefined || pkValue === null) {
+      return res.status(400).json({ message: 'Missing database, collection, or primary key details.' });
+    }
+    
+    const jobId = deployment.jobId;
+    const isSqlite = dbType === 'sqlite';
+    const targetContainerName = isSqlite ? `devops-preview-${jobId}` : `devops-db-${dbType}-${jobId}`;
+    
+    const Docker = require('dockerode');
+    const activeDocker = new Docker();
+    const container = activeDocker.getContainer(targetContainerName);
+    
+    try {
+      const inspect = await container.inspect();
+      if (!inspect.State.Running) return res.status(400).json({ message: 'Database container is not running.' });
+    } catch (_) {
+      return res.status(400).json({ message: 'Database container does not exist.' });
+    }
+    
+    const runExec = async (cmd) => {
+      const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false });
+      const stream = await exec.start();
+      return new Promise((resolve) => {
+        const chunks = [];
+        stream.on('data', chunk => { chunks.push(chunk); });
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer).trim());
+        });
+        stream.on('error', () => resolve(''));
+      });
+    };
+    
+    const dbName = 'preview_db';
+
+    if (dbType === 'mongodb') {
+      const remoteUri = await getRemoteMongoUri(deployment);
+      const connectionString = remoteUri || dbName;
+      const delimiter = '__DB_QUERY_EOF__';
+      const query = `
+        let queryObj = { _id: "${pkValue}" };
+        if ("${pkValue}".length === 24 && /^[0-9a-fA-F]+$/.test("${pkValue}")) {
+          try { queryObj = { _id: ObjectId("${pkValue}") }; } catch(e) {}
+        } else {
+          const asNum = Number("${pkValue}");
+          if (!isNaN(asNum)) {
+            queryObj = { _id: asNum };
+          }
+        }
+        print(JSON.stringify(db.${collection}.deleteOne(queryObj)));
+      `;
+      const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/delete.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/delete.js`];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'mysql' || dbType === 'mariadb' || dbType === 'postgres' || dbType === 'sqlite') {
+      const pkValStr = typeof pkValue === 'number' || !isNaN(Number(pkValue)) ? pkValue : `'${String(pkValue).replace(/'/g, "''")}'`;
+      const sql = `DELETE FROM \`${collection}\` WHERE \`${pkColumn || 'id'}\` = ${pkValStr};`;
+      
+      let cmd = [];
+      if (dbType === 'mysql' || dbType === 'mariadb') {
+        cmd = ['mysql', '-u', 'root', '-D', dbName, '-e', sql];
+      } else if (dbType === 'postgres') {
+        const pgSql = sql.replace(/`/g, '"');
+        cmd = ['psql', '-U', 'postgres', '-d', dbName, '-c', pgSql];
+      } else if (dbType === 'sqlite') {
+        const liteSql = sql.replace(/`/g, '"');
+        cmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 "$sqliteFile" "${liteSql}"`];
+      }
+      
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'mssql') {
+      const pkValStr = typeof pkValue === 'number' || !isNaN(Number(pkValue)) ? pkValue : `'${String(pkValue).replace(/'/g, "''")}'`;
+      const sql = `DELETE FROM [${collection}] WHERE [${pkColumn || 'id'}] = ${pkValStr};`;
+      const cmd = ['/opt/mssql-tools/bin/sqlcmd', '-S', 'localhost', '-U', 'sa', '-P', 'Sa_password123', '-C', '-d', dbName, '-Q', sql];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    } else if (dbType === 'redis') {
+      const cmd = ['redis-cli', 'DEL', collection];
+      const output = await runExec(cmd);
+      return res.json({ success: true, output });
+    }
+    
+    res.status(400).json({ message: 'Unsupported database type' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const getFlatWorkspaceFiles = (dirPath, relativeDir = '') => {
   let list = [];
   if (!fs.existsSync(dirPath)) return list;
@@ -1440,7 +1767,7 @@ const executeAgentChat = async (req, res) => {
     const deployment = await Deployment.findById(req.params.id);
     if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
     
-    const { message, chatId } = req.body;
+    const { message, chatId, imageBase64, imageMimeType } = req.body;
     if (!message) return res.status(400).json({ message: 'Message is required' });
     
     let chatSession = null;
@@ -1459,7 +1786,12 @@ const executeAgentChat = async (req, res) => {
     // Run the ReAct agent chat loop
     const startTime = Date.now();
     const { runAgentChatLoop } = require('../services/agent-loop.service');
-    const result = await runAgentChatLoop(deployment, chatSession, message);
+    const displayName = req.user
+      ? (req.user.githubUsername
+          ? `${req.user.email} (${req.user.githubUsername})`
+          : req.user.email)
+      : 'Anonymous';
+    const result = await runAgentChatLoop(deployment, chatSession, message, null, displayName, imageBase64 || null, imageMimeType || 'image/jpeg');
     const durationSec = parseFloat(((Date.now() - startTime) / 1000).toFixed(1));
 
     // Save final response in database messages archive
@@ -1706,7 +2038,12 @@ const executePendingCommands = async (req, res) => {
         if (savedState) {
           const { runAgentChatLoop } = require('../services/agent-loop.service');
           // Resume the loop using the execLogs as the new observations
-          const result = await runAgentChatLoop(deployment, chatSession, '', execLogs);
+          const resumeDisplayName = req.user
+            ? (req.user.githubUsername
+                ? `${req.user.email} (${req.user.githubUsername})`
+                : req.user.email)
+            : 'Anonymous';
+          const result = await runAgentChatLoop(deployment, chatSession, '', execLogs, resumeDisplayName);
           
           chatSession.messages.push({
             role: 'agent',
@@ -1845,7 +2182,7 @@ const validateDbRecord = async (container, dbType, dbName, collection, record, d
       if (e.message.includes('required') || e.message.includes('Invalid type')) throw e;
     }
   } else if (dbType === 'postgres') {
-    const query = `SELECT json_agg(t) FROM (SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = '${collection}') t;`;
+    const query = `SELECT json_agg(t) FROM (SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = '${collection}') t;`;
     const cmd = ['psql', '-U', 'postgres', '-d', dbName, '-t', '-c', query];
     const output = await runExec(cmd);
     try {
@@ -1853,7 +2190,9 @@ const validateDbRecord = async (container, dbType, dbName, collection, record, d
       if (!Array.isArray(cols) || cols.length === 0) return null;
       for (const col of cols) {
         const val = record[col.column_name];
-        if (col.is_nullable === 'NO' && (val === undefined || val === null)) {
+        // Skip NOT NULL check for serial/sequence columns (auto-generated PKs and sequences)
+        const isSerial = col.column_default && col.column_default.includes('nextval(');
+        if (col.is_nullable === 'NO' && !isSerial && (val === undefined || val === null)) {
           throw new Error(`Field '${col.column_name}' is required and cannot be null.`);
         }
         if (val !== undefined && val !== null) {
@@ -2072,6 +2411,8 @@ module.exports = {
   getDbCollections,
   getDbCollectionData,
   insertDbRecord,
+  updateDbRecord,
+  deleteDbRecord,
   executeAgentChat,
   rollbackAgentPatches,
   updateAgentPermission,
@@ -2119,9 +2460,12 @@ const syncGithubCollaborators = async (req, res) => {
       return res.status(400).json({ message: 'Not a GitHub deployment.' });
     }
     
-    // Get owner details for GitHub access token
     const User = require('../models/User');
-    const owner = await User.findById(deployment.deployedBy).select('+githubAccessToken');
+    const Admin = require('../models/Admin');
+    let owner = await User.findById(deployment.deployedBy).select('+githubAccessToken');
+    if (!owner) {
+      owner = await Admin.findById(deployment.deployedBy).select('+githubAccessToken');
+    }
     const token = owner?.githubAccessToken;
     if (!token) {
       return res.status(400).json({ message: 'GitHub link not found for the project creator.' });
@@ -2229,6 +2573,8 @@ module.exports = {
   getDbCollections,
   getDbCollectionData,
   insertDbRecord,
+  updateDbRecord,
+  deleteDbRecord,
   executeAgentChat,
   rollbackAgentPatches,
   updateAgentPermission,

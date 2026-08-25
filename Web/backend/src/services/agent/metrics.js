@@ -43,11 +43,35 @@ const agentPatchesAppliedTotal = new client.Counter({
   registers: [register]
 });
 
+const llmPromptTokensTotal = new client.Counter({
+  name: 'llm_prompt_tokens_total',
+  help: 'Total number of LLM prompt tokens consumed',
+  labelNames: ['model'],
+  registers: [register]
+});
+
+const llmCompletionTokensTotal = new client.Counter({
+  name: 'llm_completion_tokens_total',
+  help: 'Total number of LLM completion tokens generated',
+  labelNames: ['model'],
+  registers: [register]
+});
+
+const llmTokenSpeedGauges = new client.Gauge({
+  name: 'llm_token_speed_gauges',
+  help: 'LLM token generation speed (tokens/sec)',
+  labelNames: ['model'],
+  registers: [register]
+});
+
 module.exports = {
   register,
   llmRequestsTotal,
   llmResponseDurationSeconds,
   agentLoopIterationsTotal,
   agentLoopErrorsTotal,
-  agentPatchesAppliedTotal
+  agentPatchesAppliedTotal,
+  llmPromptTokensTotal,
+  llmCompletionTokensTotal,
+  llmTokenSpeedGauges
 };

@@ -25,6 +25,8 @@ const {
   getDbCollections,
   getDbCollectionData,
   insertDbRecord,
+  updateDbRecord,
+  deleteDbRecord,
   executeAgentChat,
   rollbackAgentPatches,
   updateAgentPermission,
@@ -48,19 +50,19 @@ const {
   getGithubUserProfile,
   publishBranchToGithub,
 } = require('../controllers/github.controller');
-const { protect } = require('../middleware/auth.middleware');
+const { protect, checkGithubEnabled } = require('../middleware/auth.middleware');
 const { checkDeploymentAccess } = require('../middleware/access.middleware');
 
 // ─── GitHub OAuth ──────────────────────────────────────────────────────────────
-router.get('/github/callback', githubOAuthCallback);
-router.get('/github/auth-url', protect, getGithubAuthUrl);
-router.get('/github/status',   protect, getGithubStatus);
-router.get('/github/profile',  protect, getGithubUserProfile);
-router.get('/github/repos',    protect, getGithubRepos);
-router.get('/github/repos/:owner/:repo/branches', protect, getGithubBranches);
-router.post('/github/import',  protect, importGithubRepo);
-router.post('/github/unlink',  protect, unlinkGithub);
-router.post('/github/:id/publish-branch', protect, publishBranchToGithub);
+router.get('/github/callback', checkGithubEnabled, githubOAuthCallback);
+router.get('/github/auth-url', protect, checkGithubEnabled, getGithubAuthUrl);
+router.get('/github/status',   protect, checkGithubEnabled, getGithubStatus);
+router.get('/github/profile',  protect, checkGithubEnabled, getGithubUserProfile);
+router.get('/github/repos',    protect, checkGithubEnabled, getGithubRepos);
+router.get('/github/repos/:owner/:repo/branches', protect, checkGithubEnabled, getGithubBranches);
+router.post('/github/import',  protect, checkGithubEnabled, importGithubRepo);
+router.post('/github/unlink',  protect, checkGithubEnabled, unlinkGithub);
+router.post('/github/:id/publish-branch', protect, checkGithubEnabled, publishBranchToGithub);
 
 // Static routes must be declared BEFORE dynamic :id routes
 router.get('/suggest-port', protect, getSuggestedPort);
@@ -95,6 +97,8 @@ router.post('/:id/files/save', protect, checkDeploymentAccess('build'), saveWork
 router.get('/:id/db/collections', protect, checkDeploymentAccess('visibility'), getDbCollections);
 router.get('/:id/db/collection/:collection', protect, checkDeploymentAccess('visibility'), getDbCollectionData);
 router.post('/:id/db/insert', protect, checkDeploymentAccess('build'), insertDbRecord);
+router.put('/:id/db/update', protect, checkDeploymentAccess('build'), updateDbRecord);
+router.delete('/:id/db/delete', protect, checkDeploymentAccess('build'), deleteDbRecord);
 
 // AI Agent Chat & Permission API
 router.get('/:id/agent/chats', protect, checkDeploymentAccess('visibility'), getChats);

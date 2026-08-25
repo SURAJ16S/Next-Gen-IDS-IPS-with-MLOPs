@@ -128,9 +128,32 @@ const runCommandInContainer = async (containerName, cmd) => {
   }
 };
 
+const sanitizeTerminalLogs = (text) => {
+  if (!text || typeof text !== 'string') return text;
+  let sanitized = text;
+
+  // 1. Mask UUID container hostnames
+  sanitized = sanitized.replace(/(devops-db-[a-zA-Z0-9]+-)[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi, '$1********');
+  sanitized = sanitized.replace(/(devops-preview-)[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi, '$1********');
+
+  // 2. Mask PGPASSWORD variable
+  sanitized = sanitized.replace(/PGPASSWORD=[^\s&|;]+/g, 'PGPASSWORD=********');
+
+  // 3. Mask inline MySQL passwords e.g. -ppassword (excluding common option flags like -path, -port, -parent, etc.)
+  sanitized = sanitized.replace(/-p(?!ath|ort|latform|rovider|aram|rofile|lugin|roperties|arent|ackage|roxy|roject|ull|ush|rocess|ing|atch|refix|om|arse|kg)[^\s&|;]+/g, '-p********');
+
+  // 4. Mask credentials in connection URIs (e.g. mongodb://user:pass@host)
+  sanitized = sanitized.replace(/(mongodb(?:\+srv)?:\/\/)([^:@\s]+):([^@\s]+)@/gi, '$1********:********@');
+  sanitized = sanitized.replace(/(postgresql?:\/\/)([^:@\s]+):([^@\s]+)@/gi, '$1********:********@');
+  sanitized = sanitized.replace(/(mysql:\/\/)([^:@\s]+):([^@\s]+)@/gi, '$1********:********@');
+
+  return sanitized;
+};
+
 module.exports = {
   getFlatWorkspaceFiles,
   isCommandSafe,
   isReadOnlyCommand,
-  runCommandInContainer
+  runCommandInContainer,
+  sanitizeTerminalLogs
 };
