@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
+const Admin = require('../models/Admin');
 const Otp = require('../models/Otp');
 const sendEmail = require('../utils/sendEmail');
 
@@ -21,9 +22,10 @@ const registerUser = async (req, res) => {
   try {
     const { firstName, lastName, username, dob, mobile, email, password, role, githubRegToken, githubUsername } = req.body;
 
-    const userExists = await User.findOne({ $or: [{ email }, { username }] });
-    if (userExists) {
-      return res.status(400).json({ message: 'User with this email or username already exists' });
+    const userExistsInUsers = await User.findOne({ $or: [{ email }, { username }] });
+    const userExistsInAdmins = await Admin.findOne({ $or: [{ email }, { username }] });
+    if (userExistsInUsers || userExistsInAdmins) {
+      return res.status(400).json({ message: 'User or Admin with this email or username already exists' });
     }
 
     let extraFields = {};
@@ -41,7 +43,8 @@ const registerUser = async (req, res) => {
       }
     }
 
-    const user = await User.create({
+    const Model = (role === 'admin' || role === 'superadmin') ? Admin : User;
+    const user = await Model.create({
       firstName,
       lastName,
       username,
@@ -49,7 +52,7 @@ const registerUser = async (req, res) => {
       mobile,
       email,
       password,
-      role: role || 'viewer',
+      role: role || 'user',
       ...extraFields
     });
 
@@ -74,21 +77,28 @@ const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
-
-    if (user && (await user.matchPassword(password))) {
-      res.json({
-        _id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        token: generateToken(user._id),
-      });
-    } else {
-      res.status(401).json({ message: 'Invalid email or password' });
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = await Admin.findOne({ email });
     }
+
+    if (user) {
+      if (user.status === 'banned') {
+        return res.status(403).json({ message: 'Your account has been banned. Please contact the administrator.' });
+      }
+      if (await user.matchPassword(password)) {
+        return res.json({
+          _id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          username: user.username,
+          email: user.email,
+          role: user.role,
+          token: generateToken(user._id),
+        });
+      }
+    }
+    res.status(401).json({ message: 'Invalid email or password' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -100,7 +110,10 @@ const forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
 
-    const user = await User.findOne({ email });
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = await Admin.findOne({ email });
+    }
     if (!user) {
       // Return success anyway to avoid user enumeration
       return res.json({ message: 'If that email is registered, an OTP has been sent.' });
@@ -186,9 +199,12 @@ const resetPassword = async (req, res) => {
       return res.status(400).json({ message: 'OTP not verified for this email.' });
     }
 
-    const user = await User.findOne({ email });
+    let user = await User.findOne({ email });
     if (!user) {
-      return res.status(404).json({ message: 'User not found.' });
+      user = await Admin.findOne({ email });
+    }
+    if (!user) {
+      return res.status(404).json({ message: 'User or Admin not found.' });
     }
 
     user.password = newPassword;
@@ -208,7 +224,8 @@ const resetPassword = async (req, res) => {
 
 const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('-password');
+    const Model = (req.user.role === 'admin' || req.user.role === 'superadmin') ? Admin : User;
+    const user = await Model.findById(req.user._id).select('-password');
     res.json(user);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -217,7 +234,7 @@ const getMe = async (req, res) => {
 
 const githubLoginRedirect = (req, res) => {
   const { GITHUB_CLIENT_ID, GITHUB_CALLBACK_URL } = process.env;
-  const state = jwt.sign({ action: 'login' }, process.env.JWT_SECRET, { expiresIn: '15m' });
+  const state = jwt.sign({ action: 'login', from: req.query.from || 'user' }, process.env.JWT_SECRET, { expiresIn: '15m' });
   const params = new URLSearchParams({
     client_id: GITHUB_CLIENT_ID,
     redirect_uri: GITHUB_CALLBACK_URL,
@@ -233,12 +250,23 @@ const githubLoginRedirect = (req, res) => {
 const githubLoginCallback = async (req, res) => {
   const axios = require('axios');
   const crypto = require('crypto');
-  const { code } = req.query;
+  const { code, state } = req.query;
   const { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, FRONTEND_URL, GITHUB_CALLBACK_URL } = process.env;
   const authCallbackUrl = GITHUB_CALLBACK_URL;
 
+  // Resolve redirect prefix based on state payload context
+  let redirectPrefix = '/login';
+  if (state) {
+    try {
+      const decodedState = jwt.verify(state, process.env.JWT_SECRET);
+      if (decodedState.from === 'admin') {
+        redirectPrefix = '/admin/login';
+      }
+    } catch (_) {}
+  }
+
   if (!code) {
-    return res.redirect(`${FRONTEND_URL}/login?error=no_code`);
+    return res.redirect(`${FRONTEND_URL}${redirectPrefix}?error=no_code`);
   }
 
   try {
@@ -255,7 +283,7 @@ const githubLoginCallback = async (req, res) => {
 
     const { access_token, error } = tokenRes.data;
     if (error || !access_token) {
-      return res.redirect(`${FRONTEND_URL}/login?error=token_failed`);
+      return res.redirect(`${FRONTEND_URL}${redirectPrefix}?error=token_failed`);
     }
 
     const userRes = await axios.get('https://api.github.com/user', {
@@ -277,10 +305,16 @@ const githubLoginCallback = async (req, res) => {
 
     // 1. First, search if a user is already linked with this GitHub username
     let user = await User.findOne({ githubUsername: ghUser.login });
+    if (!user) {
+      user = await Admin.findOne({ githubUsername: ghUser.login });
+    }
 
     if (!user) {
       // 2. If not linked by githubUsername, search by email
       user = await User.findOne({ email });
+      if (!user) {
+        user = await Admin.findOne({ email });
+      }
 
       if (user) {
         // 3. User exists by email but isn't linked to this GitHub account yet.
@@ -296,7 +330,7 @@ const githubLoginCallback = async (req, res) => {
         );
 
         return res.redirect(
-          `${FRONTEND_URL}/login?action=link_github&email=${encodeURIComponent(email)}&githubUsername=${encodeURIComponent(ghUser.login)}&linkToken=${linkToken}`
+          `${FRONTEND_URL}${redirectPrefix}?action=link_github&email=${encodeURIComponent(email)}&githubUsername=${encodeURIComponent(ghUser.login)}&linkToken=${linkToken}`
         );
       } else {
         // 4. No account exists. Register as a new user.
@@ -312,7 +346,7 @@ const githubLoginCallback = async (req, res) => {
           dob: new Date('2000-01-01'),
           mobile: '0000000000',
           password: crypto.randomBytes(16).toString('hex'),
-          role: 'viewer',
+          role: 'user',
           githubAccessToken: access_token,
           githubUsername: ghUser.login,
         });
@@ -321,6 +355,10 @@ const githubLoginCallback = async (req, res) => {
       // User is already linked. Update the access token.
       user.githubAccessToken = access_token;
       await user.save();
+    }
+
+    if (user.status === 'banned') {
+      return res.redirect(`${FRONTEND_URL}${redirectPrefix}?error=banned`);
     }
 
     const token = generateToken(user._id);
@@ -333,10 +371,10 @@ const githubLoginCallback = async (req, res) => {
       role: user.role,
     }));
 
-    res.redirect(`${FRONTEND_URL}/login?token=${token}&user=${userJSON}`);
+    res.redirect(`${FRONTEND_URL}${redirectPrefix}?token=${token}&user=${userJSON}`);
   } catch (err) {
     console.error('GitHub OAuth error:', err.message);
-    res.redirect(`${FRONTEND_URL}/login?error=server_error`);
+    res.redirect(`${FRONTEND_URL}${redirectPrefix}?error=server_error`);
   }
 };
 
@@ -362,10 +400,17 @@ const linkGithubAccount = async (req, res) => {
       return res.status(400).json({ message: 'Token email mismatch.' });
     }
 
-    // Find the user
-    const user = await User.findOne({ email });
+    // Find the user or admin
+    let user = await User.findOne({ email });
     if (!user) {
-      return res.status(404).json({ message: 'User not found.' });
+      user = await Admin.findOne({ email });
+    }
+    if (!user) {
+      return res.status(404).json({ message: 'User or Admin not found.' });
+    }
+
+    if (user.status === 'banned') {
+      return res.status(403).json({ message: 'Your account has been banned. Please contact the administrator.' });
     }
 
     // Verify password

@@ -65,7 +65,10 @@ export const saveWorkspaceFile = (id, path, content) => api.post(`/devops/${id}/
 export const getDbCollections = (id, dbType) => api.get(`/devops/${id}/db/collections?dbType=${dbType}`);
 export const getDbCollectionData = (id, collection, dbType) => api.get(`/devops/${id}/db/collection/${collection}?dbType=${dbType}`);
 export const insertDbRecord = (id, collection, record, dbType) => api.post(`/devops/${id}/db/insert?dbType=${dbType}`, { collection, record });
-export const executeAgentChat = (id, message, chatId, config) => api.post(`/devops/${id}/agent/chat`, { message, chatId }, config);
+export const updateDbRecord = (id, collection, pkColumn, pkValue, record, dbType) => api.put(`/devops/${id}/db/update?dbType=${dbType}`, { collection, pkColumn, pkValue, record });
+export const deleteDbRecord = (id, collection, pkColumn, pkValue, dbType) => api.delete(`/devops/${id}/db/delete?dbType=${dbType}`, { data: { collection, pkColumn, pkValue } });
+export const executeAgentChat = (id, message, chatId, config, imageBase64 = null, imageMimeType = null) =>
+  api.post(`/devops/${id}/agent/chat`, { message, chatId, imageBase64, imageMimeType }, config);
 export const rollbackAgentPatches = (id, patches, chatId, messageIndex) => api.post(`/devops/${id}/agent/rollback`, { patches, chatId, messageIndex });
 export const undoChatMessages = (id, chatId, messageIndex) => api.post(`/devops/${id}/agent/chat/undo`, { chatId, messageIndex });
 export const updateAgentPermission = (id, permission) => api.post(`/devops/${id}/agent/permission`, { permission });
@@ -89,5 +92,24 @@ export const publishDeploymentBranch = (id, data) => api.post(`/devops/github/${
 export const getNodes = () => api.get('/nodes');
 export const generateEnrollmentToken = (name) => api.post('/nodes/enrollment-token', { name });
 export const revokeNode = (nodeId) => api.post(`/nodes/${nodeId}/revoke`);
+
+// Agent Performance Metrics
+export const getAgentPerformance = () => api.get('/analytics/agent-performance');
+export const simulateAgentLoad = (userCount, iterations) => api.post('/analytics/simulate-load', { userCount, iterations });
+
+// Admin Control Panel
+export const getAdminStats = () => api.get('/admin/stats');
+export const getAdminUsers = () => api.get('/admin/users');
+export const updateAdminUserRole = (id, role) => api.put(`/admin/users/${id}/role`, { role });
+export const updateAdminUserStatus = (id, status) => api.put(`/admin/users/${id}/status`, { status });
+export const getAdminThresholds = (feature) => api.get(`/admin/thresholds/${feature}`);
+export const updateAdminThresholds = (feature, config) => api.put(`/admin/thresholds/${feature}`, { config });
+export const getAdminDeployments = () => api.get('/admin/deployments');
+export const getAdminThreats = () => api.get('/admin/threats');
+export const getAdminNetwork = () => api.get('/admin/network');
+export const getAdminNetworkLogs = getAdminNetwork;
+export const getAdminLogs = () => api.get('/admin/logs');
+export const purgeAdminLogs = (beforeDate) => api.post('/admin/logs/purge', { beforeDate });
+export const pruneAdminLogs = purgeAdminLogs;
 
 export default api;

@@ -195,7 +195,7 @@ function Profile() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '13px' }}>
               <Shield size={15} style={{ color: 'var(--accent-purple)', flexShrink: 0 }} />
               <span style={{ color: 'var(--text-primary)', textTransform: 'uppercase', fontWeight: 600, fontSize: '11px', letterSpacing: '0.05em' }}>
-                {user?.role || 'Viewer'}
+                {user?.role === 'user' ? 'DevOps Developer' : user?.role === 'admin' ? 'System Administrator' : user?.role === 'superadmin' ? 'Platform Owner' : (user?.role || 'DevOps Developer')}
               </span>
             </div>
             {githubLinked && (

@@ -120,6 +120,12 @@ func (l *JSONLLogger) OnDetection(d Detection) {
 	}
 	proto = strings.ToLower(proto)
 
+	// Sanitize protocol name for filesystem (replace characters that are invalid in filenames)
+	proto = strings.ReplaceAll(proto, "/", "_")
+	proto = strings.ReplaceAll(proto, "\\", "_")
+	proto = strings.ReplaceAll(proto, " ", "_")
+
+
 	protoFile, exists := l.protocolFiles[proto]
 	if !exists {
 		fileName := fmt.Sprintf("%s_%s.jsonl", proto, l.sessionTimestamp)

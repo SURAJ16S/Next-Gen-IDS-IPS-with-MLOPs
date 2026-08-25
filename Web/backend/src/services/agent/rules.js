@@ -114,7 +114,7 @@ const getStackRules = (techStack, deploymentId) => {
 3. TOKEN EFFICIENCY: For database seeding, write seed.rb or rails tasks via <patch> and run it.`;
   } else if (isJava) {
     rule2Text = `RULE 2 — USE JAVA ENVIRONMENT:
-  Java, Maven (./mvnw), and Gradle (./gradlew) are available in this container.
+  Java, Maven (global 'mvn' command or './mvnw'), and Gradle ('gradle' or './gradlew') are available in this container.
   All scripts, seeders, or database utilities should be run using Maven, Gradle, or directly via pre-compiled jar/SQL scripts.
   Do NOT use Python or JavaScript for database seeding in a Java project.`;
 
@@ -122,18 +122,27 @@ const getStackRules = (techStack, deploymentId) => {
   Add missing dependencies to pom.xml (for Maven) or build.gradle (for Gradle) and rebuild the project if needed.`;
 
     rule9Text = `RULE 9 — JAVA/SPRING DATABASE SCHEMAS AND SEEDING:
-  This project is a Java project.
-  - Inspect Java JPA/Hibernate entity classes (with @Entity annotations) or raw schema definition SQL files to see the database schema.
-  - To seed the database, write a raw SQL seed script (e.g. <patch file="seed.sql">) and execute it inside the database container using execution tools, or write a Java database helper class and run it using Maven/Gradle.
-  - Connection options: Always use the database container hostname as defined in Rule 3 (never use localhost).`;
+  This project is a Java project (usually Spring Boot).
+  - You MUST first locate and inspect existing database tables (via <exec command="PGPASSWORD=postgres psql -h devops-db-postgres-${deploymentId} -U postgres -d preview_db -c '\\dt'" />) and Java JPA/Hibernate entity classes (classes annotated with @Entity) or application.properties to find the exact database schema, tables, and column names.
+  - If a user asks for "products" or "items", check if an entity/table (like 'items') already exists before trying to create a new entity.
+  - In modern Spring Boot, always use 'jakarta.persistence.*' imports (e.g. jakarta.persistence.Entity, jakarta.persistence.Id, etc.), NOT deprecated 'javax.persistence.*'.
+  - To seed the database, write a raw SQL seed script (e.g. <patch file="seed.sql">) containing INSERT statements.
+  - Execute the seed script against the Postgres database container using:
+    <exec command="PGPASSWORD=postgres psql -h devops-db-postgres-${deploymentId} -U postgres -d preview_db -f seed.sql" /> (or mysql equivalents).
+  - Note: ALWAYS set the database password (e.g. PGPASSWORD=postgres) inline to prevent terminal prompts that hang execution.
+  - Connection options: Always use the database container hostname as defined in Rule 3 (never use localhost).
+  - REBUILDING AND RECOMPILING JAVA CODE CHANGES: If you modify Java source code or pom.xml, you MUST rebuild the application inside the container using:
+    <exec command="mvn clean package dependency:copy-dependencies -DskipTests" /> (or gradle equivalent).
+    Do NOT ask the user to install Maven, clean, compile, or run the project. You must do this yourself in the container.`;
 
     rule11Text = `RULE 11 — ANALYZE JAVA COMPILATION ERRORS:
   Read Java/Maven/Gradle build errors. Trace the compilation exceptions, patch files, and rebuild.`;
 
     abilitiesExamples = `   - Read files: <exec command="cat src/main/resources/application.properties" />
    - Find files: <exec command="find . -name '*.java'" />
-   - Compile project: <exec command="./mvnw clean compile" /> or gradle
-   - Run SQL seed: <exec command="psql -h devops-db-postgres-\${deploymentId} -U postgres -d preview_db -f seed.sql" /> or mysql equivalents
+   - Check DB tables: <exec command="PGPASSWORD=postgres psql -h devops-db-postgres-${deploymentId} -U postgres -d preview_db -c '\\dt'" />
+   - Compile/Package project: <exec command="mvn clean package dependency:copy-dependencies -DskipTests" /> (or gradle equivalent)
+   - Run SQL seed: <exec command="PGPASSWORD=postgres psql -h devops-db-postgres-${deploymentId} -U postgres -d preview_db -f seed.sql" /> or mysql equivalents
 3. TOKEN EFFICIENCY: Write SQL or java seed classes via <patch> and run them.`;
   } else if (isPhp) {
     rule2Text = `RULE 2 — USE PHP ENVIRONMENT:
