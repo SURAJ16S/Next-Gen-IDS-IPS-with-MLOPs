@@ -15,10 +15,21 @@ const navItems = [
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
+function getUserRole() {
+  try {
+    const stored = localStorage.getItem('user');
+    if (stored) return JSON.parse(stored)?.role || 'user';
+  } catch (_) {}
+  return 'user';
+}
+
 function Sidebar() {
   const [isCollapsed, setIsCollapsed] = useState(() => {
     return localStorage.getItem('sidebar-collapsed') === 'true';
   });
+
+  const userRole = getUserRole();
+  const visibleNavItems = navItems;
 
   const toggleCollapse = () => {
     setIsCollapsed((prev) => {
@@ -117,34 +128,41 @@ function Sidebar() {
 
       {/* Navigation */}
       <nav style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-        {navItems.map(({ to, label, icon: Icon, end }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={end}
-            className="sidebar-nav-link"  
-            style={({ isActive }) => ({
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: isCollapsed ? 'center' : 'flex-start',
-              gap: isCollapsed ? '0' : '11px',
-              padding: '10px 20px',
-              margin: '2px 10px',
-              borderRadius: 'var(--radius-sm)',
-              color: isActive ? '#fff' : 'var(--text-secondary)',
-              textDecoration: 'none',
-              background: isActive ? 'var(--accent-blue)' : undefined,
-              fontSize: '13.5px',
-              fontWeight: isActive ? 600 : 500,
-              transition: 'background 0.12s, color 0.12s',
-              whiteSpace: 'nowrap',
-            })}
-            title={isCollapsed ? label : undefined}
-          >
-            <Icon size={17} style={{ flexShrink: 0 }} />
-            {!isCollapsed && <span>{label}</span>}
-          </NavLink>
-        ))}
+        {visibleNavItems.map(({ to, label, icon: Icon, end }) => {
+          return (
+            <div key={to}>
+              <NavLink
+                to={to}
+                end={end}
+                className="sidebar-nav-link"
+                style={({ isActive }) => ({
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: isCollapsed ? 'center' : 'flex-start',
+                  gap: isCollapsed ? '0' : '11px',
+                  padding: '10px 20px',
+                  margin: '2px 10px',
+                  borderRadius: 'var(--radius-sm)',
+                  color: isActive ? '#fff' : 'var(--text-secondary)',
+                  textDecoration: 'none',
+                  background: isActive ? 'var(--accent-blue)' : undefined,
+                  fontSize: '13.5px',
+                  fontWeight: isActive ? 600 : 500,
+                  transition: 'background 0.12s, color 0.12s',
+                  whiteSpace: 'nowrap',
+                })}
+                title={isCollapsed ? label : undefined}
+              >
+                <Icon size={17} style={{ flexShrink: 0 }} />
+                {!isCollapsed && (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1 }}>
+                    {label}
+                  </span>
+                )}
+              </NavLink>
+            </div>
+          );
+        })}
       </nav>
 
       {/* Footer Operational Status */}

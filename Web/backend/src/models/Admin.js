@@ -23,7 +23,7 @@ const decryptToken = (text) => {
   } catch (_) { return null; }
 };
 
-const userSchema = new mongoose.Schema(
+const adminSchema = new mongoose.Schema(
   {
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
@@ -32,7 +32,7 @@ const userSchema = new mongoose.Schema(
     mobile: { type: String, required: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    role: { type: String, enum: ['user'], default: 'user' },
+    role: { type: String, enum: ['superadmin', 'admin'], default: 'admin' },
     status: { type: String, enum: ['active', 'banned'], default: 'active' },
     // GitHub OAuth
     githubAccessToken: { type: String, set: encryptToken, get: decryptToken },
@@ -41,14 +41,14 @@ const userSchema = new mongoose.Schema(
   { timestamps: true, toJSON: { getters: true }, toObject: { getters: true } }
 );
 
-userSchema.pre('save', async function () {
+adminSchema.pre('save', async function () {
   if (!this.isModified('password')) return;
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
 });
 
-userSchema.methods.matchPassword = async function (enteredPassword) {
+adminSchema.methods.matchPassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
-module.exports = mongoose.model('User', userSchema);
+module.exports = mongoose.model('Admin', adminSchema, 'admins');

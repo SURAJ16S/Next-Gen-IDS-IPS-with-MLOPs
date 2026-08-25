@@ -45,9 +45,23 @@ function Header() {
   };
 
   const handleLogout = () => {
+    let isAdmin = false;
+    try {
+      const stored = localStorage.getItem('user');
+      if (stored) {
+        const u = JSON.parse(stored);
+        if (u.role === 'admin' || u.role === 'superadmin') isAdmin = true;
+      }
+    } catch (_) {}
+    
     localStorage.removeItem('token');
     localStorage.removeItem('user');
-    navigate('/login');
+    
+    if (isAdmin) {
+      navigate('/admin/login');
+    } else {
+      navigate('/login');
+    }
   };
 
   return (

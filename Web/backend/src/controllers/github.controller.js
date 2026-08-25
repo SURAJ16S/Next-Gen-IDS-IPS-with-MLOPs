@@ -6,6 +6,15 @@ const axios  = require('axios');
 const simpleGit = require('simple-git');
 
 const User       = require('../models/User');
+const Admin      = require('../models/Admin');
+
+const findUserOrAdminById = async (id) => {
+  let doc = await User.findById(id);
+  if (!doc) {
+    doc = await Admin.findById(id);
+  }
+  return doc;
+};
 const Deployment = require('../models/Deployment');
 const jwt        = require('jsonwebtoken');
 const { runPipeline }  = require('../services/pipeline-runner.service');
@@ -185,10 +194,15 @@ const githubOAuthCallback = async (req, res) => {
       return res.redirect(`${FRONTEND_URL}/devops?github=error&msg=invalid_state`);
     }
 
-    await User.findByIdAndUpdate(userId, {
-      githubAccessToken: access_token,
-      githubUsername,
-    });
+    let userDoc = await User.findById(userId);
+    if (!userDoc) {
+      userDoc = await Admin.findById(userId);
+    }
+    if (userDoc) {
+      userDoc.githubAccessToken = access_token;
+      userDoc.githubUsername = githubUsername;
+      await userDoc.save();
+    }
 
     // Redirect to popup relay page — it will postMessage to opener then self-close
     res.redirect(`${FRONTEND_URL}/github-callback?result=linked&username=${encodeURIComponent(githubUsername)}`);
@@ -201,7 +215,7 @@ const githubOAuthCallback = async (req, res) => {
 // ─── 3. Get status (is GitHub linked?) ───────────────────────────────────────
 const getGithubStatus = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('githubAccessToken githubUsername');
+    const user = await findUserOrAdminById(req.user._id);
     res.json({
       linked: !!user.githubAccessToken,
       githubUsername: user.githubUsername || null,
@@ -214,7 +228,7 @@ const getGithubStatus = async (req, res) => {
 // ─── 4. List repos ────────────────────────────────────────────────────────────
 const getGithubRepos = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('+githubAccessToken');
+    const user = await findUserOrAdminById(req.user._id);
     if (!user.githubAccessToken) {
       return res.status(401).json({ message: 'GitHub not linked. Please connect GitHub first.' });
     }
@@ -246,7 +260,8 @@ const getGithubRepos = async (req, res) => {
   } catch (err) {
     if (err.response?.status === 401) {
       // Token revoked — clear it
-      await User.findByIdAndUpdate(req.user._id, { githubAccessToken: null, githubUsername: null });
+      const Model = (req.user.role === 'admin' || req.user.role === 'superadmin') ? Admin : User;
+      await Model.findByIdAndUpdate(req.user._id, { githubAccessToken: null, githubUsername: null });
       return res.status(401).json({ message: 'GitHub token expired. Please reconnect GitHub.' });
     }
     res.status(500).json({ message: err.message });
@@ -262,7 +277,7 @@ const importGithubRepo = async (req, res) => {
   }
 
   try {
-    const user = await User.findById(req.user._id).select('+githubAccessToken');
+    const user = await findUserOrAdminById(req.user._id);
     if (!user.githubAccessToken) {
       return res.status(401).json({ message: 'GitHub not linked.' });
     }
