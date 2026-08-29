@@ -144,6 +144,112 @@ The NGFW monitor collects comprehensive telemetry specifically designed for trai
 
 ---
 
+## ML Pipeline (Tier-3 — New)
+
+The project now includes a full **Tier-3 ML scoring pipeline** alongside the existing Tier-1 (Go rules) and Tier-2 (Redis reputation) layers. See **`ML/README.md`** for full setup instructions.
+
+### Architecture Addition
+
+```
+Traffic → Go Proxy (Tier-1 rules + Tier-2 Redis reputation)
+        → FastAPI ML Service (Tier-3, port 8500)  ← NEW
+        → Cross-Layer Decision Engine
+        → MongoDB + Socket.IO → Dashboard (block/unblock)
+```
+
+### New Go Detection Categories (28 Added)
+
+The following category constants have been added to `detect/detection.go`:
+
+**HTTP / API:** `lfi`, `rfi`, `csrf`, `clickjacking`, `ssti`, `insecure-deserialization`, `nosqli`, `xpath-injection`, `graphql-abuse`, `websocket-abuse`, `host-header-injection`, `bola`, `bfla`, `mass-assignment`, `api-resource-abuse`, `jwt-alg-none`, `jwt-alg-confusion`, `jwt-expired-accepted`
+
+**SSH:** `ssh-known-bad-fingerprint`, `ssh-cve-exploit`
+
+**DNS:** `dns-amplification`, `dns-spoofing`
+
+**FTP:** `ftp-cleartext-creds`
+
+**SMTP:** `smtp-starttls-strip`
+
+**TLS:** `tls-known-bad-fingerprint`
+
+**Generic:** `rdp-exploit`, `udp-amplification`, `snmp-default-creds`
+
+### New Go Files (Phase B)
+
+- **`detect/jwt_analyzer.go`** — JWT structural validation: `alg:none` bypass (CRITICAL), algorithm confusion (LOW), expired token presentation (MEDIUM). Call `AnalyzeJWT(bus, authHeader, ...)` from `http_analyzer.go`.
+- **`detect/session_tracker.go`** — Extended with BOLA/ID-enumeration tracking: fires `CatBOLA` (HIGH) when 20+ distinct object IDs are accessed on the same URI template within 5 minutes.
+
+### ML Directory
+
+```
+ML/
+├── feature_encoder.py    # JSONL → numeric feature vectors
+├── train_models.py       # 5 model training commands + MLflow tracking
+├── scoring_service.py    # FastAPI Tier-3 scoring server
+├── redis_reputation.py   # Python Tier-2 reputation client
+├── requirements.txt
+├── models/               # Trained .pkl artifacts
+└── notebooks/            # Error analysis notebooks
+```
+
+### Training the Models
+
+```bash
+cd ML
+pip install -r requirements.txt
+
+# Phase E — no labels needed
+python train_models.py http-anomaly --input ../Security/logs/protocols/http_clean.jsonl
+python train_models.py flow-anomaly --input ../Security/logs/flow_stats_clean.jsonl
+
+# Phase F — needs labeled data from sandbox/
+python train_models.py web-classifier --input ../Security/logs/protocols/http_labeled.jsonl
+python train_models.py ssh-brute-classifier --input ../Security/logs/protocols/ssh_labeled.jsonl
+python train_models.py dns-tunnel-dga --input ../Security/logs/protocols/dns_labeled.jsonl
+
+# Start the scoring service
+uvicorn scoring_service:app --host 0.0.0.0 --port 8500 --workers 2
+```
+
+### Dashboard Block/Unblock
+
+New backend components (Web/backend/src/):
+- **`models/BlockedEntity.js`** — Mongoose model, source of truth for all block actions
+- **`controllers/block.controller.js`** — CRUD + Redis cache sync + Socket.IO events
+- **`routes/block.routes.js`** — `GET/POST /api/admin/blocked`, `PATCH /api/admin/blocked/:id/unblock`
+- **`middleware/captcha.middleware.js`** — Adaptive CAPTCHA trigger using Redis rate counters
+- **`services/redisSecurityClient.js`** — Dedicated ioredis client (DB 0/1/2)
+
+New frontend components (Web/frontend/src/):
+- **`components/CaptchaGate.jsx`** — Cloudflare Turnstile widget component
+
+### Sandbox (Attack Traffic Generation)
+
+```bash
+docker compose -f sandbox/docker-compose.sandbox.yml up -d
+bash sandbox/generate_labeled_traffic.sh
+```
+
+See **`sandbox/README.md`** for full instructions.
+
+### Build Order Summary
+
+| Phase | What | Status |
+|---|---|---|
+| A | Redis security client | ✅ Complete |
+| B | JWT analyzer + BOLA tracker + 28 new categories | ✅ Complete |
+| C | CAPTCHA middleware + React component | ✅ Complete |
+| D | Sandbox docker-compose + labeled traffic script | ✅ Complete |
+| E | Train Model #1 (HTTP anomaly) + #3 (flow anomaly) | ⏳ Run training commands |
+| F | Train Model #2 (web classifier) + #4/#5 | ⏳ Requires labeled data |
+| G | Go proxy → FastAPI scoring integration | ⏳ Wire 50ms timeout call |
+| H | Dashboard block/unblock UI | ⏳ AdminManageBlocklist.jsx |
+| I | End-to-end live test | ⏳ Phase G must be complete |
+| J | Retraining loop + model versioning | ⏳ MLflow already wired |
+
+---
+
 ## License
 
 GPL-2.0
