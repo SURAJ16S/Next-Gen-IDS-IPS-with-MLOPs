@@ -67,6 +67,7 @@ app.use('/api/devops', require('./routes/devops.routes'));
 app.use('/api/nodes', require('./routes/node.routes'));
 app.use('/api/agent', require('./routes/agent.routes'));
 app.use('/api/admin', require('./routes/admin.routes'));
+app.use('/api/admin/blocked', require('./routes/block.routes'));
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res) => {
