@@ -1,0 +1,73 @@
+# sandbox/docker-compose.sandbox.yml
+#
+# Isolated, deliberately-vulnerable targets for:
+#   1. Generating labeled attack traffic (master plan, Phase D / section 6.5)
+#   2. Live end-to-end testing of the proxy -> Tier1/2/3 -> dashboard pipeline
+#      (master plan, section 6.8)
+#
+# IMPORTANT: these containers are intentionally vulnerable. Run them only on
+# an isolated network, never expose their ports directly to the internet —
+# they must only be reachable THROUGH your reverse proxy, which is the whole
+# point of the test.
+#
+# Usage:
+#   docker compose -f docker-compose.sandbox.yml up -d
+#   Point your Security/proxy_config.yaml backend at:
+#     dvwa:      http://dvwa:80
+#     juiceshop: http://juiceshop:3000
+#
+# Then attack them via your proxy's public listen port, e.g.:
+#   sqlmap -u "http://<proxy-host>:<listen-port>/vulnerabilities/sqli/?id=1&Submit=Submit" \
+#          --cookie="PHPSESSID=...; security=low" --batch
+#   nikto -h http://<proxy-host>:<listen-port>/
+
+networks:
+  sandbox-internal:
+    driver: bridge
+    internal: true # no direct internet egress from these containers
+
+services:
+  dvwa:
+    image: vulnerables/web-dvwa
+    container_name: sandbox-dvwa
+    networks:
+      - sandbox-internal
+    # Deliberately NOT publishing ports to the host — only your proxy
+    # container (on the same docker network, added separately) should reach
+    # this by service name "dvwa:80".
+    restart: unless-stopped
+
+  juiceshop:
+    image: bkimminich/juice-shop
+    container_name: sandbox-juiceshop
+    networks:
+      - sandbox-internal
+    restart: unless-stopped
+
+  # A small MySQL backing DVWA needs to talk to (DVWA's own image usually
+  # bundles this, but pin an explicit one if your DVWA image expects it) —
+  # left commented since the vulnerables/web-dvwa image ships bundled MySQL.
+  # dvwa-db:
+  #   image: mysql:5.7
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: dvwa_sandbox_only
+  #   networks:
+  #     - sandbox-internal
+
+  # Redis used ONLY for local attack-tool bookkeeping/testing scripts if you
+  # need it while generating traffic — NOT the same Redis instance as your
+  # production reputation/rolling-counter store (keep those separate, see
+  # master plan section 2.1).
+  redis-sandbox:
+    image: redis:7-alpine
+    container_name: sandbox-redis
+    networks:
+      - sandbox-internal
+    restart: unless-stopped
+
+# --- After bringing this up, attach your proxy container to the same
+# --- "sandbox-internal" network (or, simpler for a first test, run the Go
+# --- proxy on the host and expose dvwa/juiceshop's ports to localhost only
+# --- via `ports: ["127.0.0.1:8081:80"]` on dvwa and
+# --- `ports: ["127.0.0.1:8082:3000"]` on juiceshop, then point
+# --- proxy_config.yaml at 127.0.0.1:8081 / 127.0.0.1:8082 as backends).

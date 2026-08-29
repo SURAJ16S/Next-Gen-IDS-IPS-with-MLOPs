@@ -136,6 +136,48 @@ const (
 	CatTelnetScan = "telnet-scan"
 	CatCredStuff  = "credential-stuffing"
 	CatPwdSpray   = "password-spray"
+
+	// ── HTTP/API additions (from 01_Protocol_Threat_Matrix §4) ──────────────
+	CatLFI                    = "lfi"
+	CatRFI                    = "rfi"
+	CatCSRF                   = "csrf"
+	CatClickjacking           = "clickjacking"
+	CatSSTI                   = "ssti"
+	CatInsecureDeserialization = "insecure-deserialization"
+	CatNoSQLi                 = "nosqli"
+	CatXPathInjection         = "xpath-injection"
+	CatGraphQLAbuse           = "graphql-abuse"
+	CatWebSocketAbuse         = "websocket-abuse"
+	CatHostHeaderInjection    = "host-header-injection"
+	CatBOLA                   = "bola"
+	CatBFLA                   = "bfla"
+	CatMassAssignment         = "mass-assignment"
+	CatAPIResourceAbuse       = "api-resource-abuse"
+	CatJWTAlgNone             = "jwt-alg-none"
+	CatJWTAlgConfusion        = "jwt-alg-confusion"
+	CatJWTExpiredAccepted     = "jwt-expired-accepted"
+
+	// ── SSH additions ────────────────────────────────────────────────────────
+	CatSSHKnownBadFingerprint = "ssh-known-bad-fingerprint"
+	CatSSHCVEExploit          = "ssh-cve-exploit"
+
+	// ── DNS additions ────────────────────────────────────────────────────────
+	CatDNSAmplification = "dns-amplification"
+	CatDNSSpoofing      = "dns-spoofing"
+
+	// ── FTP additions ────────────────────────────────────────────────────────
+	CatFTPCleartextCreds = "ftp-cleartext-creds"
+
+	// ── SMTP additions ───────────────────────────────────────────────────────
+	CatSMTPSTARTTLSStrip = "smtp-starttls-strip"
+
+	// ── TLS additions ────────────────────────────────────────────────────────
+	CatTLSKnownBadFingerprint = "tls-known-bad-fingerprint"
+
+	// ── Generic protocol additions ───────────────────────────────────────────
+	CatRDPExploit       = "rdp-exploit"
+	CatUDPAmplification = "udp-amplification"
+	CatSNMPDefaultCreds = "snmp-default-creds"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
