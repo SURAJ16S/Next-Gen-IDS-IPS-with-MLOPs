@@ -102,7 +102,7 @@ if [[ "$SKIP_LARGE" == false ]]; then
   else
     git clone --depth=1 --filter=blob:none --sparse \
       https://github.com/danielmiessler/SecLists.git "$SECLISTS" --quiet
-    git -C "$SECLISTS" sparse-checkout set \
+    git -C "$SECLISTS" sparse-checkout set --skip-checks \
       Passwords/Default-Credentials \
       Passwords/Common-Credentials \
       Fuzzing/SQLi Fuzzing/XSS Fuzzing/SSRF \

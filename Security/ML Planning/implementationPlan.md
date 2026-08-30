@@ -464,6 +464,8 @@ Update this table as you complete each task. Mark `[x]` when done.
 | G.2 | Create `Security/detect/ml_client.go` | [ ] | Suraj |
 | G.3 | Call ML client from `http_analyzer.go` after Tier 1 | [ ] | Suraj |
 | F.1 | Run sandbox + `generate_labeled_traffic.sh` | [ ] | Abhijit |
+| F.1a| Run GoTestWAF for evasive API payload generation| [ ] | Suraj |
+| F.1b| Download/Ingest LLM Jailbreak dataset payloads  | [ ] | Suraj |
 | F.2 | Train Model #2 — web-classifier Random Forest | [ ] | Shraddha / Abhijit |
 | F.3 | (Stretch) Train Model #4 — SSH brute-force | [ ] | Abhijit |
 | F.4 | (Stretch) Train Model #5 — DNS DGA | [ ] | Abhijit |
