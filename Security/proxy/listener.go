@@ -100,6 +100,32 @@ func (tl *TCPListener) handleConnection(ctx context.Context, clientConn net.Conn
 		CloseReason:     "normal",
 	}
 
+	// ── Tier-2: Redis reputation fast-path check ──────────────────────────────
+	// Runs before any packet reading or Tier-1 regex work. Fail-open: if
+	// repClient is nil or Redis is unavailable, we let the connection through.
+	if tl.engine.repClient != nil {
+		repCtx, repCancel := context.WithTimeout(ctx, 5*time.Millisecond)
+		blocked, reason := tl.engine.repClient.ShouldShortCircuit(repCtx, connCtx.ClientIP.String())
+		repCancel()
+		if blocked {
+			tl.engine.bus.EmitDetection(detect.Detection{
+				ID:         "BLOCK-REP-001",
+				Timestamp:  time.Now(),
+				Severity:   detect.SevHigh,
+				Category:   detect.CatReputationBlock,
+				Protocol:   connCtx.ExpectedService,
+				SourceIP:   connCtx.ClientIP.String(),
+				SourcePort: connCtx.ClientPort,
+				DestPort:   connCtx.ListenPort,
+				Summary:    fmt.Sprintf("Connection blocked by Tier-2 reputation: %s", reason),
+				ConnID:     connCtx.ConnID,
+			})
+			connCtx.CloseReason = "reputation-block"
+			tl.emitClose(connCtx)
+			return
+		}
+	}
+
 	// Emit connection-start detection (INFO level for audit)
 	tl.engine.bus.EmitDetection(detect.Detection{
 		ID:         "CONN-START-001",
@@ -135,6 +161,24 @@ func (tl *TCPListener) handleConnection(ctx context.Context, clientConn net.Conn
 
 	// Run analyzers on initial data (client → server direction)
 	tl.engine.analyzers.AnalyzeStream(connCtx, initialData, true)
+
+	// ── Tier-2: Bump IP reputation score based on Tier-1 detection severity ──
+	if tl.engine.repClient != nil && connCtx.DetectionCount() > 0 {
+		var delta int
+		switch connCtx.MaxSeverity() {
+		case detect.SevCritical:
+			delta = 20
+		case detect.SevHigh:
+			delta = 10
+		case detect.SevMedium:
+			delta = 5
+		default:
+			delta = 1
+		}
+		bumpCtx, bumpCancel := context.WithTimeout(ctx, 10*time.Millisecond)
+		_ = tl.engine.repClient.BumpScore(bumpCtx, connCtx.ClientIP.String(), delta)
+		bumpCancel()
+	}
 
 	// Connect to backend
 	backendConn, err := net.DialTimeout("tcp", tl.config.BackendAddr, 5*time.Second)

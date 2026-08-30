@@ -178,6 +178,9 @@ const (
 	CatRDPExploit       = "rdp-exploit"
 	CatUDPAmplification = "udp-amplification"
 	CatSNMPDefaultCreds = "snmp-default-creds"
+
+	// ── Tier-2 Reputation ────────────────────────────────────────────────────
+	CatReputationBlock = "reputation-block"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────

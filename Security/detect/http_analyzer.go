@@ -486,6 +486,88 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 			},
 		})
 	}
+
+	// ── Tier-3: ML payload scoring (fail-open, 50 ms budget) ─────────────────
+	// Build a flat stats map from the already-computed PayloadStats structs.
+	// This is the same feature vector that train_models.py http-anomaly uses.
+	tier1Hit := false
+	for _, pat := range a.patterns {
+		for _, target := range []string{uri, decodedURI, body, headers["user-agent"], headers["referer"]} {
+			if target != "" && pat.regex.MatchString(target) {
+				tier1Hit = true
+				break
+			}
+		}
+		if tier1Hit {
+			break
+		}
+	}
+
+	// Use a strict 45 ms context so the ML call never bleeds into I/O deadlines.
+	mlCtx, mlCancel := context.WithTimeout(context.Background(), 45*time.Millisecond)
+	defer mlCancel()
+
+	statsMap := map[string]interface{}{
+		"method":                  method,
+		"uri_length":              uriLen,
+		"query_param_count":       queryParams,
+		"content_length":          contentLength,
+		"header_count":            headerCount,
+		"header_size":             headerSize,
+		"duplicate_headers":       duplicateHeaders,
+		"cookie_count":            countCookies(headers["cookie"]),
+		"jwt_present":             boolToFloat(jwtPresent),
+		"auth_present":            boolToFloat(authPresent),
+		"uri_entropy":             uriStats.Entropy,
+		"uri_digit_ratio":         uriStats.DigitRatio,
+		"uri_upper_ratio":         uriStats.UpperRatio,
+		"uri_special_char_ratio":  uriStats.SpecialCharRatio,
+		"uri_sql_keyword_count":   uriStats.SQLKeywordCount,
+		"uri_xss_pattern_count":   uriStats.XSSPatternCount,
+		"uri_path_trav_count":     uriStats.PathTraversalCount,
+		"uri_cmd_inject_count":    uriStats.CmdInjectionCount,
+		"body_length":             bodyStats.Length,
+		"body_entropy":            bodyStats.Entropy,
+		"body_digit_ratio":        bodyStats.DigitRatio,
+		"body_special_char_ratio": bodyStats.SpecialCharRatio,
+		"body_sql_keyword_count":  bodyStats.SQLKeywordCount,
+		"body_xss_pattern_count":  bodyStats.XSSPatternCount,
+		"ua_length":               uaStats.Length,
+		"ua_entropy":              uaStats.Entropy,
+	}
+
+	mlScore, _ := ScoreHTTPPayload(mlCtx, statsMap)
+	if mlScore != nil && mlScore.RiskScore > 0 && mlScore.ModelVersion != "unavailable" {
+		// Emit ML-only detection when:
+		//  - Score is HIGH (> 70) AND Tier-1 regex missed it (novel/obfuscated attack), OR
+		//  - Score is CRITICAL (> 85) regardless of Tier-1 (amplify the signal).
+		if mlScore.RiskScore > 85 || (mlScore.RiskScore > 70 && !tier1Hit) {
+			sev := SevMedium
+			if mlScore.RiskScore > 85 {
+				sev = SevHigh
+			}
+			a.bus.EmitDetection(Detection{
+				ID:         fmt.Sprintf("ML-HTTP-%s", mlScore.PredictedCategory),
+				Timestamp:  time.Now(),
+				Severity:   sev,
+				Category:   "ml-anomaly",
+				Protocol:   "HTTP",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary: fmt.Sprintf("ML anomaly score %.1f — predicted: %s (model: %s)",
+					mlScore.RiskScore, mlScore.PredictedCategory, mlScore.ModelVersion),
+				ConnID: connID,
+				Details: map[string]any{
+					"risk_score":         mlScore.RiskScore,
+					"predicted_category": mlScore.PredictedCategory,
+					"confidence":         mlScore.Confidence,
+					"model_version":      mlScore.ModelVersion,
+					"tier1_hit":          tier1Hit,
+				},
+			})
+		}
+	}
 }
 
 // analyzeResponse inspects HTTP response for information leakage and security headers.
@@ -801,4 +883,13 @@ func countCookies(cookieHeader string) int {
 		return 0
 	}
 	return len(strings.Split(cookieHeader, ";"))
+}
+
+// boolToFloat converts a boolean feature to a float64 (1.0 or 0.0).
+// sklearn models expect numeric feature vectors; this bridges the type gap.
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1.0
+	}
+	return 0.0
 }
