@@ -1,6 +1,6 @@
 # ML + Detection Rules + Redis + CAPTCHA + Dashboard — Complete Build Plan
 
-**For:** Security Implementation Team — Intelligent Multi-Protocol IDS/IPS (Group 10)
+**For:** Suraj (Sole Developer) — Intelligent Multi-Protocol IDS/IPS
 **Assumes:** Zero prior ML background. Every ML term is explained the first time it's used.
 **Grounded in:** your actual `Security/detect/*.go` code, `Web/backend/*`, and your prior planning docs (Gap Analysis + ML Module Documentation + Protocol Data Collection Inventory). This plan does not repeat those — it turns them into an execution order with concrete files, commands, and a testing procedure.
 
