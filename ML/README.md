@@ -43,11 +43,11 @@ curl http://localhost:8500/health
 
 | # | Model | Type | Training Command | Status |
 |---|---|---|---|---|
-| 1 | HTTP Payload Anomaly Scorer | Unsupervised (Isolation Forest) | `python train_models.py http-anomaly --input <clean_http.jsonl>` | Phase E |
-| 2 | Web Attack Classifier | Supervised (Random Forest) | `python train_models.py web-classifier --input <labeled_http.jsonl>` | Phase F (needs labels) |
-| 3 | Flow-level Anomaly Detector | Unsupervised (Isolation Forest) | `python train_models.py flow-anomaly --input <clean_flow.jsonl>` | Phase E |
-| 4 | SSH/FTP/Telnet Brute-Force Classifier | Supervised (Random Forest) | `python train_models.py ssh-brute-classifier --input <labeled_ssh.jsonl>` | Phase F stretch |
-| 5 | DNS Tunneling/DGA Detector | Supervised (Random Forest) | `python train_models.py dns-tunnel-dga --input <labeled_dns.jsonl>` | Phase F stretch |
+| 1 | HTTP Payload Anomaly Scorer | Unsupervised (Isolation Forest) | `python train_models.py http-anomaly --input logs/protocols/http.jsonl` | Trained (Phase E Done) |
+| 2 | Web Attack Classifier | Supervised (Random Forest) | `python train_models.py web-classifier --input logs/protocols/http_labeled.jsonl` | Phase F (needs labels) |
+| 3 | Flow-level Anomaly Detector | Unsupervised (Isolation Forest) | `python train_models.py flow-anomaly --input logs/protocols/flow.jsonl` | Trained (Phase E Done) |
+| 4 | SSH/FTP/Telnet Brute-Force Classifier | Supervised (Random Forest) | `python train_models.py ssh-brute-classifier --input logs/protocols/ssh_labeled.jsonl` | Phase F stretch |
+| 5 | DNS Tunneling/DGA Detector | Supervised (Random Forest) | `python train_models.py dns-tunnel-dga --input logs/protocols/dns_labeled.jsonl` | Phase F stretch |
 | 6 | IP Reputation Score | Rule + weighted decay | See `redis_reputation.py` | Phase A |
 | 7 | TLS/JA3+JA4 Fingerprint | Lookup | Feed-based, no training | Phase A |
 
