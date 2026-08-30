@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"ngfw-monitor/detect"
+	"ngfw-monitor/reputation"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -122,6 +123,9 @@ type ProxyEngine struct {
 	// Detection pipeline
 	protoDetector *detect.ProtocolDetector
 	analyzers     *AnalyzerRouter
+
+	// Tier-2: IP reputation (Redis-backed)
+	repClient *reputation.Client
 
 	// Lifecycle
 	ctx    context.Context
@@ -306,6 +310,22 @@ func NewProxyEngine(config *ProxyConfig, bus *detect.DetectionBus, stats *detect
 	}
 	engine.analyzers = NewAnalyzerRouter(engine, bus, config)
 
+	// Tier-2: Redis reputation client
+	// REDIS_SECURITY_URL defaults to localhost:6379 (same Redis as Node.js backend)
+	redisAddr := os.Getenv("REDIS_SECURITY_URL")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	engine.repClient = reputation.New(redisAddr)
+	if err := engine.repClient.Ping(ctx); err != nil {
+		log.Printf("[proxy] ⚠ Redis reputation unavailable (%v) — Tier-2 will fail-open", err)
+	} else {
+		log.Printf("[proxy] ✓ Redis reputation connected (%s)", redisAddr)
+		// Start threat-intel feed ingestion in the background
+		abuseIPDBKey := os.Getenv("ABUSEIPDB_API_KEY")
+		go engine.repClient.StartFeedIngestion(ctx, abuseIPDBKey)
+	}
+
 	// Create or overwrite the raw traffic dump file
 	dumpFile, err := os.OpenFile("proxy-output.json", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err == nil {
@@ -393,6 +413,9 @@ func (p *ProxyEngine) Stop() {
 
 	if p.DumpFile != nil {
 		p.DumpFile.Close()
+	}
+	if p.repClient != nil {
+		p.repClient.Close()
 	}
 
 	log.Println("[proxy] All listeners stopped.")
