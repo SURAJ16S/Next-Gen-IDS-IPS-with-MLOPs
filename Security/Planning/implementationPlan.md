@@ -457,9 +457,9 @@ Update this table as you complete each task. Mark `[x]` when done.
 | A.2 | Create `Security/reputation/reputation.go` | [ ] | Suraj |
 | A.3 | Wire reputation check into proxy connection handler | [ ] | Suraj |
 | A.4 | Feed ingestion goroutine (AbuseIPDB, Spamhaus, FireHOL) | [ ] | Yash |
-| E.1 | Collect baseline traffic JSONL logs (http + flow) | [ ] | All |
-| E.2 | Train Model #1 — http-anomaly Isolation Forest | [ ] | Shraddha / Abhijit |
-| E.3 | Train Model #3 — flow-anomaly Isolation Forest | [ ] | Shraddha / Abhijit |
+| E.1 | Collect baseline traffic JSONL logs (http + flow) | [x] | All |
+| E.2 | Train Model #1 — http-anomaly Isolation Forest | [x] | Shraddha / Abhijit |
+| E.3 | Train Model #3 — flow-anomaly Isolation Forest | [x] | Shraddha / Abhijit |
 | G.1 | Start FastAPI scoring service on port 8500 | [ ] | Yash |
 | G.2 | Create `Security/detect/ml_client.go` | [ ] | Suraj |
 | G.3 | Call ML client from `http_analyzer.go` after Tier 1 | [ ] | Suraj |
