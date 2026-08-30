@@ -1,5 +1,6 @@
 # Logs
 *.log
+logs/
 logs/*.jsonl
 *.txt
 *.json
@@ -49,3 +50,23 @@ DevOps/artifacts/
 DevOps/builds/
 DevOps/cache/
 Web/frontend/dist/
+
+# ML Datasets & External Feeds — raw downloads and cloned repos, NEVER commit (downloaded via ML/datasets/download_all.sh)
+ML/datasets/public_datasets/
+ML/datasets/cheatsheets/
+ML/datasets/no_auth_feeds/
+ML/datasets/processed/
+ML/datasets/self_generated/
+ML/datasets/dga_feeds/*.txt
+ML/datasets/dga_feeds/dga_algorithms/
+
+# ML Models — DO commit .pkl files (trained artifacts ship with the project)
+# ML/models/*.pkl  ← intentionally NOT ignored
+
+# MLflow tracking data — local only
+ML/mlruns/
+ML/.mlflow/
+
+# Python cache in ML dir
+ML/__pycache__/
+ML/*.pyc
