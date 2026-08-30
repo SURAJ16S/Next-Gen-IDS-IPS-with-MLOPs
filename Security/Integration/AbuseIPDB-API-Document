@@ -1,0 +1,573 @@
+NAV 
+
+Search
+Introduction
+Configuring Fail2Ban
+CHECK Endpoint
+REPORTS Endpoint
+BLACKLIST Endpoint
+REPORT Endpoint
+CHECK-BLOCK Endpoint
+BULK-REPORT Endpoint
+CLEAR-ADDRESS Endpoint
+API Daily Rate Limits
+Error Handling
+Security
+Cross-Origin Resource Sharing
+Sign Up for a Developer Key
+Subscribe to a Paid Plan
+Fail2Ban Integration
+Introduction
+The AbuseIPDB API allows you to utilize our database programmatically. This is most commonly done through Fail2Ban, which comes prepackaged with an AbuseIPDB configuration. Grab a new API key at from account dashboard.
+
+Configuring Fail2Ban
+actionban = curl --fail 'https://api.abuseipdb.com/api/v2/report' \
+    -H 'Accept: application/json' \
+    -H 'Key: <abuseipdb_apikey>' \
+    --data-urlencode 'comment=<matches>' \
+    --data-urlencode 'ip=<ip>' \
+    --data 'categories=<abuseipdb_category>'
+Follow our APIv1 tutorial. APIv2 works the same way except for slight alterations to the cURL request. In APIv2, actionban command in Fail2Ban's abuseipdb.conf will looks like:
+
+The category parameter has been renamed to categories.
+Your API key can still be passed in the query as key, but it is recommended to use the HTTP header.
+The IP value should be url encoded because IPv6 addresses have colons.
+Request JSON with "Accept: application/json"
+That's it! You've migrated.
+
+CHECK Endpoint
+# The -G option will convert form parameters (-d options) into query parameters.
+# The CHECK endpoint is a GET request.
+curl -G https://api.abuseipdb.com/api/v2/check \
+  --data-urlencode "ipAddress=118.25.6.39" \
+  -d maxAgeInDays=90 \
+  -d verbose \
+  -H "Key: YOUR_OWN_API_KEY" \
+  -H "Accept: application/json"
+This will yield the following JSON response:
+
+  {
+    "data": {
+      "ipAddress": "118.25.6.39",
+      "isPublic": true,
+      "ipVersion": 4,
+      "isWhitelisted": false,
+      "abuseConfidenceScore": 100,
+      "countryCode": "CN",
+      "countryName": "China",
+      "usageType": "Data Center/Web Hosting/Transit",
+      "isp": "Tencent Cloud Computing (Beijing) Co. Ltd",
+      "domain": "tencent.com",
+      "hostnames": [],
+      "isTor": false,
+      "totalReports": 1,
+      "numDistinctUsers": 1,
+      "lastReportedAt": "2018-12-20T20:55:14+00:00",
+      "reports": [
+        {
+          "reportedAt": "2018-12-20T20:55:14+00:00",
+          "comment": "Dec 20 20:55:14 srv206 sshd[13937]: Invalid user oracle from 118.25.6.39",
+          "categories": [
+            18,
+            22
+          ],
+          "reporterId": 1,
+          "reporterCountryCode": "US",
+          "reporterCountryName": "United States"
+        }
+      ]
+    }
+  }
+The check endpoint accepts a single IP address (v4 or v6). Optionally you may set the maxAgeInDays parameter to only return reports within the last x amount of days.
+
+The desired data is stored in the data property. Here you can inspect details regarding the IP address queried, such as version, country of origin, usage type, ISP, and domain name. And of course, there is the valuable abusive reports.
+
+Geolocation, usage type, ISP, and domain name are sourced from the IPinfo. If you're looking for a performant IP database for geolocation, then use their product directly.
+
+The isWhitelisted property reflects whether the IP is spotted in any of our whitelists. Our whitelists give the benefit of the doubt to many IPs, so it generally should not be used as a basis for action. The abuseConfidenceScore is a better basis for action, because it is nonbinary and allows for nuance. The isWhitelisted property may be null if a whitelist lookup was not performed.
+
+The usageType is a string that describes the general usage of this address. Possible values are:
+
+Commercial
+Organization
+Government
+Military
+University/College/School
+Library
+Content Delivery Network
+Fixed Line ISP
+Mobile ISP
+Data Center/Web Hosting/Transit
+Search Engine Spider
+Reserved
+The maxAgeInDays parameter determines how far back in time we go to fetch reports. In this example, we ask for reports no older than 90 days. The default is 30.
+
+The totalReports property is a sum of the reports within maxAgeInDays.
+
+Reports are included in this response because the verbose flag was added. Omitting the verbose flag will exclude reports and the country name field. If you want to keep your response payloads light, this is recommended. The reports array is limited to 10,000 elements. Only reports within the timeframe of maxAgeInDays are considered.
+
+The IP address should be url-encoded, because IPv6 addresses use colons, which are reserved characters in URIs.
+
+Check Parameters
+field	required	default	min	max
+ipAddress	yes			
+maxAgeInDays	no	30	1	365
+verbose	no			
+REPORTS Endpoint
+# The -G option will convert form parameters (-d options) into query parameters.
+# The REPORTS endpoint is a GET request.
+# Not to be confused with the REPORT endpoint, which works with the POST HTTP method.
+curl -G https://api.abuseipdb.com/api/v2/reports \
+  --data-urlencode "ipAddress=176.111.173.242" \
+  -d page=5 \
+  -d perPage=25 \
+  -H "Key: YOUR_OWN_API_KEY" \
+  -H "Accept: application/json"
+This will yield the following JSON response:
+
+  {
+      "data": {
+          "total": 2840,
+          "page": 5,
+          "count": 25,
+          "perPage": 25,
+          "lastPage": 114,
+          "nextPageUrl": "https://api.abuseipdb.com/api/v2/reports?ipAddress=176.111.173.242&maxAgeInDays=30&perPage=25&page=6",
+          "previousPageUrl": "https://api.abuseipdb.com/api/v2/reports?ipAddress=176.111.173.242&maxAgeInDays=30&perPage=25&page=4",
+          "results": [
+              {
+                  "reportedAt": "2022-05-01T21:00:03+00:00",
+                  "comment": "Invalid user joseph from 176.111.173.242 port 53860",
+                  "categories": [
+                      18,
+                      22
+                  ],
+                  "reporterId": 43121,
+                  "reporterCountryCode": "DE",
+                  "reporterCountryName": "Germany"
+              },
+              {
+                  "reportedAt": "2022-05-01T13:27:47+00:00",
+                  "comment": "Apr 17 18:19:28 roki2 sshd\\[29767\\]: Invalid user gituser from 176.111.173.242\nApr 17 18:19:28 roki2 sshd\\[29767\\]: pam_unix\\(sshd:auth\\): authentication failure\\; logname= uid=0 euid=0 tty=ssh ruser= rhost=176.111.173.242\nApr 17 18:19:29 roki2 sshd\\[29767\\]: Failed password for invalid user gituser from 176.111.173.242 port 54766 ssh2\nApr 17 22:28:47 roki2 sshd\\[10332\\]: Invalid user j2deployer from 176.111.173.242\nApr 17 22:28:47 roki2 sshd\\[10332\\]: pam_unix\\(sshd:auth\\): authentication failure\\; logname= uid=0 euid=0 tty=ssh ruser= rhost=176.111.173.242\n...",
+                  "categories": [
+                      18,
+                      22
+                  ],
+                  "reporterId": 35071,
+                  "reporterCountryCode": "US",
+                  "reporterCountryName": "United States of America"
+              },
+              ...
+          ]
+      }
+  }
+The reports endpoint accepts a single IP address (v4 or v6). Optionally you may set the maxAgeInDays parameter to only return reports within the last x amount of days. You can also adjust the pagination with the perPage parameter, and navigate the pagination via the page parameter.
+
+The desired data is stored in the data property.
+
+ This endpoint is in OPEN BETA. It may change without notice. If you have feedback, please let us hear it.
+Reports Parameters
+field	required	default	min	max
+ipAddress	yes			
+maxAgeInDays	no	30	1	365
+page	no	1	1	
+perPage	no	25	1	100
+BLACKLIST Endpoint
+# The -G option will convert form parameters (-d options) into query parameters.
+# The BLACKLIST endpoint is a GET request.
+curl -G https://api.abuseipdb.com/api/v2/blacklist \
+  -d confidenceMinimum=90 \
+  -H "Key: YOUR_OWN_API_KEY" \
+  -H "Accept: application/json"
+This will yield the following JSON response:
+
+{
+  "meta": {
+    "generatedAt": "2020-09-24T19:54:11+00:00"
+  },
+  "data": [
+    {
+      "ipAddress": "5.188.10.179",
+      "abuseConfidenceScore": 100,
+      "lastReportedAt": "2020-09-24T19:17:02+00:00"
+    },
+    {
+      "ipAddress": "185.222.209.14",
+      "abuseConfidenceScore": 100,
+      "lastReportedAt": "2020-09-24T19:17:02+00:00"
+    },
+    {
+      "ipAddress": "191.96.249.183",
+      "abuseConfidenceScore": 100,
+      "lastReportedAt": "2020-09-24T19:17:01+00:00"
+    },
+    ...
+  ]
+}
+The blacklist is the culmination of all of the valiant reporting by AbuseIPDB users. It's a list of the most reported IP addresses.
+
+The body is an array where each element contains the IP address, confidence of abuse score, and the timestamp of the last report. Results are order by abuseConfidenceScore descending, and then by lastReportedAt descending (most recent).
+
+abuseConfidenceScore is our calculated evaluation on how abusive the IP is based on the users that reported it (more). We place a hard minimum of 25% on the abuseConfidenceScore. There are two critical reasons for this:
+
+To prevent a handful of reports drastically impacting networks. If an AbuseIPDB user were to implement a blacklist that includes <25%-rated IPs, their network protocol would easily be swayed by a single or few third-party users. We recommend against the minimum of 25% for most applications. 75%-100% is the recommended range for denial of service.
+
+Performance. A <25% range is a wide net that would match the vast majority of our database. There are simply too many results for it to be performant or useful.
+
+In the meta block we include generatedAt property that lets you check for the freshness of the list, if you'd like.
+
+ The abuseConfidenceScore parameter is a subscriber feature. This is because custom blacklists take more juice to generate on-demand. Should your subscriber status lapse, an error response will not be thrown. Rather, the response will degrade gracefully to the simple blacklist. This works nicely with existing firewall software.
+Plaintext Blacklist
+curl -G https://api.abuseipdb.com/api/v2/blacklist \
+  -d confidenceMinimum=90 \
+  -d plaintext \
+  -H "Key: $YOUR_API_KEY" \
+  -H "Accept: application/json"
+or
+
+
+curl -G https://api.abuseipdb.com/api/v2/blacklist \
+  -d confidenceMinimum=90 \
+  -H "Key: $YOUR_API_KEY" \
+  -H "Accept: text/plain"
+to receive
+
+5.188.10.179
+185.222.209.14
+95.70.0.46
+191.96.249.183
+115.238.245.8
+122.226.181.164
+122.226.181.167
+...
+If you prefer a simple newline-separated plaintext response. Set the plaintext flag via a GET flag or the Accept header.
+
+The generation timestamp will be placed in the HTTP response headers as X-Generated-At.
+
+ If you plan into import these IPs into iptables, it is critical that the list is either continually updated or, if it cannot be updated, flushed from iptables. Report value decay over time, cycling out IPs that stop abusing. AbuseIPDB is not responsible for dropped connections from legitimate sources.
+Blacklist IP Truncation
+curl -G https://api.abuseipdb.com/api/v2/blacklist \
+  -d limit=500000 \
+  -H "Key: $YOUR_API_KEY" \
+  -H "Accept: text/plain"
+The number of IP addresses included in the list is capped to a hard limit, depending on your subscription:
+
+Standard	Basic Subscription	Premium Subscription
+10,000	100,000	500,000
+You can set the limit between 1 and your hard limit using the limit parameter. The default value is always 10,000. If you always want the largest list available, setting the limit to 500,000 will guarantee the max size allowable by your subscription, since 500,000 is the max limit for the highest tier.
+
+If you set the limit to a value higher than your subscription allows for, the list will simply be truncated to your subscription's hard limit. No error will be thrown. This allows for graceful degradation in the case your subscription lapses.
+
+Note: Firewall software such as csf may have trouble importing rules for over 10,000 IPs. Test appropriately on your hardware.
+
+Blacklist Country Filtering
+curl -G https://api.abuseipdb.com/api/v2/blacklist?onlyCountries=US,MX,CA \
+  -H "Key: YOUR_OWN_API_KEY" \
+to receive
+
+{
+    "meta": {
+        "generatedAt": "2021-12-17T22:49:18+00:00"
+    },
+    "data": [
+        {
+            "ipAddress": "192.241.211.135",
+            "countryCode": "US",
+            "abuseConfidenceScore": 100,
+            "lastReportedAt": "2021-12-17T22:16:21+00:00"
+        },
+        {
+            "ipAddress": "189.139.115.232",
+            "countryCode": "MX",
+            "abuseConfidenceScore": 100,
+            "lastReportedAt": "2021-12-17T22:16:20+00:00"
+        },
+        {
+            "ipAddress": "2001:470:1:332::7",
+            "countryCode": "CA",
+            "abuseConfidenceScore": 100,
+            "lastReportedAt": "2021-12-17T07:22:17+00:00"
+        },
+  ...
+}
+You can also filter by country. Both the onlyCountries and exceptCountries parameters accept a comma delineated list of ISO 3166 alpha-2 codes.
+
+The onlyCountries parameter retrieves IPs that only originate in the given country or countries.
+
+The exceptCountries parameter retrieves all IPs except those that originate in the given country or countries.
+
+Country filtering can help reduce total transfer size.
+
+This parameter is a subscriber feature.
+
+Blacklist IP version Filtering
+curl -G https://api.abuseipdb.com/api/v2/blacklist?ipVersion=6 \
+  -H "Key: YOUR_OWN_API_KEY" \
+to receive
+
+{
+    "meta": {
+        "generatedAt": "2023-05-16T21:24:30+00:00"
+    },
+    "data": [
+        {
+            "ipAddress": "2a10:cc45:100::30c0:a37c:7eb0:c8a9",
+            "countryCode": "CH",
+            "abuseConfidenceScore": 100,
+            "lastReportedAt": "2023-05-16T21:15:13+00:00"
+        },
+        {
+            "ipAddress": "2607:ff10:c8:594::4",
+            "countryCode": "US",
+            "abuseConfidenceScore": 100,
+            "lastReportedAt": "2023-05-16T21:11:36+00:00"
+        },
+        {
+            "ipAddress": "2607:ff10:c8:594::9",
+            "countryCode": "US",
+            "abuseConfidenceScore": 100,
+            "lastReportedAt": "2023-05-16T21:10:08+00:00"
+        },
+  ...
+}
+You can filter by IP version (4 or 6) with the ipVersion parameter. It accepts integer values 4 or 6.
+
+Blacklist Parameters
+field	required	default	min	max	subscriber feature
+confidenceMinimum	no	100	25	100	yes
+limit	no	10,000	1		restricted, see above
+plaintext	no				no
+onlyCountries	no				yes
+exceptCountries	no				yes
+ipVersion	no	4,6 mixed			no
+REPORT Endpoint
+# POST the submission.
+curl https://api.abuseipdb.com/api/v2/report \
+  --data-urlencode "ip=127.0.0.1" \
+  -d categories=18,22 \
+  --data-urlencode "comment=SSH login attempts with user root." \
+  --data-urlencode "timestamp=2023-10-18T11:25:11-04:00" \
+  -H "Key: YOUR_OWN_API_KEY" \
+  -H "Accept: application/json"
+Response:
+
+  {
+    "data": {
+      "ipAddress": "127.0.0.1",
+      "abuseConfidenceScore": 52
+    }
+  }
+Reporting IP addresses is the core feature of AbuseIPDB. When you report what you observe, everyone benefits, including yourself. To report an IP address, send a POST request. At least one category is required, but you may add additional categories using commas to separate the integer IDs. Related details can be included in the comment field.
+
+ STRIP ANY PERSONALLY IDENTIFIABLE INFORMATION (PII); WE ARE NOT RESPONSIBLE FOR PII YOU REVEAL.
+In the body, we get the updated abuseConfidenceScore.
+
+Report Parameters
+field	default	restrictions	description
+ip	required		A valid IPv4 or IPv6 address.
+categories	required	30	Comma separated values; Reference
+comment			A descriptive text of the attack i.e. server logs, port numbers, etc.
+timestamp	current time		ISO 8601 datetime of the attack or earliest observance of attack.
+Test IP Addresses
+
+  {
+    "errors": [
+      {
+        "detail": "You can only report the same IP address (`127.0.0.2`) once in 15 minutes.",
+        "status": 429,
+        "source": {
+          "parameter": "ip"
+        }
+      }
+    ]
+  }
+Reporting 127.0.0.2 will simulate a short term rate limit. This is useful for application testing.
+
+CHECK-BLOCK Endpoint
+# The -G option will convert form parameters (-d options) into query parameters.
+# The CHECK-BLOCK endpoint is a GET request.
+curl -G https://api.abuseipdb.com/api/v2/check-block \
+  --data-urlencode "network=127.0.0.1/24" \
+  -d maxAgeInDays=15 \
+  -H "Key: YOUR_OWN_API_KEY" \
+  -H "Accept: application/json"
+This will yield the following JSON response:
+
+  {
+    "data": {
+      "networkAddress": "127.0.0.0",
+      "netmask": "255.255.255.0",
+      "minAddress": "127.0.0.1",
+      "maxAddress": "127.0.0.254",
+      "numPossibleHosts": 254,
+      "addressSpaceDesc": "Loopback",
+      "reportedAddress": [
+        {
+          "ipAddress": "127.0.0.1",
+          "numReports": 631,
+          "mostRecentReport": "2019-03-21T16:35:16+00:00",
+          "abuseConfidenceScore": 0,
+          "countryCode": null
+        },
+        {
+          "ipAddress": "127.0.0.2",
+          "numReports": 16,
+          "mostRecentReport": "2019-03-12T20:31:17+00:00",
+          "abuseConfidenceScore": 0,
+          "countryCode": null
+        },
+        {
+          "ipAddress": "127.0.0.3",
+          "numReports": 17,
+          "mostRecentReport": "2019-03-12T20:31:44+00:00",
+          "abuseConfidenceScore": 0,
+          "countryCode": null
+        },
+        ...
+      ]
+    }
+  }
+The check-block endpoint accepts a subnet (v4 or v6) denoted with CIDR notation.
+
+The maxAgeInDays parameter determines how old the reports considered in the query search can be.
+
+The desired data is stored in the data property. Here you can inspect details regarding the network queried, such as the netmask of the subnet, the number of hosts it can possibly contain, and the assigned description of the address space.
+
+The network should be url-encoded, because the network parameter contains a forward slash, which is a reserved character in URIs.
+
+Check-Block Parameters
+field	required	default	min	max
+network	yes			
+maxAgeInDays	no	30	1	365
+Check-Block Limits
+Due to the depth & breath of the these searches, the range of the parameters is capped by plan tier.
+
+For most use cases, /24 is enough to an entire network. Many autonomous systems will sometimes have blocks of /20. Some of the largest autonomous systems will have blocks of /18 or /17.
+
+field	Standard	Basic Subscription	Premium Subscription
+network	Up to /24	Up to /20	Up to /16
+maxAgeInDays	Up to 30	Up to 60	Up to 365
+Exceeding a parameter limit will return a 402 Payment Required response.
+
+BULK-REPORT Endpoint
+If reporting IP addresses one by one may not seem efficient to you, we offer an endpoint that allows a CSV file of IPs to be reported in one shot. Such a list can be extracted from your secure log file or similar. See the bulk report form for a guide.
+
+# POST the submission.
+curl https://api.abuseipdb.com/api/v2/bulk-report \
+  -F csv=@report.csv \
+  -H "Key: YOUR_OWN_API_KEY" \
+  -H "Accept: application/json" \
+  > output.json
+The response will inform you how many IPs were successfully reported, and which ones were rejected and why.
+
+  {
+    "data": {
+      "savedReports": 60,
+      "invalidReports": [
+        {
+          "error": "Duplicate IP",
+          "input": "41.188.138.68",
+          "rowNumber": 5
+        },
+        {
+          "error": "Invalid IP",
+          "input": "127.0.foo.bar",
+          "rowNumber": 6
+        },
+        {
+          "error": "Invalid Category",
+          "input": "189.87.146.50",
+          "rowNumber": 8
+        }
+      ]
+    }
+  }
+CLEAR-ADDRESS Endpoint
+
+# The CLEAR-ADDRESS endpoint is a DELETE request.
+curl -X DELETE https://api.abuseipdb.com/api/v2/clear-address \
+  --data-urlencode "ipAddress=118.25.6.39" \
+  -H "Key: YOUR_OWN_API_KEY" \
+  -H "Accept: application/json"
+This will yield the following JSON response:
+
+  {
+    "data": {
+      "numReportsDeleted": 0
+    }
+  }
+The clear-address endpoint accepts a single IP address (v4 or v6).
+
+The only property it returns is the number of reports deleted from your account.
+
+ This endpoint is ONLY used to delete reports for an specific address from YOUR account. It cannot delete another user's reports. If this is what you are looking to do, the correct channel is the takedown request form available on an IP's web page.
+Address Parameters
+field	required
+ipAddress	yes
+API Daily Rate Limits
+With the request header "Accept: application/json"
+
+{
+  "errors": [
+      {
+          "detail": "Daily rate limit of 1000 requests exceeded for this endpoint. See headers for additional details.",
+          "status": 429
+      }
+  ]
+}
+Useful response headers
+
+# Retry-After - Seconds a client should wait until a retry.
+# X-RateLimit-Limit - Your daily limit.
+# X-RateLimit-Remaining - Remaining requests available for this endpoint.
+# X-RateLimit-Reset - The epoch timestamp for the daily limit reset.
+
+Retry-After → 29241
+X-RateLimit-Limit → 1000
+X-RateLimit-Remaining → 0
+X-RateLimit-Reset → 1545973200
+The API daily rate limits are currently as follows:
+
+Standard	Webmaster	Supporter	Basic Subscription	Premium Subscription
+check	1,000	3,000	5,000	10,000	50,000
+reports	100	500	1,000	5,000	25,000
+blacklist	5	10	20	100	500
+report	1,000	3,000	1,000	10,000	50,000
+check-block	100	250	500	1,000	5,000
+bulk-report	5	10	20	100	500
+clear-address	5	10	20	100	500
+Upon reaching your daily limit, you will receive a HTTP 429 Too Many Requests status.
+
+By default, you receive an entire HTML page, which is why you should set "Accept: application/json" when working with the API programmatically.
+
+Error Handling
+
+  {
+    "errors": [
+      {
+        "detail": "The max age in days must be between 1 and 365.",
+        "status": 422
+      }
+    ]
+  }
+HTTP status codes are the most reliable method of determining the status of the API response. After all, that is the sole purpose of the codes. When we encounter at least one application error, a JSON response with a collection of errors is returned. The structure conforms to the JSON API spec:
+
+At minimum, we will always include the the detail and status members. We may provide more members, as per the spec.
+
+Security
+All requests to the AbuseIPDB website and API must run over HTTPS. If a HTTP unsecure protocol is requested, it will be redirected to HTTPS via 302 Found.
+
+While we accept your key as either a query parameter/form parameter or header, the header form is recommended. Why? Although HTTPS will encrypt the entire query string, server logs (like ours) will record them. And your infrastructure may have outgoing logging you are unaware of. You are responsible for account(s) compromised this way.
+
+If you do choose to set the key in the query string, you must use a lowercase parameter (?key=1234abcd).
+
+Cross-Origin Resource Sharing
+CORS headers cannot be set in order to prevent misimplementation. APIv2 keys should be treated as private and are not intented for client side calls.
+
+AbuseIPDB support will never ask you for your API key, nor your account password. We may ask for your user id or email address in support tickets.
+
+cURL
+Python
+PHP
+C#
+VBScript

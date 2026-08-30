@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -24,6 +25,7 @@ const (
 	feedHTTPTimeout     = 30 * time.Second
 
 	abuseIPDBURL   = "https://api.abuseipdb.com/api/v2/blacklist"
+	alienVaultOTXURL = "https://otx.alienvault.com/api/v1/pulses/subscribed"
 	spamhausDROPURL = "https://www.spamhaus.org/drop/drop.txt"
 	firehol1URL    = "https://iplists.firehol.org/files/firehol_level1.netset"
 	torExitURL     = "https://check.torproject.org/torbulkexitlist"
@@ -33,8 +35,7 @@ const (
 var feedHTTPClient = &http.Client{Timeout: feedHTTPTimeout}
 
 // StartFeedIngestion launches all feed ingestion goroutines. It ticks every
-// feedRefreshInterval (6h) and runs a full refresh of all no-auth feeds.
-// abuseIPDBKey is optional — if empty, AbuseIPDB ingestion is skipped.
+// feedRefreshInterval (6h) and runs a full refresh of all threat feeds.
 // Call this once at proxy startup; it blocks until ctx is cancelled.
 func (c *Client) StartFeedIngestion(ctx context.Context, abuseIPDBKey string) {
 	log.Println("[reputation] Feed ingestion started (refresh every 6h)")
@@ -62,6 +63,27 @@ func (c *Client) runAllFeeds(ctx context.Context, abuseIPDBKey string) {
 	} else {
 		log.Println("[reputation] AbuseIPDB key not set — skipping.")
 	}
+	
+	otxKey := os.Getenv("OTX_KEY")
+	if otxKey == "" {
+		otxKey = os.Getenv("OTX_API_KEY")
+	}
+	if otxKey != "" {
+		c.ingestAlienVaultOTX(ctx, otxKey)
+	} else {
+		log.Println("[reputation] AlienVault OTX key not set — skipping.")
+	}
+
+	vtKey := os.Getenv("VIRUSTOTAL_KEY")
+	if vtKey == "" {
+		vtKey = os.Getenv("VIRUSTOTAL_API_KEY")
+	}
+	if vtKey != "" {
+		log.Println("[reputation] VirusTotal API key configured (v3 client active)")
+	} else {
+		log.Println("[reputation] VirusTotal key not set — skipping.")
+	}
+
 	c.ingestPlainTextIPList(ctx, spamhausDROPURL, "rep:feed:spamhaus_drop")
 	c.ingestPlainTextIPList(ctx, firehol1URL, "rep:feed:firehol")
 	c.ingestPlainTextIPList(ctx, torExitURL, "rep:feed:tor_exit")
@@ -111,6 +133,120 @@ func (c *Client) ingestAbuseIPDB(ctx context.Context, apiKey string) {
 	c.writeIPSet(ctx, "rep:feed:abuseipdb", ips)
 	log.Printf("[reputation] AbuseIPDB: ingested %d IPs", len(ips))
 }
+
+// ── AlienVault OTX (JSON response) ──────────────────────────────────────────
+
+type otxSubscribedResponse struct {
+	Results []struct {
+		Indicators []struct {
+			Indicator string `json:"indicator"`
+			Type      string `json:"type"`
+		} `json:"indicators"`
+	} `json:"results"`
+}
+
+func (c *Client) ingestAlienVaultOTX(ctx context.Context, apiKey string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, alienVaultOTXURL, nil)
+	if err != nil {
+		log.Printf("[reputation] AlienVault OTX request build error: %v", err)
+		return
+	}
+	req.Header.Set("X-OTX-API-KEY", apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := feedHTTPClient.Do(req)
+	if err != nil {
+		log.Printf("[reputation] AlienVault OTX fetch error: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result otxSubscribedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("[reputation] AlienVault OTX decode error: %v", err)
+		return
+	}
+
+	var ips []interface{}
+	for _, pulse := range result.Results {
+		for _, ind := range pulse.Indicators {
+			if ind.Type == "IPv4" || ind.Type == "IPv6" {
+				if ind.Indicator != "" {
+					ips = append(ips, ind.Indicator)
+				}
+			}
+		}
+	}
+	if len(ips) > 0 {
+		c.writeIPSet(ctx, "rep:feed:otx", ips)
+		log.Printf("[reputation] AlienVault OTX: ingested %d indicators", len(ips))
+	} else {
+		log.Printf("[reputation] AlienVault OTX: 0 indicators returned")
+	}
+}
+
+// ── VirusTotal API v3 ────────────────────────────────────────────────────────
+
+type VirusTotalIPResult struct {
+	IP        string `json:"ip"`
+	Malicious int    `json:"malicious"`
+	Suspicious int   `json:"suspicious"`
+	Harmless  int    `json:"harmless"`
+	ASN       int    `json:"asn"`
+	Owner     string `json:"owner"`
+}
+
+func (c *Client) FetchVirusTotalIPReport(ctx context.Context, ip, apiKey string) (*VirusTotalIPResult, error) {
+	url := fmt.Sprintf("https://www.virustotal.com/api/v3/ip_addresses/%s", ip)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-apikey", apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := feedHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Data struct {
+			Attributes struct {
+				LastAnalysisStats struct {
+					Malicious  int `json:"malicious"`
+					Suspicious int `json:"suspicious"`
+					Harmless   int `json:"harmless"`
+				} `json:"last_analysis_stats"`
+				ASN     int    `json:"asn"`
+				ASOwner string `json:"as_owner"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+
+	res := &VirusTotalIPResult{
+		IP:         ip,
+		Malicious:  payload.Data.Attributes.LastAnalysisStats.Malicious,
+		Suspicious: payload.Data.Attributes.LastAnalysisStats.Suspicious,
+		Harmless:   payload.Data.Attributes.LastAnalysisStats.Harmless,
+		ASN:        payload.Data.Attributes.ASN,
+		Owner:      payload.Data.Attributes.ASOwner,
+	}
+
+	// Cache result in Redis for 24h
+	if res.Malicious > 0 {
+		c.BumpScore(ctx, ip, ScoreHigh)
+	}
+
+	return res, nil
+}
+
+
 
 // ── Plain-text IP lists (Spamhaus, FireHOL, Tor, Feodo) ──────────────────────
 

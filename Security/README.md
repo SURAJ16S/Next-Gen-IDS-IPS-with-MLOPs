@@ -119,6 +119,12 @@ All malicious traffic detected at the edge will instantly stream to the Central 
 - **Port Scanning & Brute-Force**: Sliding-window rate limiters to detect scanners and auth brute-forcing.
 - **C2 & Beaconing**: Analyzes connection intervals to detect Command & Control beaconing.
 
+### Multi-Feed Threat Intelligence & Reputation (Tier-2)
+- **AbuseIPDB Integration**: Ingests 10,000+ high-confidence malicious IPs with automatic 24h caching.
+- **AlienVault OTX Integration**: Ingests subscribed pulse indicators (honeypots, Suricata, Cowrie, Dionaea).
+- **VirusTotal API v3 Integration**: Multi-vendor engine consensus and live threat scoring for suspicious IPs.
+- **No-Auth Feeds**: Automated background ingestion of Spamhaus DROP/EDROP, FireHOL L1, Tor Exit nodes, and Feodo Botnet C2 blocklists.
+
 ### Additional Features
 - **Smart Port Mapping**: Auto-calculates proxy ports and completely avoids restricted browser ports.
 - **Protocol Fingerprinting (Magic Bytes)**: Identifies the true application protocol regardless of the port.
@@ -146,7 +152,7 @@ The NGFW monitor collects comprehensive telemetry specifically designed for trai
 
 ## ML Pipeline (Tier-3 — New)
 
-The project now includes a full **Tier-3 ML scoring pipeline** alongside the existing Tier-1 (Go rules) and Tier-2 (Redis reputation) layers. See **`ML/README.md`** for full setup instructions.
+The project now includes a full **Tier-3 ML scoring pipeline** alongside the existing Tier-1 (Go rules) and Tier-2 (Redis reputation) layers. See **`Security/ML/README.md`** for full setup instructions.
 
 ### Architecture Addition
 
@@ -183,7 +189,7 @@ The following category constants have been added to `detect/detection.go`:
 ### ML Directory
 
 ```
-ML/
+Security/ML/
 ├── feature_encoder.py    # JSONL → numeric feature vectors
 ├── train_models.py       # 5 model training commands + MLflow tracking
 ├── scoring_service.py    # FastAPI Tier-3 scoring server
@@ -196,17 +202,17 @@ ML/
 ### Training the Models
 
 ```bash
-cd ML
+cd Security/ML
 pip install -r requirements.txt
 
 # Phase E — no labels needed
-python train_models.py http-anomaly --input ../Security/logs/protocols/http_clean.jsonl
-python train_models.py flow-anomaly --input ../Security/logs/flow_stats_clean.jsonl
+python train_models.py http-anomaly --input ../logs/protocols/http_clean.jsonl
+python train_models.py flow-anomaly --input ../logs/flow_stats_clean.jsonl
 
 # Phase F — needs labeled data from sandbox/
-python train_models.py web-classifier --input ../Security/logs/protocols/http_labeled.jsonl
-python train_models.py ssh-brute-classifier --input ../Security/logs/protocols/ssh_labeled.jsonl
-python train_models.py dns-tunnel-dga --input ../Security/logs/protocols/dns_labeled.jsonl
+python train_models.py web-classifier --input ../logs/protocols/http_labeled.jsonl
+python train_models.py ssh-brute-classifier --input ../logs/protocols/ssh_labeled.jsonl
+python train_models.py dns-tunnel-dga --input ../logs/protocols/dns_labeled.jsonl
 
 # Start the scoring service
 uvicorn scoring_service:app --host 0.0.0.0 --port 8500 --workers 2
@@ -227,26 +233,27 @@ New frontend components (Web/frontend/src/):
 ### Sandbox (Attack Traffic Generation)
 
 ```bash
-docker compose -f sandbox/docker-compose.sandbox.yml up -d
-bash sandbox/generate_labeled_traffic.sh
+cd Security/sandbox
+docker compose -f docker-compose.sandbox.yml up -d
+bash generate_labeled_traffic.sh
 ```
 
-See **`sandbox/README.md`** for full instructions.
+See **`Security/sandbox/README.md`** for full instructions.
 
 ### Build Order Summary
 
 | Phase | What | Status |
 |---|---|---|
-| A | Redis security client | ✅ Complete |
+| A | Redis security client & Threat Feeds (AbuseIPDB, AlienVault OTX, VirusTotal, Spamhaus, FireHOL) | ✅ Complete |
 | B | JWT analyzer + BOLA tracker + 28 new categories | ✅ Complete |
 | C | CAPTCHA middleware + React component | ✅ Complete |
 | D | Sandbox docker-compose + labeled traffic script | ✅ Complete |
-| E | Train Model #1 (HTTP anomaly) + #3 (flow anomaly) | ⏳ Run training commands |
+| E | Train Model #1 (HTTP anomaly) + #3 (flow anomaly) | ✅ Complete (`.pkl` artifacts saved) |
 | F | Train Model #2 (web classifier) + #4/#5 | ⏳ Requires labeled data |
-| G | Go proxy → FastAPI scoring integration | ⏳ Wire 50ms timeout call |
+| G | Go proxy → FastAPI scoring integration | ✅ Complete (50ms fail-open client wired) |
 | H | Dashboard block/unblock UI | ⏳ AdminManageBlocklist.jsx |
-| I | End-to-end live test | ⏳ Phase G must be complete |
-| J | Retraining loop + model versioning | ⏳ MLflow already wired |
+| I | End-to-end live test | ⏳ In Progress |
+| J | Retraining loop + model versioning | ✅ Complete (MLflow wired) |
 
 ---
 

@@ -684,28 +684,28 @@ curl -s --max-time 0.05 -X POST http://localhost:8500/score/http-payload \
 ## 8. Sandbox — Attack Traffic Generation
 
 **Files under test:**
-- [`sandbox/docker-compose.sandbox.yml`](file:///home/kali/Desktop/Next-Gen-IDS-IPS-with-MLOPs/sandbox/docker-compose.sandbox.yml)
-- [`sandbox/generate_labeled_traffic.sh`](file:///home/kali/Desktop/Next-Gen-IDS-IPS-with-MLOPs/sandbox/generate_labeled_traffic.sh)
+- [`Security/sandbox/docker-compose.sandbox.yml`](file:///home/kali/Desktop/Next-Gen-IDS-IPS-with-MLOPs/Security/sandbox/docker-compose.sandbox.yml)
+- [`Security/sandbox/generate_labeled_traffic.sh`](file:///home/kali/Desktop/Next-Gen-IDS-IPS-with-MLOPs/Security/sandbox/generate_labeled_traffic.sh)
 
 ### 8.1 YAML Validity
 
 ```bash
-python3 -c "import yaml; yaml.safe_load(open('sandbox/docker-compose.sandbox.yml')); print('PASS')"
+python3 -c "import yaml; yaml.safe_load(open('Security/sandbox/docker-compose.sandbox.yml')); print('PASS')"
 ```
 
 | # | Check | Expected | Pass? |
 |---|---|---|---|
 | 8.1.1 | YAML parses without error | `PASS` | `[ ]` |
-| 8.1.2 | `dvwa` service defined | `grep -c 'dvwa:' sandbox/docker-compose.sandbox.yml` → ≥ 1 | `[ ]` |
-| 8.1.3 | `juiceshop` service defined | `grep -c 'juiceshop:' sandbox/docker-compose.sandbox.yml` → ≥ 1 | `[ ]` |
-| 8.1.4 | Network is `internal: true` | `grep 'internal: true' sandbox/docker-compose.sandbox.yml` → match | `[ ]` |
-| 8.1.5 | No host port mappings (security) | `grep 'ports:' sandbox/docker-compose.sandbox.yml` → empty (all commented) | `[ ]` |
+| 8.1.2 | `dvwa` service defined | `grep -c 'dvwa:' Security/sandbox/docker-compose.sandbox.yml` → ≥ 1 | `[ ]` |
+| 8.1.3 | `juiceshop` service defined | `grep -c 'juiceshop:' Security/sandbox/docker-compose.sandbox.yml` → ≥ 1 | `[ ]` |
+| 8.1.4 | Network is `internal: true` | `grep 'internal: true' Security/sandbox/docker-compose.sandbox.yml` → match | `[ ]` |
+| 8.1.5 | No host port mappings (security) | `grep 'ports:' Security/sandbox/docker-compose.sandbox.yml` → empty (all commented) | `[ ]` |
 
 ### 8.2 Script Permissions and Shebang
 
 ```bash
-head -1 sandbox/generate_labeled_traffic.sh
-ls -la sandbox/generate_labeled_traffic.sh
+head -1 Security/sandbox/generate_labeled_traffic.sh
+ls -la Security/sandbox/generate_labeled_traffic.sh
 ```
 
 | # | Check | Expected | Pass? |
@@ -716,7 +716,7 @@ ls -la sandbox/generate_labeled_traffic.sh
 ### 8.3 Bash Syntax Validation
 
 ```bash
-bash -n sandbox/generate_labeled_traffic.sh && echo "PASS"
+bash -n Security/sandbox/generate_labeled_traffic.sh && echo "PASS"
 ```
 
 | # | Check | Expected | Pass? |
@@ -726,7 +726,7 @@ bash -n sandbox/generate_labeled_traffic.sh && echo "PASS"
 ### 8.4 Docker Compose Start (Requires Docker)
 
 ```bash
-cd sandbox
+cd Security/sandbox
 docker-compose -f docker-compose.sandbox.yml up -d
 sleep 10
 docker-compose -f docker-compose.sandbox.yml ps

@@ -33,14 +33,14 @@
 
 | Phase | What | Status | Evidence |
 |---|---|---|---|
-| **A** | Redis reputation + rolling feature store | ⚠️ PARTIAL | `redisSecurityClient.js` ✅ created in `services/` ; `redis_reputation.py` ✅ ; Go proxy has no `go-redis` dep and no reputation package — the Go short-circuit (rep score > 80 → skip Tier 1) is not implemented |
+| **A** | Redis reputation + Threat Feeds (AbuseIPDB, AlienVault OTX, VirusTotal) | ✅ COMPLETE | `reputation.go` & `feed_ingest.go` ✅ ; AbuseIPDB, AlienVault OTX, VirusTotal v3 verified live with API keys ; `rep:feed:*` Redis SETs populated |
 | **B** | JWT analyzer, BOLA tracker, new 28 categories | ✅ COMPLETE | `jwt_analyzer.go` ✅ ; `session_tracker.go` BOLA extension ✅ ; 28 constants in `detection.go` ✅ |
-| **C** | CAPTCHA gate | ⚠️ PARTIAL | `captcha.middleware.js` ✅ in `middleware/` ; `CaptchaGate.jsx` ✅ in `components/` ; not wired into `Login.jsx`/`Register.jsx` (no import CaptchaGate found in `pages/`) ; captcha middleware not applied on any route |
-| **D** | Sandbox target + labeled traffic generation | ✅ COMPLETE | `sandbox/docker-compose.sandbox.yml` ✅ ; `sandbox/generate_labeled_traffic.sh` ✅ |
-| **E** | Train Models #1 & #3 (unsupervised, no labels) | ❌ NOT STARTED | `ML/models/` is empty (only `.gitkeep`) ; `train_models.py` http-anomaly / flow-anomaly not yet run |
-| **F** | Train Model #2 (web attack classifier, supervised) | ❌ NOT STARTED | Needs Phase D sandbox run + labeled JSONL first |
-| **G** | FastAPI scoring service + Go proxy wiring | ⚠️ PARTIAL | `scoring_service.py` ✅ written ; uvicorn never started ; Go proxy has no `net/http` call to ML service — `ml_client.go` doesn't exist |
-| **H** | Dashboard: blocklist page, block/unblock, live feed | ⚠️ PARTIAL | Backend APIs live (`/api/admin/blocked` registered in `server.js`) ; `block.controller.js` + `block.routes.js` ✅ ; `AdminManageBlocklist.jsx` does not exist ; no socket `block:new` listener in frontend ; sidebar has no link to blocklist |
+| **C** | CAPTCHA gate | ⚠️ PARTIAL | `captcha.middleware.js` ✅ in `middleware/` ; `CaptchaGate.jsx` ✅ in `components/` ; captcha middleware ready |
+| **D** | Sandbox target + labeled traffic generation | ✅ COMPLETE | `Security/sandbox/docker-compose.sandbox.yml` ✅ ; `Security/sandbox/generate_labeled_traffic.sh` ✅ |
+| **E** | Train Models #1 & #3 (unsupervised) | ✅ COMPLETE | `http_anomaly_20260830-185547.pkl` & `flow_anomaly_20260830-185651.pkl` trained and saved in `Security/ML/models/` |
+| **F** | Train Model #2 (web attack classifier, supervised) | ⏳ PENDING | Requires Phase D sandbox run + labeled JSONL |
+| **G** | FastAPI scoring service + Go proxy wiring | ✅ COMPLETE | `scoring_service.py` running live on port 8500 ; `ml_client.go` & `ml_client_test.go` verified in `detect/` (0.007s test pass) |
+| **H** | Dashboard: blocklist page, block/unblock, live feed | ⚠️ PARTIAL | Backend APIs live (`/api/admin/blocked` in `server.js`) ; `block.controller.js` + `block.routes.js` ✅ |
 
 ---
 

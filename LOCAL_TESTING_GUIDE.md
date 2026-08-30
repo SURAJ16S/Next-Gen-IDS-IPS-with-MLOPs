@@ -20,7 +20,7 @@ Pick **any** of these. The proxy sits in front of it regardless.
 ### Option A — DVWA (easiest, already in the sandbox)
 
 ```bash
-cd sandbox
+cd Security/sandbox
 # Add temporary host ports so you can test locally
 # Edit docker-compose.sandbox.yml temporarily — add ports to dvwa:
 #   ports:

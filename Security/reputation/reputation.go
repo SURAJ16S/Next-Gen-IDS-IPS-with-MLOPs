@@ -76,8 +76,11 @@ func (c *Client) GetScore(ctx context.Context, ip string) (int, error) {
 func (c *Client) IsKnownBad(ctx context.Context, ip string) (bool, error) {
 	feeds := []string{
 		"rep:feed:abuseipdb",
+		"rep:feed:otx",
 		"rep:feed:spamhaus_drop",
 		"rep:feed:firehol",
+		"rep:feed:tor_exit",
+		"rep:feed:botnet_c2",
 	}
 	for _, feed := range feeds {
 		ok, err := c.rdb.SIsMember(ctx, feed, ip).Result()
