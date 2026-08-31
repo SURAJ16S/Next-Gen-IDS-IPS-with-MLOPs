@@ -33,8 +33,8 @@ Reference: [Implementation Plan Matrix](file:///home/kali/Desktop/Next-Gen-IDS-I
 - **Status**: **COMPLETE**.
 
 ### ✅ Phase D: Target Sandbox & Labeled Traffic Generation
-- **What was done**: Deployed a safe, isolated Docker Compose environment (`Security/sandbox`) running vulnerable applications (crAPI, DVWA) and built automated shell scripts to generate synthetic malicious traffic.
-- **Why**: Provides the necessary ground-truth data required for training supervised machine learning models.
+- **What was done**: Deployed a safe, isolated Docker Compose environment (`Security/sandbox`) running vulnerable applications (crAPI, DVWA), and built a custom **All-in-One Python Flask Vulnerable App** (`vulnerable_app.py`) for rapid local testing of 7 specific threat categories without heavy containerization. Automated shell scripts were also built to generate synthetic malicious traffic.
+- **Why**: Provides the necessary ground-truth data required for training supervised machine learning models and enables immediate local validation of the Go Proxy's detection rules.
 - **Status**: **COMPLETE**.
 
 ### ✅ Phase E: Baseline Unsupervised ML Training

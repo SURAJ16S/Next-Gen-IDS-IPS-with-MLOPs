@@ -36,7 +36,7 @@
 | **A** | Redis reputation + Threat Feeds (AbuseIPDB, AlienVault OTX, VirusTotal) | ✅ COMPLETE | `reputation.go` & `feed_ingest.go` ✅ ; AbuseIPDB, AlienVault OTX, VirusTotal v3 verified live with API keys ; `rep:feed:*` Redis SETs populated |
 | **B** | JWT analyzer, BOLA tracker, new 28 categories | ✅ COMPLETE | `jwt_analyzer.go` ✅ ; `session_tracker.go` BOLA extension ✅ ; 28 constants in `detection.go` ✅ |
 | **C** | CAPTCHA gate | ✅ COMPLETE | Native Distorted Text (SVG) CAPTCHA implemented via `svg-captcha`. `captcha.middleware.js` and `CaptchaGate.jsx` updated and fully integrated. |
-| **D** | Sandbox target + labeled traffic generation | ✅ COMPLETE | `Security/sandbox/docker-compose.sandbox.yml` ✅ ; `Security/sandbox/generate_labeled_traffic.sh` ✅ |
+| **D** | Sandbox target + labeled traffic generation | ✅ COMPLETE | `Security/sandbox/docker-compose.sandbox.yml` ✅ ; `Security/sandbox/vulnerable_app.py` (Custom All-in-One Test App) ✅ ; `Security/sandbox/generate_labeled_traffic.sh` ✅ |
 | **E** | Train Models #1 & #3 (unsupervised) | ✅ COMPLETE | `http_anomaly_20260830-185547.pkl` & `flow_anomaly_20260830-185651.pkl` trained and saved in `Security/ML/models/` |
 | **F** | Train Model #2 (web attack classifier, supervised) | ⏳ PENDING | Requires Phase D sandbox run + labeled JSONL |
 | **G** | FastAPI scoring service + Go proxy wiring | ✅ COMPLETE | `scoring_service.py` running live on port 8500 ; `ml_client.go` & `ml_client_test.go` verified in `detect/` (0.007s test pass) |
