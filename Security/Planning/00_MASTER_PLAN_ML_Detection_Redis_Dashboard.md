@@ -127,7 +127,7 @@ You already have the primitive from Phase A: `gate:reqrate:{ip}` sliding counter
 ### 4.2 What CAPTCHA to actually use
 
 Don't build your own CAPTCHA image-generation/OCR-resistance system — that's a research problem in itself and out of scope for a final-year timeline. Two realistic choices:
-- **Cloudflare Turnstile** (free tier, privacy-friendlier, no user puzzle-solving in most cases — it's mostly invisible/behavioral) — recommended, since your project already positions itself as free/open-source-friendly and Turnstile's free tier fits that.
+- **Native Distorted Text CAPTCHA** — (using `svg-captcha`) generated natively on the Node.js backend. This avoids third-party tracking entirely and ensures complete data sovereignty while still mitigating automated bots.
 - **hCaptcha** (also free tier) if you specifically want a visible challenge for your demo/viva to *show* the mechanism working.
 
 Either way, the **decision of when to show the challenge is yours** (built in §4.1) — the CAPTCHA provider only handles the human-verification widget + server-side token verification. This split (your own rate/timing detector decides *when*, a proven provider handles *how*) is both the realistic scope and the more defensible design in a viva ("why didn't you build your own CAPTCHA?" → "because solving CAPTCHA image generation robustly is its own multi-year research problem; our contribution is the *adaptive triggering logic*, which is novel to this project").
@@ -145,7 +145,7 @@ Check gate:reqrate + IAT-variance signal (Phase A data)
    ▼           ▼
  Proceed    Return 403 + { "captcha_required": true, "sitekey": "..." }
               │
-        Frontend renders Turnstile/hCaptcha widget
+        Frontend renders native SVG Distorted Text widget
               │
         User completes it → frontend re-submits with captcha token
               │

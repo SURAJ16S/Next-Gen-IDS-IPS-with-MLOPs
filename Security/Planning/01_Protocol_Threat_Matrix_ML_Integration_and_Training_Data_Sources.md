@@ -373,7 +373,7 @@ Per the existing Gap Analysis §8 "immediately out of scope" call, plus addition
 
 - **Online/continuous learning** — scheduled batch retraining only (master plan §6.6 point 5).
 - **Deep learning (LSTM/CNN/Transformer-based IDS)** — traditional ML is sufficient for tabular, moderate-volume data and is more defensible in a viva.
-- **Custom CAPTCHA image generation** — use Cloudflare Turnstile/hCaptcha (master plan §4.2); your novel contribution is the adaptive triggering logic, not CAPTCHA-solving resistance.
+- **Custom CAPTCHA image generation** — use native `svg-captcha` generation (master plan §4.2); your novel contribution is the adaptive triggering logic, not just CAPTCHA-solving resistance.
 - **L2 threats (ARP spoofing, MAC flooding)** — your architecture operates at L3/4/7 via a reverse proxy and eBPF at the host, not at the switch/L2 level; correctly out of scope for a proxy-based system, note this explicitly if asked in viva rather than silently omitting L2 from your threat list.
 - **True MAC-address device fingerprinting** — not obtainable through a reverse proxy; you already correctly reframe this as TLS/header-based client fingerprinting (Gap Analysis §8).
 - **"Collaborative filtering" IP reputation exactly as worded on the PPT slide** — build and describe the defensible weighted-decay version instead (Gap Analysis §8) — this document's §3 model #6 entry reflects that correction.

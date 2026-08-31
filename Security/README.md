@@ -228,7 +228,7 @@ New backend components (Web/backend/src/):
 - **`services/redisSecurityClient.js`** — Dedicated ioredis client (DB 0/1/2)
 
 New frontend components (Web/frontend/src/):
-- **`components/CaptchaGate.jsx`** — Cloudflare Turnstile widget component
+- **`components/CaptchaGate.jsx`** — Native SVG Distorted Text CAPTCHA widget component
 
 ### Sandbox (Attack Traffic Generation)
 

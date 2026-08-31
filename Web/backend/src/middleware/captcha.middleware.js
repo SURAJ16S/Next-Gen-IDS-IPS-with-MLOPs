@@ -1,25 +1,38 @@
 // Web/backend/src/middleware/captcha.middleware.js
 //
 // Decides WHEN a request needs a human-verification challenge (using our own
-// Redis-backed rate signal — see master plan section 4.1-4.3) and verifies
-// the provider token (Cloudflare Turnstile shown here; swap the verify URL
-// for hCaptcha's if you choose that instead — same flow otherwise).
+// Redis-backed rate signal) and generates/verifies a custom distorted text CAPTCHA.
 //
 // Usage in a route file:
 //   const { requireCaptchaIfSuspicious, verifyCaptchaToken } = require('../middleware/captcha.middleware');
 //   router.post('/login', requireCaptchaIfSuspicious('login'), loginLimiter, login);
 
-const axios = require('axios');
-const { bumpRequestRate, getChallengeState } = require('../services/redisSecurityClient');
+const svgCaptcha = require('svg-captcha');
+const crypto = require('crypto');
+const { bumpRequestRate, getChallengeState, gateClient } = require('../services/redisSecurityClient');
 
-const TURNSTILE_VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY;
-
-// Requests-per-window threshold above which we start requiring a challenge.
-// Tune this per endpoint — form/login endpoints should be much stricter than
-// general browsing endpoints. Do NOT apply this middleware to static assets.
 const DEFAULT_RATE_WINDOW_SECONDS = 10;
-const DEFAULT_RATE_THRESHOLD = 6; // >6 requests to this endpoint in 10s from one IP looks scripted
+const DEFAULT_RATE_THRESHOLD = 6; 
+
+async function generateCaptchaChallenge() {
+  const captcha = svgCaptcha.create({
+    size: 5,
+    ignoreChars: '0o1i',
+    noise: 7, // More cut lines
+    color: false, // Grey/black text
+    background: '#ffffff' // Standard white background
+  });
+  
+  const challenge_id = crypto.randomUUID();
+  
+  // Store expected text in Redis (DB 2) with a 5 minute expiration
+  await gateClient.set(`gate:captcha_text:${challenge_id}`, captcha.text.toLowerCase(), 'EX', 300);
+  
+  return {
+    challenge_id,
+    image_svg: captcha.data
+  };
+}
 
 function requireCaptchaIfSuspicious(endpointLabel, {
   windowSeconds = DEFAULT_RATE_WINDOW_SECONDS,
@@ -31,22 +44,18 @@ function requireCaptchaIfSuspicious(endpointLabel, {
       const count = await bumpRequestRate(`${endpointLabel}:${ip}`, windowSeconds);
 
       if (count <= threshold) {
-        return next(); // normal traffic, no challenge needed
+        return next(); 
       }
 
-      // Over threshold — check if this request already carries a passed
-      // challenge token from a prior CAPTCHA completion in this session.
       const challengeState = await getChallengeState(`${endpointLabel}:${ip}`);
       if (challengeState && challengeState.status === 'passed') {
         return next();
       }
 
-      // Also accept a fresh token submitted with THIS request (first time
-      // completing the challenge) — verify it inline rather than requiring
-      // a second round trip.
-      const token = req.body?.captchaToken;
-      if (token) {
-        const verified = await verifyCaptchaToken(token, ip);
+      // Check for submitted answer
+      const captchaToken = req.body?.captchaToken;
+      if (captchaToken && captchaToken.challenge_id && captchaToken.answer) {
+        const verified = await verifyCaptchaToken(captchaToken);
         if (verified) {
           const { setChallengeState } = require('../services/redisSecurityClient');
           await setChallengeState(`${endpointLabel}:${ip}`, 'passed', 900); // 15 min grace
@@ -54,38 +63,37 @@ function requireCaptchaIfSuspicious(endpointLabel, {
         }
       }
 
+      // Generate a new CAPTCHA if none was submitted or if it was wrong
+      const challenge = await generateCaptchaChallenge();
+
       return res.status(403).json({
         captcha_required: true,
-        sitekey: process.env.TURNSTILE_SITE_KEY,
+        challenge_id: challenge.challenge_id,
+        image_svg: challenge.image_svg,
         message: 'Unusual request rate detected. Please complete the human-verification check to continue.',
       });
     } catch (err) {
-      // Fail OPEN on middleware errors — a broken CAPTCHA gate should never
-      // itself become a denial-of-service against legitimate users. Log it,
-      // let the request through, and let the normal detection layers (Tier
-      // 1/2/3) still evaluate it.
       console.error('[captcha.middleware] error, failing open:', err.message);
       return next();
     }
   };
 }
 
-async function verifyCaptchaToken(token, remoteIp) {
-  if (!TURNSTILE_SECRET_KEY) {
-    console.warn('[captcha.middleware] TURNSTILE_SECRET_KEY not set — cannot verify tokens.');
-    return false;
-  }
+async function verifyCaptchaToken(tokenData) {
+  if (!tokenData || !tokenData.challenge_id || !tokenData.answer) return false;
+  
   try {
-    const { data } = await axios.post(
-      TURNSTILE_VERIFY_URL,
-      new URLSearchParams({ secret: TURNSTILE_SECRET_KEY, response: token, remoteip: remoteIp }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 5000 }
-    );
-    return !!data.success;
+    const expectedText = await gateClient.get(`gate:captcha_text:${tokenData.challenge_id}`);
+    if (!expectedText) return false; // Expired or invalid
+    
+    // Once used, delete it so it can't be re-used (replay attack prevention)
+    await gateClient.del(`gate:captcha_text:${tokenData.challenge_id}`);
+    
+    return tokenData.answer.toLowerCase().trim() === expectedText;
   } catch (err) {
     console.error('[captcha.middleware] verify request failed:', err.message);
     return false;
   }
 }
 
-module.exports = { requireCaptchaIfSuspicious, verifyCaptchaToken };
+module.exports = { requireCaptchaIfSuspicious, verifyCaptchaToken, generateCaptchaChallenge };

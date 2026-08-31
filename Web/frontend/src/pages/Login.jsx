@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, AlertCircle, ShieldAlert } from 'lucide-react';
-import { loginUser, linkGithubAccount } from '../services/api';
+import { loginUser, linkGithubAccount, refreshCaptcha } from '../services/api';
+import CaptchaGate from '../components/CaptchaGate';
 import './Auth.css';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -41,9 +42,12 @@ function Login() {
   const [serverError, setServerError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Rate-limit state (L13)
+  // Rate-limit & CAPTCHA state
   const [attemptCount, setAttemptCount] = useState(0);
   const [lockoutSeconds, setLockoutSeconds] = useState(0);
+  const [captchaChallenge, setCaptchaChallenge] = useState(null);
+  const [captchaToken, setCaptchaToken] = useState(null);
+  const [captchaStatus, setCaptchaStatus] = useState('idle'); // 'idle' | 'error' | 'success'
 
   // GitHub Link state
   const [linkState, setLinkState] = useState(null);
@@ -123,8 +127,12 @@ function Login() {
   };
 
   // ── Submit ─────────────────────────────────────────────────────────────────
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = (e) => {
+    if (e) e.preventDefault();
+    doLogin(captchaToken);
+  };
+
+  const doLogin = async (overrideToken) => {
     if (lockoutSeconds > 0) return;
 
     // Touch all fields and validate
@@ -138,13 +146,34 @@ function Login() {
     setLoading(true);
     try {
       const res = await loginUser({
-        email:    email.trim().toLowerCase(),   // L3: lowercase normalization
-        password: password.trim(),               // L9: trim
+        email:    email.trim().toLowerCase(),
+        password: password.trim(),
+        captchaToken: overrideToken || captchaToken,
       });
+      // Clear CAPTCHA if successful
+      if (captchaChallenge) {
+        setCaptchaStatus('success');
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      setCaptchaChallenge(null);
+      setCaptchaToken(null);
+      setCaptchaStatus('idle');
+      
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data));
       navigate('/');
     } catch (err) {
+      if (err.response?.status === 403 && err.response?.data?.captcha_required) {
+        setCaptchaChallenge({
+          challenge_id: err.response.data.challenge_id,
+          image_svg: err.response.data.image_svg
+        });
+        setCaptchaStatus('error');
+        setTimeout(() => setCaptchaStatus('idle'), 400); // Reset animation state
+        setServerError('Security check required due to unusual request rate.');
+        return;
+      }
+
       // L14: Generic error — never reveal which field is wrong
       setServerError('Invalid email or password');
 
@@ -208,6 +237,32 @@ function Login() {
             {isLocked
               ? `Account temporarily locked. Try again in ${lockoutSeconds}s`
               : serverError}
+          </div>
+        )}
+
+        {/* Captcha Gate challenge when required */}
+        {captchaChallenge && (
+          <div style={{ marginBottom: '16px' }}>
+            <CaptchaGate
+              challenge={captchaChallenge}
+              loading={loading}
+              status={captchaStatus}
+              onToken={(token) => {
+                setCaptchaToken(token);
+                doLogin(token);
+              }}
+              onRefresh={async () => {
+                setLoading(true);
+                try {
+                  const res = await refreshCaptcha();
+                  setCaptchaChallenge(res.data);
+                  setCaptchaStatus('idle');
+                } catch (err) {
+                  setServerError('Failed to refresh CAPTCHA.');
+                }
+                setLoading(false);
+              }}
+            />
           </div>
         )}
 

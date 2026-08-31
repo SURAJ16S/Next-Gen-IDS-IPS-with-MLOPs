@@ -35,7 +35,7 @@
 |---|---|---|---|
 | **A** | Redis reputation + Threat Feeds (AbuseIPDB, AlienVault OTX, VirusTotal) | ✅ COMPLETE | `reputation.go` & `feed_ingest.go` ✅ ; AbuseIPDB, AlienVault OTX, VirusTotal v3 verified live with API keys ; `rep:feed:*` Redis SETs populated |
 | **B** | JWT analyzer, BOLA tracker, new 28 categories | ✅ COMPLETE | `jwt_analyzer.go` ✅ ; `session_tracker.go` BOLA extension ✅ ; 28 constants in `detection.go` ✅ |
-| **C** | CAPTCHA gate | ⚠️ PARTIAL | `captcha.middleware.js` ✅ in `middleware/` ; `CaptchaGate.jsx` ✅ in `components/` ; captcha middleware ready |
+| **C** | CAPTCHA gate | ✅ COMPLETE | Native Distorted Text (SVG) CAPTCHA implemented via `svg-captcha`. `captcha.middleware.js` and `CaptchaGate.jsx` updated and fully integrated. |
 | **D** | Sandbox target + labeled traffic generation | ✅ COMPLETE | `Security/sandbox/docker-compose.sandbox.yml` ✅ ; `Security/sandbox/generate_labeled_traffic.sh` ✅ |
 | **E** | Train Models #1 & #3 (unsupervised) | ✅ COMPLETE | `http_anomaly_20260830-185547.pkl` & `flow_anomaly_20260830-185651.pkl` trained and saved in `Security/ML/models/` |
 | **F** | Train Model #2 (web attack classifier, supervised) | ⏳ PENDING | Requires Phase D sandbox run + labeled JSONL |
@@ -418,7 +418,7 @@ const captchaMiddleware = require('../middleware/captcha.middleware');
 router.post('/login', captchaMiddleware, authController.login);
 router.post('/register', captchaMiddleware, authController.register);
 ```
-- **Environment variable**: `CAPTCHA_SECRET_KEY` must be set in `.env` (from Cloudflare Turnstile or hCaptcha dashboard).
+- **Environment variable**: `CAPTCHA_SECRET_KEY` is no longer required as the native SVG Captcha handles generation offline.
 - **Verify**: Rapid repeated login attempts trigger a `captcha_required: true` response from the backend.
 
 ---
@@ -514,7 +514,7 @@ Run this when all tasks above are checked:
 |---|---|
 | Online/continuous learning | Scheduled batch retraining only (too risky without robust human-in-the-loop) |
 | Deep learning (LSTM/Transformer) | Traditional ML sufficient and more defensible for tabular, moderate-volume data |
-| Custom CAPTCHA image generation | Use Cloudflare Turnstile; our contribution is the adaptive trigger logic |
+| Third-party CAPTCHA API integration | Replaced by offline Native SVG Captcha; our contribution is the adaptive trigger logic |
 | L2 threats (ARP spoofing, MAC flooding) | Proxy operates at L3/4/7 — correct out-of-scope for proxy-based IDS |
 | Model #8 SMTP spam classifier | Lowest priority; build only if time remains after items E/F/G/H are done |
 

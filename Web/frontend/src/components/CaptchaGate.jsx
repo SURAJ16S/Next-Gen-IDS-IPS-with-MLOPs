@@ -1,71 +1,112 @@
-// Web/frontend/src/components/CaptchaGate.jsx
-//
-// Renders a Cloudflare Turnstile widget when the backend responds with
-// { captcha_required: true, sitekey } (see captcha.middleware.js). Drop
-// this into Login.jsx / Register.jsx wherever you currently handle a
-// failed submit — on captcha_required, render <CaptchaGate> instead of
-// the normal error message, then retry the original request with the
-// token attached once the user completes it.
-//
-// Add to index.html (or load dynamically) once:
-//   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+import { useState } from 'react';
+import { RefreshCw, ArrowRight } from 'lucide-react';
 
-import { useEffect, useRef } from 'react';
+export default function CaptchaGate({ challenge, onToken, onRefresh, loading, status }) {
+  const [answer, setAnswer] = useState('');
 
-export default function CaptchaGate({ sitekey, onToken, onExpire }) {
-  const containerRef = useRef(null);
-  const widgetIdRef = useRef(null);
-
-  useEffect(() => {
-    if (!window.turnstile || !containerRef.current) return undefined;
-
-    widgetIdRef.current = window.turnstile.render(containerRef.current, {
-      sitekey,
-      callback: (token) => onToken(token),
-      'expired-callback': () => onExpire?.(),
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!answer.trim()) return;
+    onToken({
+      challenge_id: challenge.challenge_id,
+      answer: answer.trim()
     });
+  };
 
-    return () => {
-      if (widgetIdRef.current && window.turnstile) {
-        window.turnstile.remove(widgetIdRef.current);
-      }
-    };
-  }, [sitekey, onToken, onExpire]);
+  if (!challenge || !challenge.image_svg) return null;
 
   return (
-    <div className="captcha-gate">
-      <p className="captcha-gate__message">
-        We noticed unusually fast activity from your connection. Please
-        confirm you&apos;re not a bot to continue.
+    <div className="captcha-gate" style={{
+      background: 'rgba(15, 23, 42, 0.4)',
+      border: '1px solid rgba(56, 189, 248, 0.2)',
+      borderRadius: 'var(--radius-md)',
+      padding: '16px',
+      marginBottom: '16px'
+    }}>
+      <style>{`
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          10%, 30%, 50%, 70%, 90% { transform: translateX(-5px); }
+          20%, 40%, 60%, 80% { transform: translateX(5px); }
+        }
+        .shake-anim {
+          animation: shake 0.4s ease-in-out;
+          border-color: var(--danger-red) !important;
+        }
+      `}</style>
+      
+      <p className="captcha-gate__message" style={{ 
+        fontSize: '13px', 
+        color: status === 'error' ? 'var(--danger-red)' : status === 'success' ? 'var(--success-green)' : 'var(--text-muted)', 
+        marginBottom: '12px' 
+      }}>
+        {status === 'error' ? '❌ Incorrect characters. Please try again.' : 
+         status === 'success' ? '✅ Success! Access Granted.' : 
+         'We noticed unusually fast activity from your connection. Please type the characters you see below to continue.'}
       </p>
-      <div ref={containerRef} />
+      
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+        <div 
+          style={{ background: '#ffffff', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.1)', flex: 1, display: 'flex', justifyContent: 'center' }}
+          dangerouslySetInnerHTML={{ __html: challenge.image_svg }}
+        />
+        <button 
+          type="button" 
+          onClick={onRefresh} 
+          disabled={loading || status === 'success'}
+          style={{ 
+            background: 'rgba(255,255,255,0.05)', 
+            border: '1px solid rgba(255,255,255,0.1)', 
+            borderRadius: 'var(--radius-sm)', 
+            padding: '8px', 
+            cursor: 'pointer',
+            color: 'var(--text-muted)'
+          }}
+          title="Refresh Image"
+        >
+          <RefreshCw size={18} />
+        </button>
+      </div>
+
+      <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '8px' }}>
+        <input 
+          type="text" 
+          value={answer}
+          onChange={(e) => setAnswer(e.target.value)}
+          placeholder="Enter characters..."
+          disabled={loading || status === 'success'}
+          className={status === 'error' ? 'shake-anim' : ''}
+          style={{ 
+            flex: 1, 
+            background: 'rgba(2, 6, 23, 0.5)', 
+            border: '1px solid rgba(56, 189, 248, 0.3)', 
+            borderRadius: 'var(--radius-sm)', 
+            padding: '10px 12px',
+            color: 'var(--text-main)',
+            outline: 'none',
+            transition: 'border-color 0.2s'
+          }}
+          autoFocus
+        />
+        <button 
+          type="submit" 
+          disabled={loading || !answer.trim() || status === 'success'}
+          style={{ 
+            background: 'var(--primary-cyan)', 
+            color: '#000', 
+            border: 'none', 
+            borderRadius: 'var(--radius-sm)', 
+            padding: '0 16px', 
+            cursor: 'pointer',
+            fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px'
+          }}
+        >
+          Verify <ArrowRight size={16} />
+        </button>
+      </form>
     </div>
   );
 }
-
-/*
-Example usage inside Login.jsx's submit handler:
-
-  const [captchaSitekey, setCaptchaSitekey] = useState(null);
-  const [captchaToken, setCaptchaToken] = useState(null);
-
-  const submitLogin = async (payload) => {
-    try {
-      const res = await api.post('/auth/login', { ...payload, captchaToken });
-      // success path...
-    } catch (err) {
-      if (err.response?.status === 403 && err.response.data?.captcha_required) {
-        setCaptchaSitekey(err.response.data.sitekey);
-        return; // wait for the user to complete the widget, then re-submit
-      }
-      // normal error handling...
-    }
-  };
-
-  {captchaSitekey && (
-    <CaptchaGate
-      sitekey={captchaSitekey}
-      onToken={(token) => { setCaptchaToken(token); submitLogin(lastPayload); }}
-    />
-  )}
-*/

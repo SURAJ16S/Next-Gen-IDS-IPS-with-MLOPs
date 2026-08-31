@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IDS/IPS Custom Distorted Text CAPTCHA</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-gradient: radial-gradient(circle at 50% 0%, #0f172a 0%, #020617 100%);
+      --card-bg: rgba(15, 23, 42, 0.75);
+      --card-border: rgba(56, 189, 248, 0.2);
+      --card-glow: 0 8px 32px 0 rgba(0, 242, 254, 0.12);
+      --primary-cyan: #38bdf8;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --success-green: #4ade80;
+      --warning-amber: #fbbf24;
+      --danger-red: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif; background: var(--bg-gradient); color: var(--text-main);
+      min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px;
+    }
+    .container {
+      width: 100%; max-width: 580px; background: var(--card-bg);
+      border: 1px solid var(--card-border); border-radius: 20px;
+      box-shadow: var(--card-glow); padding: 32px; margin-top: 20px;
+    }
+    .header { text-align: center; margin-bottom: 28px; }
+    .title { font-size: 1.5rem; color: var(--primary-cyan); margin-bottom: 8px; }
+    
+    .btn {
+      width: 100%; background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
+      color: white; border: none; padding: 12px 18px; border-radius: 10px; cursor: pointer;
+      font-weight: 600; margin-bottom: 20px;
+    }
+    .btn:hover { background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%); }
+    
+    .captcha-gate {
+      background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(56, 189, 248, 0.2);
+      border-radius: 8px; padding: 16px; margin-bottom: 20px; display: none;
+    }
+    
+    /* Shake Animation for Invalid Input */
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      10%, 30%, 50%, 70%, 90% { transform: translateX(-5px); }
+      20%, 40%, 60%, 80% { transform: translateX(5px); }
+    }
+    .shake {
+      animation: shake 0.4s ease-in-out;
+      border-color: var(--danger-red) !important;
+    }
+
+    .captcha-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .captcha-img-box {
+      background: #ffffff; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;
+      flex: 1; display: flex; justify-content: center; overflow: hidden;
+    }
+    .refresh-btn {
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px; padding: 10px; color: var(--text-muted); cursor: pointer;
+    }
+    .input-row { display: flex; gap: 8px; }
+    .input-box {
+      flex: 1; background: rgba(2, 6, 23, 0.5); border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 6px; padding: 10px; color: white; outline: none; transition: border-color 0.2s;
+    }
+    .verify-btn {
+      background: var(--primary-cyan); color: #000; font-weight: 600; border: none;
+      padding: 0 16px; border-radius: 6px; cursor: pointer; transition: background 0.2s;
+    }
+    
+    .console-box {
+      background: #020617; border: 1px solid rgba(255,255,255,0.1); border-radius: 10px;
+      padding: 14px; font-family: monospace; font-size: 0.85rem; color: #38bdf8;
+      max-height: 160px; overflow-y: auto; text-align: left;
+    }
+    .console-line { margin-bottom: 4px; }
+    .success { color: var(--success-green); }
+    .error { color: var(--danger-red); }
+    .warn { color: var(--warning-amber); }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <div class="header">
+      <h1 class="title">Native Distorted Text CAPTCHA</h1>
+      <p style="color: var(--text-muted); font-size: 0.9rem;">
+        Testing backend SVG generation and Redis token verification flow.
+      </p>
+    </div>
+
+    <button class="btn" onclick="simulateSpike()">⚡ Simulate High-Velocity Request Spike</button>
+
+    <div id="captchaGate" class="captcha-gate">
+      <p style="font-size: 0.85rem; color: var(--warning-amber); margin-bottom: 12px;" id="gateMsg">
+        ⚠️ Suspicious Traffic Detected. Please type the characters below.
+      </p>
+      <div class="captcha-row">
+        <div class="captcha-img-box" id="captchaImg"></div>
+        <button class="refresh-btn" onclick="fetchCaptcha()">↻</button>
+      </div>
+      <div class="input-row">
+        <input type="text" id="captchaInput" class="input-box" placeholder="Enter characters..." onkeydown="if(event.key === 'Enter') verifyCaptcha()" />
+        <button class="verify-btn" onclick="verifyCaptcha()">Verify</button>
+      </div>
+    </div>
+
+    <div class="console-box" id="consoleBox">
+      <div class="console-line">[SYSTEM] IDS/IPS Native CAPTCHA initialized.</div>
+    </div>
+  </div>
+
+  <script>
+    let currentChallengeId = null;
+    let expectedAnswer = null; 
+
+    function log(msg, type = 'normal') {
+      const box = document.getElementById('consoleBox');
+      box.innerHTML += `<div class="console-line ${type}">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function generateRandomString(length) {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+      let result = '';
+      for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return result;
+    }
+
+    function simulateSpike() {
+      log('Simulating 7 rapid POST requests to /api/auth/login...', 'warn');
+      setTimeout(() => {
+        log('Backend emitted HTTP 403 { captcha_required: true }', 'error');
+        document.getElementById('captchaGate').style.display = 'block';
+        fetchCaptcha();
+      }, 500);
+    }
+
+    function fetchCaptcha() {
+      log('Requesting new CAPTCHA challenge (mocked)...');
+      
+      currentChallengeId = 'chal_' + Math.random().toString(36).substr(2, 9);
+      expectedAnswer = generateRandomString(5);
+      
+      const charElements = expectedAnswer.split('').map((char, i) => {
+        const x = 25 + (i * 22);
+        const y = 30 + (Math.random() * 10 - 5);
+        const rot = Math.random() * 40 - 20;
+        const scale = 0.9 + Math.random() * 0.3;
+        const color = ['#333', '#444', '#222', '#555', '#111'][Math.floor(Math.random() * 5)];
+        
+        return `<text x="${x}" y="${y}" font-family="monospace" font-size="28" font-weight="bold" fill="${color}" transform="rotate(${rot} ${x} ${y}) scale(${scale} ${scale})">${char}</text>`;
+      }).join('');
+
+      // Generate 7 random noise lines
+      let noiseLines = '';
+      for(let i = 0; i < 7; i++) {
+        const y1 = Math.random() * 50;
+        const y2 = Math.random() * 50;
+        const y3 = Math.random() * 50;
+        const color = ['#777', '#999', '#888', '#aaa', '#666'][Math.floor(Math.random() * 5)];
+        noiseLines += `<path d="M0 ${y1} Q 75 ${y2} 150 ${y3}" stroke="${color}" fill="transparent" stroke-width="1.5"/>`;
+      }
+
+      const mockSvg = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="150" height="50" viewBox="0 0 150 50">
+          <rect width="100%" height="100%" fill="#ffffff"/>
+          ${noiseLines}
+          ${charElements}
+        </svg>
+      `;
+      
+      document.getElementById('captchaImg').innerHTML = mockSvg;
+      
+      const inputBox = document.getElementById('captchaInput');
+      inputBox.value = '';
+      inputBox.classList.remove('shake'); // Reset any active shake
+      inputBox.focus();
+
+      log(`Received challenge_id: ${currentChallengeId}`, 'success');
+      log(`(Hint: type '${expectedAnswer}')`);
+    }
+
+    function verifyCaptcha() {
+      const input = document.getElementById('captchaInput');
+      const val = input.value.trim();
+      
+      if(!val) return;
+
+      log(`Submitting verify request: { challenge_id: ${currentChallengeId}, answer: '${val}' }...`);
+      
+      // Reset animation so it can trigger again if needed
+      input.classList.remove('shake');
+      // Trigger reflow
+      void input.offsetWidth;
+
+      setTimeout(() => {
+        if (val.toLowerCase() === expectedAnswer.toLowerCase()) {
+          log('[VERIFICATION SUCCESS] Status: 200 OK. Redis key updated.', 'success');
+          document.getElementById('gateMsg').innerHTML = "✅ <b>Success! Access Granted.</b>";
+          document.getElementById('gateMsg').style.color = "var(--success-green)";
+          input.disabled = true;
+          document.querySelector('.verify-btn').disabled = true;
+          
+          setTimeout(() => {
+            document.getElementById('captchaGate').style.display = 'none';
+          }, 1500);
+        } else {
+          log('[VERIFICATION FAILED] Status: 403 Forbidden. Incorrect answer.', 'error');
+          // Trigger shake animation
+          input.classList.add('shake');
+          document.getElementById('gateMsg').innerText = "❌ Incorrect characters. Please try again.";
+          document.getElementById('gateMsg').style.color = "var(--danger-red)";
+          fetchCaptcha();
+        }
+      }, 400);
+    }
+  </script>
+</body>
+</html>
