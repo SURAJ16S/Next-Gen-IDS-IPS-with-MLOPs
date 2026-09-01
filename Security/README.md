@@ -8,6 +8,7 @@ A comprehensive Go-based **Intelligent Multi-Protocol Intrusion Detection and Pr
 - **Robust HTTP Request Parsing:** The Layer 7 DPI engine features an upgraded HTTP parser resilient to evasion techniques, correctly handling unencoded spaces in URIs (e.g., raw SQL injection payloads) to prevent firewall bypasses.
 - **Centralized MERN Dashboard:** A beautiful React/Vite frontend and Express/MongoDB backend providing real-time Threat Monitoring, Network Monitoring, and Agent Node management via WebSockets.
 - **Interactive Setup Wizard:** The CLI has been completely revamped. Just answer two simple questions (Interface and App Port), and the system auto-calculates a safe proxy port.
+- **Transparent Auto-Protect Mode:** Automatically intercept and protect standard services (e.g., SSH on Port 22) using `iptables` NAT redirection seamlessly built into the Go engine, completely eliminating manual port configuration overhead.
 - **Integrated Port Management:** A built-in utility (`Option 4`) allows you to instantly detect and kill rogue processes holding your application ports.
 - **Simultaneous eBPF & Proxy Execution:** Bridges kernel-space eBPF and user-space DPI within a single binary, capturing L4 flows and L7 payloads simultaneously.
 

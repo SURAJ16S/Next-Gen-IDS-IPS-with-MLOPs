@@ -4,261 +4,313 @@ listeners:
       transport: tcp
       service: http
       enabled: true
+      auto_protect: false
     - listen_port: 3000
       backend_addr: 127.0.0.1:13000
       transport: tcp
       service: http
       enabled: false
+      auto_protect: false
     - listen_port: 443
       backend_addr: 127.0.0.1:8443
       transport: tcp+tls
       service: https
       enabled: true
+      auto_protect: false
     - listen_port: 8080
       backend_addr: 127.0.0.1:9090
       transport: tcp
       service: http
       enabled: true
+      auto_protect: false
     - listen_port: 8443
       backend_addr: 127.0.0.1:18443
       transport: tcp+tls
       service: https
       enabled: true
+      auto_protect: false
     - listen_port: 22
       backend_addr: 127.0.0.1:2222
       transport: tcp
       service: ssh
       enabled: true
+      auto_protect: false
     - listen_port: 23
       backend_addr: 127.0.0.1:2323
       transport: tcp
       service: telnet
       enabled: true
+      auto_protect: false
     - listen_port: 3389
       backend_addr: 127.0.0.1:13389
       transport: tcp
       service: rdp
       enabled: true
+      auto_protect: false
     - listen_port: 5900
       backend_addr: 127.0.0.1:15900
       transport: tcp
       service: vnc
       enabled: true
+      auto_protect: false
     - listen_port: 25
       backend_addr: 127.0.0.1:2525
       transport: tcp
       service: smtp
       enabled: true
+      auto_protect: false
     - listen_port: 465
       backend_addr: 127.0.0.1:1465
       transport: tcp+tls
       service: smtps
       enabled: true
+      auto_protect: false
     - listen_port: 587
       backend_addr: 127.0.0.1:1587
       transport: tcp
       service: smtp
       enabled: true
+      auto_protect: false
     - listen_port: 110
       backend_addr: 127.0.0.1:1110
       transport: tcp
       service: pop3
       enabled: true
+      auto_protect: false
     - listen_port: 995
       backend_addr: 127.0.0.1:1995
       transport: tcp+tls
       service: pop3s
       enabled: true
+      auto_protect: false
     - listen_port: 143
       backend_addr: 127.0.0.1:1143
       transport: tcp
       service: imap
       enabled: true
+      auto_protect: false
     - listen_port: 993
       backend_addr: 127.0.0.1:1993
       transport: tcp+tls
       service: imaps
       enabled: true
+      auto_protect: false
     - listen_port: 53
       backend_addr: 127.0.0.1:5353
       transport: tcp
       service: dns
       enabled: true
+      auto_protect: false
     - listen_port: 53
       backend_addr: 127.0.0.1:5353
       transport: udp
       service: dns
       enabled: true
+      auto_protect: false
     - listen_port: 21
       backend_addr: 127.0.0.1:2121
       transport: tcp
       service: ftp
       enabled: true
+      auto_protect: false
     - listen_port: 69
       backend_addr: 127.0.0.1:6969
       transport: udp
       service: tftp
       enabled: true
+      auto_protect: false
     - listen_port: 3306
       backend_addr: 127.0.0.1:13306
       transport: tcp
       service: mysql
       enabled: true
+      auto_protect: false
     - listen_port: 5432
       backend_addr: 127.0.0.1:15432
       transport: tcp
       service: postgresql
       enabled: true
+      auto_protect: false
     - listen_port: 6379
       backend_addr: 127.0.0.1:16379
       transport: tcp
       service: redis
       enabled: true
+      auto_protect: false
     - listen_port: 27017
       backend_addr: 127.0.0.1:37017
       transport: tcp
       service: mongodb
       enabled: true
+      auto_protect: false
     - listen_port: 389
       backend_addr: 127.0.0.1:1389
       transport: tcp
       service: ldap
       enabled: true
+      auto_protect: false
     - listen_port: 636
       backend_addr: 127.0.0.1:1636
       transport: tcp+tls
       service: ldaps
       enabled: true
+      auto_protect: false
     - listen_port: 88
       backend_addr: 127.0.0.1:1088
       transport: tcp
       service: kerberos
       enabled: true
+      auto_protect: false
     - listen_port: 161
       backend_addr: 127.0.0.1:1161
       transport: udp
       service: snmp
       enabled: true
+      auto_protect: false
     - listen_port: 514
       backend_addr: 127.0.0.1:1514
       transport: udp
       service: syslog
       enabled: true
+      auto_protect: false
     - listen_port: 123
       backend_addr: 127.0.0.1:1123
       transport: udp
       service: ntp
       enabled: true
+      auto_protect: false
     - listen_port: 5672
       backend_addr: 127.0.0.1:15672
       transport: tcp
       service: amqp
       enabled: true
+      auto_protect: false
     - listen_port: 9092
       backend_addr: 127.0.0.1:19092
       transport: tcp
       service: kafka
       enabled: true
+      auto_protect: false
     - listen_port: 1080
       backend_addr: 127.0.0.1:11080
       transport: tcp
       service: socks
       enabled: true
+      auto_protect: false
     - listen_port: 1194
       backend_addr: 127.0.0.1:11194
       transport: udp
       service: openvpn
       enabled: true
+      auto_protect: false
     - listen_port: 2375
       backend_addr: 127.0.0.1:12375
       transport: tcp
       service: docker
       enabled: true
+      auto_protect: false
     - listen_port: 6443
       backend_addr: 127.0.0.1:16443
       transport: tcp+tls
       service: k8s-api
       enabled: true
+      auto_protect: false
     - listen_port: 10250
       backend_addr: 127.0.0.1:20250
       transport: tcp+tls
       service: kubelet
       enabled: true
+      auto_protect: false
     - listen_port: 111
       backend_addr: 127.0.0.1:1111
       transport: tcp
       service: rpc
       enabled: true
+      auto_protect: false
     - listen_port: 135
       backend_addr: 127.0.0.1:1135
       transport: tcp
       service: msrpc
       enabled: true
+      auto_protect: false
     - listen_port: 139
       backend_addr: 127.0.0.1:1139
       transport: tcp
       service: netbios
       enabled: true
+      auto_protect: false
     - listen_port: 445
       backend_addr: 127.0.0.1:1445
       transport: tcp
       service: smb
       enabled: true
+      auto_protect: false
     - listen_port: 873
       backend_addr: 127.0.0.1:1873
       transport: tcp
       service: rsync
       enabled: true
+      auto_protect: false
     - listen_port: 9200
       backend_addr: 127.0.0.1:19200
       transport: tcp
       service: elasticsearch
       enabled: true
+      auto_protect: false
     - listen_port: 11337
       backend_addr: 127.0.0.1:1337
       transport: tcp
       service: python3 (PID:111524)
       enabled: true
+      auto_protect: false
     - listen_port: 11338
       backend_addr: 127.0.0.1:1337
       transport: tcp
       service: python3 (PID:99347)
       enabled: true
+      auto_protect: false
     - listen_port: 11339
       backend_addr: 127.0.0.1:1337
       transport: tcp
       service: python3 (PID:104891)
       enabled: true
+      auto_protect: false
     - listen_port: 18080
       backend_addr: 127.0.0.1:8080
       transport: tcp
       service: HTTP Alternate / Proxy [python3] PID:11569
       enabled: true
+      auto_protect: false
     - listen_port: 10022
       backend_addr: 127.0.0.1:22
       transport: tcp
-      service: SSH [ngfw-monitor] PID:10336
+      service: SSH [sshd] PID:36755
       enabled: true
+      auto_protect: true
     - listen_port: 13000
       backend_addr: 127.0.0.1:3000
       transport: tcp
       service: Node.js / Grafana (Dev) [MainThread] PID:55787
       enabled: true
+      auto_protect: false
     - listen_port: 12222
       backend_addr: 127.0.0.1:2222
       transport: tcp
       service: python3 (PID:9985)
       enabled: true
+      auto_protect: false
     - listen_port: 13001
       backend_addr: 127.0.0.1:3000
       transport: tcp
       service: Node.js / Grafana (Dev) [MainThread] PID:55787
       enabled: true
+      auto_protect: false
     - listen_port: 19090
       backend_addr: 127.0.0.1:9090
       transport: tcp
       service: Prometheus [python3] PID:32596
       enabled: true
+      auto_protect: false
 tls:
     enabled: false
     ca_cert_file: proxy/certs/ca.crt

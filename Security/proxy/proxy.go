@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -135,6 +136,9 @@ type ProxyEngine struct {
 	// Raw packet dump
 	DumpFile *os.File
 	dumpMu   sync.Mutex
+
+	// iptables rules to clean up on shutdown
+	autoProtectRules [][]string
 }
 
 // RawDump represents a single raw traffic dump record
@@ -364,6 +368,12 @@ func (p *ProxyEngine) Start() error {
 			log.Printf("[proxy] ✓ TCP :%d → %s [%s]",
 				lcfg.ListenPort, lcfg.BackendAddr, lcfg.Service)
 
+			if lcfg.AutoProtect {
+				if err := p.injectIptables(lcfg, "tcp"); err != nil {
+					log.Printf("[proxy] ⚠ AutoProtect failed for TCP port %d: %v", lcfg.ListenPort, err)
+				}
+			}
+
 		case "udp":
 			ul, err := NewUDPListener(lcfg, p)
 			if err != nil {
@@ -379,6 +389,12 @@ func (p *ProxyEngine) Start() error {
 			}(ul)
 			log.Printf("[proxy] ✓ UDP :%d → %s [%s]",
 				lcfg.ListenPort, lcfg.BackendAddr, lcfg.Service)
+
+			if lcfg.AutoProtect {
+				if err := p.injectIptables(lcfg, "udp"); err != nil {
+					log.Printf("[proxy] ⚠ AutoProtect failed for UDP port %d: %v", lcfg.ListenPort, err)
+				}
+			}
 
 		default:
 			log.Printf("[proxy] ⚠ Unknown transport %q for port %d", lcfg.Transport, lcfg.ListenPort)
@@ -418,7 +434,51 @@ func (p *ProxyEngine) Stop() {
 		p.repClient.Close()
 	}
 
+	// Clean up auto-protect iptables rules
+	for _, args := range p.autoProtectRules {
+		// Replace -I (Insert) with -D (Delete)
+		delArgs := make([]string, len(args))
+		copy(delArgs, args)
+		for i, a := range delArgs {
+			if a == "-I" {
+				delArgs[i] = "-D"
+			}
+		}
+		log.Printf("[proxy] Removing AutoProtect rule: iptables %v", delArgs)
+		cmd := exec.Command("iptables", delArgs...)
+		if err := cmd.Run(); err != nil {
+			log.Printf("[proxy] ⚠ Failed to remove iptables rule %v: %v", delArgs, err)
+		}
+	}
+
 	log.Println("[proxy] All listeners stopped.")
+}
+
+// injectIptables injects a PREROUTING NAT rule to redirect external traffic.
+func (p *ProxyEngine) injectIptables(lcfg ListenerConfig, proto string) error {
+	_, portStr, err := net.SplitHostPort(lcfg.BackendAddr)
+	if err != nil {
+		return fmt.Errorf("invalid backend address %s: %v", lcfg.BackendAddr, err)
+	}
+
+	args := []string{
+		"-t", "nat",
+		"-I", "PREROUTING",
+		"!", "-i", "lo",
+		"-p", proto,
+		"--dport", portStr,
+		"-j", "REDIRECT",
+		"--to-port", fmt.Sprintf("%d", lcfg.ListenPort),
+	}
+
+	log.Printf("[proxy] Injecting AutoProtect rule: iptables %v", args)
+	cmd := exec.Command("iptables", args...)
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	p.autoProtectRules = append(p.autoProtectRules, args)
+	return nil
 }
 
 // Stats returns the stats collector.

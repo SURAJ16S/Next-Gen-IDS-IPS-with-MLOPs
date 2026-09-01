@@ -32,6 +32,7 @@ type ListenerConfig struct {
 	Transport   string `yaml:"transport"`    // "tcp", "udp", "tcp+tls"
 	Service     string `yaml:"service"`      // Protocol hint: "http", "ssh", "dns", etc.
 	Enabled     bool   `yaml:"enabled"`
+	AutoProtect bool   `yaml:"auto_protect"` // If true, injects iptables REDIRECT for transparent proxy
 }
 
 // TLSConfig holds TLS interception settings.
