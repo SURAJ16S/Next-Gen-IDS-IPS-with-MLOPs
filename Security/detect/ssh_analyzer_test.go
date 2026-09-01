@@ -59,7 +59,7 @@ func buildKexInit(kex, hostKey, encCS, encSC, macCS, macSC, compCS, compSC strin
 		payload = append(payload, buf...)
 		payload = append(payload, []byte(l)...)
 	}
-	
+
 	// languages (2x empty)
 	payload = append(payload, []byte{0, 0, 0, 0, 0, 0, 0, 0}...)
 	// first_kex_packet_follows (1)
@@ -151,7 +151,7 @@ func TestSSHAnalyzer_HASSH_And_WeakAlgos(t *testing.T) {
 		"hmac-md5",
 		"none", "none",
 	)
-	
+
 	a.Analyze(connID, "10.0.0.1", 12345, 22, kexPacket, true)
 
 	sub.mu.Lock()
@@ -213,10 +213,10 @@ func TestSSHAnalyzer_BruteForce(t *testing.T) {
 	// Simulate 6 rapid connections from the same IP
 	for i := 0; i < 6; i++ {
 		connID := "test-bf-" + string(rune(i))
-		
+
 		a.Analyze(connID, "10.0.0.1", uint16(1000+i), 22, []byte("SSH-2.0-Client\r\n"), true)
 		a.Analyze(connID, "10.0.0.1", uint16(1000+i), 22, []byte("SSH-2.0-Server\r\n"), false)
-		
+
 		// Send NEWKEYS (type 21)
 		nk := buildSSHPacket([]byte{21})
 		a.Analyze(connID, "10.0.0.1", uint16(1000+i), 22, nk, true)
@@ -273,7 +273,7 @@ func TestSSHAnalyzer_Fragmentation(t *testing.T) {
 	a.Analyze(connID, "10.0.0.1", 12345, 22, []byte("SSH-2.0-Server\r\n"), false)
 
 	kexPacket := buildKexInit(
-		"curve25519-sha256", "ssh-rsa", "aes256-gcm@openssh.com", "aes256-gcm@openssh.com", 
+		"curve25519-sha256", "ssh-rsa", "aes256-gcm@openssh.com", "aes256-gcm@openssh.com",
 		"none", "none", "none", "none",
 	)
 
@@ -310,7 +310,7 @@ func TestSSHAnalyzer_RaceCondition(t *testing.T) {
 			a.Analyze(connID, "10.0.0.1", uint16(1000+id), 22, []byte("SSH-2.0-Server\r\n"), false)
 			kexPacket := buildKexInit("curve25519-sha256", "ssh-rsa", "aes256-gcm@openssh.com", "aes256-gcm@openssh.com", "none", "none", "none", "none")
 			a.Analyze(connID, "10.0.0.1", uint16(1000+id), 22, kexPacket, true)
-			
+
 			nk := buildSSHPacket([]byte{21})
 			a.Analyze(connID, "10.0.0.1", uint16(1000+id), 22, nk, true)
 			a.AnalyzeClose(connID, "10.0.0.1", uint16(1000+id), 22)

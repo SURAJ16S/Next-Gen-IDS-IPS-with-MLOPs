@@ -169,4 +169,3 @@ func (st *SessionTracker) emitSessionStats(session *SessionStats) {
 		},
 	})
 }
-

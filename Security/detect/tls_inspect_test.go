@@ -72,14 +72,14 @@ func buildDummyClientHello() []byte {
 	payload[40] = 0
 	// offset 41: extensions length 10
 	binary.BigEndian.PutUint16(payload[41:43], 10)
-	
+
 	// Extension 1: Supported Groups (0x000A), length 6, curves (2 bytes len + 2 curves)
 	binary.BigEndian.PutUint16(payload[43:45], 0x000A)
 	binary.BigEndian.PutUint16(payload[45:47], 6)
 	binary.BigEndian.PutUint16(payload[47:49], 4)
 	binary.BigEndian.PutUint16(payload[49:51], 0x1A1A) // GREASE
 	binary.BigEndian.PutUint16(payload[51:53], 0x001D) // X25519
-	
+
 	return payload[:53]
 }
 
@@ -102,26 +102,26 @@ func TestTLSInspector_ClientHello_Fragmentation(t *testing.T) {
 	bus.Subscribe(sub)
 
 	inspector := NewTLSInspector(bus)
-	
+
 	chPayload := buildDummyClientHello()
 	chMsg := buildHandshakeMsg(0x01, chPayload)
 	record := buildTLSRecord(0x16, 0x0303, chMsg)
-	
+
 	// Fragment the record into 3 pieces to simulate TCP fragmentation
 	frag1 := record[:10]
 	frag2 := record[10:30]
 	frag3 := record[30:]
-	
+
 	connID := "test-frag"
 	inspector.Analyze(connID, "1.2.3.4", 1234, 443, frag1, true)
 	inspector.Analyze(connID, "1.2.3.4", 1234, 443, frag2, true)
 	inspector.Analyze(connID, "1.2.3.4", 1234, 443, frag3, true)
-	
+
 	time.Sleep(50 * time.Millisecond) // Let event loop flush
-	
+
 	sub.mu.Lock()
 	defer sub.mu.Unlock()
-	
+
 	foundHello := false
 	foundWeak := false
 	for _, d := range sub.detections {
@@ -140,7 +140,7 @@ func TestTLSInspector_ClientHello_Fragmentation(t *testing.T) {
 			foundWeak = true
 		}
 	}
-	
+
 	if !foundHello {
 		t.Errorf("Failed to reassemble and detect fragmented ClientHello")
 	}
@@ -155,32 +155,32 @@ func TestTLSInspector_Certificates(t *testing.T) {
 	bus.Subscribe(sub)
 
 	inspector := NewTLSInspector(bus)
-	
+
 	certDER := generateDummyCert(true) // expired
-	
+
 	// Construct Certificate handshake payload
 	payload := make([]byte, 6+len(certDER))
 	certsLen := len(certDER) + 3
 	payload[0] = byte(certsLen >> 16)
 	payload[1] = byte(certsLen >> 8)
 	payload[2] = byte(certsLen)
-	
+
 	certLen := len(certDER)
 	payload[3] = byte(certLen >> 16)
 	payload[4] = byte(certLen >> 8)
 	payload[5] = byte(certLen)
-	
+
 	copy(payload[6:], certDER)
-	
+
 	certMsg := buildHandshakeMsg(0x0B, payload)
 	record := buildTLSRecord(0x16, 0x0303, certMsg)
-	
+
 	inspector.Analyze("test-cert", "8.8.8.8", 443, 1234, record, false)
 	time.Sleep(50 * time.Millisecond)
-	
+
 	sub.mu.Lock()
 	defer sub.mu.Unlock()
-	
+
 	foundExpired := false
 	foundSelfSigned := false
 	for _, d := range sub.detections {
@@ -191,7 +191,7 @@ func TestTLSInspector_Certificates(t *testing.T) {
 			foundSelfSigned = true
 		}
 	}
-	
+
 	if !foundExpired {
 		t.Errorf("Failed to detect expired certificate")
 	}

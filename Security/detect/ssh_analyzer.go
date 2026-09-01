@@ -135,11 +135,11 @@ func (s sshConnState) String() string {
 type sshToolClass string
 
 const (
-	sshClassBruteForce  sshToolClass = "brute-force-tool"   // Active credential attack tools
-	sshClassScanner     sshToolClass = "scanner"             // Reconnaissance / banner scanners
-	sshClassAutomation  sshToolClass = "automation-client"   // Automation libs often used in attacks
-	sshClassSSHLibrary  sshToolClass = "ssh-library"         // General-purpose SSH libraries (low risk)
-	sshClassKnownClient sshToolClass = "known-ssh-client"    // Well-known legitimate SSH clients (INFO)
+	sshClassBruteForce  sshToolClass = "brute-force-tool"  // Active credential attack tools
+	sshClassScanner     sshToolClass = "scanner"           // Reconnaissance / banner scanners
+	sshClassAutomation  sshToolClass = "automation-client" // Automation libs often used in attacks
+	sshClassSSHLibrary  sshToolClass = "ssh-library"       // General-purpose SSH libraries (low risk)
+	sshClassKnownClient sshToolClass = "known-ssh-client"  // Well-known legitimate SSH clients (INFO)
 )
 
 type sshToolInfo struct {
@@ -284,26 +284,26 @@ func NewSSHAnalyzer(bus *DetectionBus) *SSHAnalyzer {
 			"brutespray": {"Brutespray", sshClassBruteForce, SevHigh, "Service credential brute-forcer"},
 			"crowbar":    {"Crowbar", sshClassBruteForce, SevHigh, "Brute-force tool with key-based auth support"},
 			// Scanners — reconnaissance, not necessarily auth attacks
-			"masscan":    {"Masscan", sshClassScanner, SevMedium, "High-speed port and banner scanner"},
-			"zgrab":      {"ZGrab", sshClassScanner, SevMedium, "Application-layer network scanner"},
+			"masscan": {"Masscan", sshClassScanner, SevMedium, "High-speed port and banner scanner"},
+			"zgrab":   {"ZGrab", sshClassScanner, SevMedium, "Application-layer network scanner"},
 			// Automation clients — dual-use (legitimate automation and attack tooling)
-			"paramiko":   {"Paramiko", sshClassAutomation, SevMedium, "Python SSH library — common in automated attack scripts"},
-			"asyncssh":   {"AsyncSSH", sshClassAutomation, SevLow, "Python async SSH library — dual-use"},
-			"twisted":    {"Twisted Conch", sshClassAutomation, SevLow, "Python SSH framework"},
-			"jsch":       {"JSch", sshClassAutomation, SevMedium, "Java SSH library — used in CI/CD and attack frameworks"},
+			"paramiko": {"Paramiko", sshClassAutomation, SevMedium, "Python SSH library — common in automated attack scripts"},
+			"asyncssh": {"AsyncSSH", sshClassAutomation, SevLow, "Python async SSH library — dual-use"},
+			"twisted":  {"Twisted Conch", sshClassAutomation, SevLow, "Python SSH framework"},
+			"jsch":     {"JSch", sshClassAutomation, SevMedium, "Java SSH library — used in CI/CD and attack frameworks"},
 			// SSH libraries — general purpose, low individual risk
-			"libssh":     {"libssh", sshClassSSHLibrary, SevLow, "C SSH library (embedded/scripted clients)"},
-			"libssh2":    {"libssh2", sshClassSSHLibrary, SevLow, "C SSH library"},
-			"go":         {"Go x/crypto/ssh", sshClassSSHLibrary, SevLow, "Go standard SSH library"},
+			"libssh":  {"libssh", sshClassSSHLibrary, SevLow, "C SSH library (embedded/scripted clients)"},
+			"libssh2": {"libssh2", sshClassSSHLibrary, SevLow, "C SSH library"},
+			"go":      {"Go x/crypto/ssh", sshClassSSHLibrary, SevLow, "Go standard SSH library"},
 			// Known legitimate clients — informational, no alert emitted
-			"putty":      {"PuTTY", sshClassKnownClient, SevInfo, "Common Windows SSH terminal"},
-			"openssh":    {"OpenSSH", sshClassKnownClient, SevInfo, "Standard SSH implementation"},
-			"dropbear":   {"Dropbear", sshClassKnownClient, SevInfo, "Lightweight embedded SSH"},
-			"bitvise":    {"Bitvise", sshClassKnownClient, SevInfo, "Windows SSH/SFTP client"},
-			"winscp":     {"WinSCP", sshClassKnownClient, SevInfo, "Windows SFTP client"},
-			"filezilla":  {"FileZilla", sshClassKnownClient, SevInfo, "Cross-platform SFTP client"},
-			"cyberduck":  {"Cyberduck", sshClassKnownClient, SevInfo, "Cloud storage/SFTP client"},
-			"mobaxterm":  {"MobaXterm", sshClassKnownClient, SevInfo, "Windows SSH terminal emulator"},
+			"putty":     {"PuTTY", sshClassKnownClient, SevInfo, "Common Windows SSH terminal"},
+			"openssh":   {"OpenSSH", sshClassKnownClient, SevInfo, "Standard SSH implementation"},
+			"dropbear":  {"Dropbear", sshClassKnownClient, SevInfo, "Lightweight embedded SSH"},
+			"bitvise":   {"Bitvise", sshClassKnownClient, SevInfo, "Windows SSH/SFTP client"},
+			"winscp":    {"WinSCP", sshClassKnownClient, SevInfo, "Windows SFTP client"},
+			"filezilla": {"FileZilla", sshClassKnownClient, SevInfo, "Cross-platform SFTP client"},
+			"cyberduck": {"Cyberduck", sshClassKnownClient, SevInfo, "Cloud storage/SFTP client"},
+			"mobaxterm": {"MobaXterm", sshClassKnownClient, SevInfo, "Windows SSH terminal emulator"},
 		},
 
 		knownBadHASSH: map[string]string{
@@ -758,24 +758,26 @@ func (a *SSHAnalyzer) dispatchSSHPacket(sess *sshSession, pkt []byte, msgType by
 // parseKEXInit parses SSH_MSG_KEXINIT and fires algorithm-related detections.
 //
 // Wire structure of pkt (after the 4-byte packet_length field):
-//   pkt[0]         = padding_length
-//   pkt[1]         = 20 (SSH_MSG_KEXINIT)
-//   pkt[2..17]     = cookie (16 random bytes)
-//   pkt[18..end-padding_length] = 10 name-lists (each: uint32 length + ASCII bytes)
-//     name-list[0] = kex_algorithms
-//     name-list[1] = server_host_key_algorithms
-//     name-list[2] = encryption_algorithms_client_to_server
-//     name-list[3] = encryption_algorithms_server_to_client
-//     name-list[4] = mac_algorithms_client_to_server
-//     name-list[5] = mac_algorithms_server_to_client
-//     name-list[6] = compression_algorithms_client_to_server
-//     name-list[7] = compression_algorithms_server_to_client
-//     name-list[8] = languages_client_to_server (may be empty)
-//     name-list[9] = languages_server_to_client (may be empty)
+//
+//	pkt[0]         = padding_length
+//	pkt[1]         = 20 (SSH_MSG_KEXINIT)
+//	pkt[2..17]     = cookie (16 random bytes)
+//	pkt[18..end-padding_length] = 10 name-lists (each: uint32 length + ASCII bytes)
+//	  name-list[0] = kex_algorithms
+//	  name-list[1] = server_host_key_algorithms
+//	  name-list[2] = encryption_algorithms_client_to_server
+//	  name-list[3] = encryption_algorithms_server_to_client
+//	  name-list[4] = mac_algorithms_client_to_server
+//	  name-list[5] = mac_algorithms_server_to_client
+//	  name-list[6] = compression_algorithms_client_to_server
+//	  name-list[7] = compression_algorithms_server_to_client
+//	  name-list[8] = languages_client_to_server (may be empty)
+//	  name-list[9] = languages_server_to_client (may be empty)
 //
 // HASSH construction (https://github.com/salesforce/hassh):
-//   Client HASSH = MD5( nl[0] ; nl[2] ; nl[4] ; nl[6] )  -- from client's KEXINIT
-//   Server HASSH = MD5( nl[0] ; nl[3] ; nl[5] ; nl[7] )  -- from server's KEXINIT
+//
+//	Client HASSH = MD5( nl[0] ; nl[2] ; nl[4] ; nl[6] )  -- from client's KEXINIT
+//	Server HASSH = MD5( nl[0] ; nl[3] ; nl[5] ; nl[7] )  -- from server's KEXINIT
 //
 // Caller MUST hold a.sessionMu.
 func (a *SSHAnalyzer) parseKEXInit(sess *sshSession, pkt []byte, paddingLen int, fromClient bool, out *[]Detection) {
@@ -830,12 +832,12 @@ func (a *SSHAnalyzer) parseKEXInit(sess *sshSession, pkt []byte, paddingLen int,
 	direction := "server"
 	if fromClient {
 		direction = "client"
-		enc = sshNL(nameLists, 2) // encryption_algorithms_client_to_server
-		mac = sshNL(nameLists, 4) // mac_algorithms_client_to_server
+		enc = sshNL(nameLists, 2)  // encryption_algorithms_client_to_server
+		mac = sshNL(nameLists, 4)  // mac_algorithms_client_to_server
 		comp = sshNL(nameLists, 6) // compression_algorithms_client_to_server
 	} else {
-		enc = sshNL(nameLists, 3) // encryption_algorithms_server_to_client
-		mac = sshNL(nameLists, 5) // mac_algorithms_server_to_client
+		enc = sshNL(nameLists, 3)  // encryption_algorithms_server_to_client
+		mac = sshNL(nameLists, 5)  // mac_algorithms_server_to_client
 		comp = sshNL(nameLists, 7) // compression_algorithms_server_to_client
 	}
 
@@ -912,13 +914,13 @@ func (a *SSHAnalyzer) detectKnownTool(sess *sshSession, softVer, direction strin
 					),
 					ConnID: sess.connID,
 					Details: map[string]any{
-						"tool_name":   info.name,
-						"tool_class":  string(info.class),
-						"tool_note":   info.note,
+						"tool_name":    info.name,
+						"tool_class":   string(info.class),
+						"tool_note":    info.note,
 						"tool_keyword": keyword,
 						"software_ver": softVer,
 						"client_hassh": sess.clientHASSH, // empty if KEXINIT not yet parsed
-						"limitation":  "Banner strings can be spoofed. Combine with HASSH for higher confidence.",
+						"limitation":   "Banner strings can be spoofed. Combine with HASSH for higher confidence.",
 					},
 				})
 			}

@@ -62,7 +62,7 @@ func RunCommander() {
 
 func handleCommand(cmd CommandMsg) {
 	log.Printf("Received command from dashboard: %s -> %s", cmd.Type, cmd.Value)
-	
+
 	switch cmd.Type {
 	case "block_ip":
 		fmt.Printf("\n  [ACTION] Central Dashboard commanded IP Block: %s\n", cmd.Value)

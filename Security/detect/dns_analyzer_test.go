@@ -62,7 +62,7 @@ func createDNSMessage(txID uint16, qname string, qtype uint16, isResponse bool, 
 	}
 	flags |= (rcode & 0x000F)
 	binary.BigEndian.PutUint16(buf[2:4], flags)
-	binary.BigEndian.PutUint16(buf[4:6], 1)                     // QDCOUNT
+	binary.BigEndian.PutUint16(buf[4:6], 1)                    // QDCOUNT
 	binary.BigEndian.PutUint16(buf[6:8], uint16(len(answers))) // ANCOUNT
 
 	for _, p := range strings.Split(qname, ".") {
@@ -89,7 +89,7 @@ func encodeAnswerA(nameOffset uint16, ip []byte) []byte {
 	buf := make([]byte, 16)
 	binary.BigEndian.PutUint16(buf[0:2], 0xC000|nameOffset)
 	binary.BigEndian.PutUint16(buf[2:4], dnsTypeA)
-	binary.BigEndian.PutUint16(buf[4:6], 1)   // IN class
+	binary.BigEndian.PutUint16(buf[4:6], 1)    // IN class
 	binary.BigEndian.PutUint32(buf[6:10], 300) // TTL
 	binary.BigEndian.PutUint16(buf[10:12], uint16(len(ip)))
 	copy(buf[12:], ip)
@@ -206,7 +206,7 @@ func TestDNSTCP_OversizedMessagePrefix(t *testing.T) {
 	// A TCP frame claiming to be 65536 bytes (> maxDNSBufferSize)
 	bad := make([]byte, 2)
 	binary.BigEndian.PutUint16(bad, 0xFFFF) // 65535 OK, but > maxDNSBufferSize triggers malform
-	bad[0] = 0xFF                            // force > maxDNSBufferSize
+	bad[0] = 0xFF                           // force > maxDNSBufferSize
 	bad[1] = 0xFF
 	// Append a small payload that won't satisfy the claimed length
 	bad = append(bad, make([]byte, 10)...)
@@ -483,9 +483,9 @@ func TestDNS_Malformed_NoPanic(t *testing.T) {
 	analyzer.Analyze("cm4", "10.0.0.1", "1.1.1.1", 12345, 53, make([]byte, 256), true, true)
 	// Compression pointer loop
 	loop := make([]byte, 14)
-	binary.BigEndian.PutUint16(loop[4:6], 1)   // 1 question
-	loop[12] = 0xC0                             // pointer
-	loop[13] = 0x0C                             // pointing to offset 12 = loop
+	binary.BigEndian.PutUint16(loop[4:6], 1) // 1 question
+	loop[12] = 0xC0                          // pointer
+	loop[13] = 0x0C                          // pointing to offset 12 = loop
 	analyzer.Analyze("cm5", "10.0.0.1", "1.1.1.1", 12345, 53, loop, true, true)
 }
 

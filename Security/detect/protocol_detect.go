@@ -41,16 +41,21 @@ func NewProtocolDetector(bus *DetectionBus) *ProtocolDetector {
 }
 
 // Detect identifies the protocol from initial data bytes.
+// clientIP, clientPort, and connID are passed through so that the emitted
+// PROTO-DETECT / PROTO-MISMATCH Detection events carry the full connection
+// context — necessary for the TUI and telemetry stream to show who triggered
+// the detection.
 // expectedService is the service configured for this port (e.g., "http", "ssh").
-func (pd *ProtocolDetector) Detect(data []byte, listenPort uint16, expectedService string) ProtocolFingerprint {
+func (pd *ProtocolDetector) Detect(data []byte, listenPort uint16, expectedService, clientIP string, clientPort uint16, connID string) ProtocolFingerprint {
 	if len(data) == 0 {
-		return ProtocolFingerprint{Protocol: "unknown", Confidence: 0}
+		return ProtocolFingerprint{Protocol: string(ProtocolUnknown), Confidence: 0}
 	}
 
 	fp := pd.fingerprint(data)
+	fp.Protocol = string(NormaliseProtocol(fp.Protocol))
 
 	// Check for protocol/port mismatch
-	if fp.Protocol != "unknown" && expectedService != "" {
+	if fp.Protocol != string(ProtocolUnknown) && expectedService != "" {
 		fp.Mismatch = !protocolMatchesService(fp.Protocol, expectedService)
 	}
 
@@ -61,13 +66,16 @@ func (pd *ProtocolDetector) Detect(data []byte, listenPort uint16, expectedServi
 	}
 
 	det := Detection{
-		ID:        "PROTO-DETECT-001",
-		Timestamp: time.Now(),
-		Severity:  sev,
-		Category:  CatProtocolDetect,
-		Protocol:  fp.Protocol,
-		DestPort:  listenPort,
-		Summary:   fmt.Sprintf("Detected protocol: %s (confidence: %.0f%%)", fp.Protocol, fp.Confidence*100),
+		ID:         "PROTO-DETECT-001",
+		Timestamp:  time.Now(),
+		Severity:   sev,
+		Category:   CatProtocolDetect,
+		Protocol:   fp.Protocol,
+		SourceIP:   clientIP,
+		SourcePort: clientPort,
+		DestPort:   listenPort,
+		ConnID:     connID,
+		Summary:    fmt.Sprintf("Detected protocol: %s (confidence: %.0f%%)", fp.Protocol, fp.Confidence*100),
 		Details: map[string]any{
 			"detected_protocol": fp.Protocol,
 			"confidence":        fp.Confidence,

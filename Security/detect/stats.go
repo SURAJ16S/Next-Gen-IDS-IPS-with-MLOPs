@@ -36,8 +36,19 @@ type StatsCollector struct {
 	// Per-port stats
 	byPort map[uint16]*PortStats
 
+	// Per-protocol volume stats
+	byProtocolConn map[string]*ProtocolConnStats
+
 	// Top talkers — IPs with most detections
 	startTime time.Time
+}
+
+// ProtocolConnStats holds traffic-volume stats per protocol.
+type ProtocolConnStats struct {
+	Protocol    string `json:"protocol"`
+	Connections int64  `json:"connections"`
+	BytesIn     int64  `json:"bytes_in"`
+	BytesOut    int64  `json:"bytes_out"`
 }
 
 // PortStats tracks per-port statistics.
@@ -58,12 +69,13 @@ type TopTalkerEntry struct {
 // NewStatsCollector creates a new statistics collector.
 func NewStatsCollector() *StatsCollector {
 	return &StatsCollector{
-		bySeverity: make(map[Severity]int64),
-		byCategory: make(map[string]int64),
-		byProtocol: make(map[string]int64),
-		bySourceIP: make(map[string]int64),
-		byPort:     make(map[uint16]*PortStats),
-		startTime:  time.Now(),
+		bySeverity:     make(map[Severity]int64),
+		byCategory:     make(map[string]int64),
+		byProtocol:     make(map[string]int64),
+		bySourceIP:     make(map[string]int64),
+		byPort:         make(map[uint16]*PortStats),
+		byProtocolConn: make(map[string]*ProtocolConnStats),
+		startTime:      time.Now(),
 	}
 }
 
@@ -106,6 +118,17 @@ func (s *StatsCollector) OnConnectionClose(c ConnectionRecord) {
 	ps.BytesOut += c.BytesToClient
 	if c.MaxSeverity > ps.MaxSeverity {
 		ps.MaxSeverity = c.MaxSeverity
+	}
+
+	if c.DetectedProtocol != "" {
+		pvs, ok := s.byProtocolConn[c.DetectedProtocol]
+		if !ok {
+			pvs = &ProtocolConnStats{Protocol: c.DetectedProtocol}
+			s.byProtocolConn[c.DetectedProtocol] = pvs
+		}
+		pvs.Connections++
+		pvs.BytesIn += c.BytesFromClient
+		pvs.BytesOut += c.BytesToClient
 	}
 }
 
@@ -187,6 +210,19 @@ func (s *StatsCollector) ProtocolCounts() map[string]int64 {
 	result := make(map[string]int64)
 	for proto, count := range s.byProtocol {
 		result[proto] = count
+	}
+	return result
+}
+
+// ProtocolConnStats returns a copy of traffic-volume stats by protocol.
+func (s *StatsCollector) ProtocolConnStats() map[string]*ProtocolConnStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]*ProtocolConnStats)
+	for proto, stats := range s.byProtocolConn {
+		// return a copy so caller doesn't race
+		cp := *stats
+		result[proto] = &cp
 	}
 	return result
 }

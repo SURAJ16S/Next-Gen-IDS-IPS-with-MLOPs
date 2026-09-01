@@ -72,7 +72,7 @@ func TestConsoleLogger_Output(t *testing.T) {
 	}
 
 	// 4. Assertions on the captured output
-	
+
 	// Check for the clear-screen escape code
 	if !strings.Contains(output, "\r\033[K") {
 		t.Errorf("Expected output to contain line-clearing escape code \\r\\033[K, got: %q", output)

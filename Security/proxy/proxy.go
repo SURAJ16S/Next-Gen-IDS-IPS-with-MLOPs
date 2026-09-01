@@ -107,6 +107,31 @@ func (c *ConnContext) ToConnectionRecord() detect.ConnectionRecord {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Active Connections (TUI Visibility)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ActiveConn tracks a single live proxied connection for operator visibility.
+type ActiveConn struct {
+	ConnID     string
+	ClientConn net.Conn        // held so KillConnection can close the socket
+	Cancel     context.CancelFunc
+	CloseOnce  sync.Once
+	Ctx        *ConnContext    // read-only after registration; only read from TUI snapshot
+}
+
+// ConnSnapshot is a safe, immutable copy of ActiveConn for TUI rendering.
+type ConnSnapshot struct {
+	ConnID     string
+	ClientIP   string
+	ClientPort uint16
+	Protocol   string
+	StartTime  time.Time
+	BytesIn    int64
+	BytesOut   int64
+	MaxSev     detect.Severity
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // ProxyEngine — orchestrates all listeners and the detection pipeline
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -119,6 +144,9 @@ type ProxyEngine struct {
 	// Active listeners
 	tcpListeners []*TCPListener
 	udpListeners []*UDPListener
+
+	// Live connection registry
+	activeConns sync.Map
 
 	// Detection pipeline
 	protoDetector *detect.ProtocolDetector
@@ -429,4 +457,64 @@ func (p *ProxyEngine) Stats() *detect.StatsCollector {
 // Bus returns the detection bus.
 func (p *ProxyEngine) Bus() *detect.DetectionBus {
 	return p.bus
+}
+
+// RegisterConn adds a connection to the live registry.
+func (p *ProxyEngine) RegisterConn(ac *ActiveConn) {
+	p.activeConns.Store(ac.ConnID, ac)
+}
+
+// UnregisterConn removes a connection from the live registry.
+func (p *ProxyEngine) UnregisterConn(connID string) {
+	p.activeConns.Delete(connID)
+}
+
+// KillConnection forcibly terminates the connection with the given ID.
+// Returns true if the connection was found and killed, false if already gone.
+func (p *ProxyEngine) KillConnection(connID string) bool {
+	val, ok := p.activeConns.Load(connID)
+	if !ok {
+		return false // Already gone — no-op
+	}
+	ac := val.(*ActiveConn)
+	killed := false
+	ac.CloseOnce.Do(func() {
+		ac.Cancel()          // Signal relay goroutines to stop
+		ac.ClientConn.Close() // Immediately unblock blocking reads
+		killed = true
+		// Emit audit event
+		p.bus.EmitDetection(detect.Detection{
+			ID:         "CONN-KILL-001",
+			Timestamp:  time.Now(),
+			Severity:   detect.SevHigh,
+			Category:   detect.CatConnLifecycle,
+			Protocol:   ac.Ctx.DetectedProtocol,
+			SourceIP:   ac.Ctx.ClientIP.String(),
+			SourcePort: ac.Ctx.ClientPort,
+			DestPort:   ac.Ctx.ListenPort,
+			Summary:    fmt.Sprintf("Connection manually terminated by operator: %s:%d", ac.Ctx.ClientIP, ac.Ctx.ClientPort),
+			ConnID:     connID,
+		})
+	})
+	return killed
+}
+
+// GetActiveConnections returns a snapshot copy safe for TUI rendering.
+func (p *ProxyEngine) GetActiveConnections() []ConnSnapshot {
+	var snaps []ConnSnapshot
+	p.activeConns.Range(func(_, val any) bool {
+		ac := val.(*ActiveConn)
+		snaps = append(snaps, ConnSnapshot{
+			ConnID:     ac.Ctx.ConnID,
+			ClientIP:   ac.Ctx.ClientIP.String(),
+			ClientPort: ac.Ctx.ClientPort,
+			Protocol:   ac.Ctx.DetectedProtocol,
+			StartTime:  ac.Ctx.StartTime,
+			BytesIn:    ac.Ctx.BytesFromClient,
+			BytesOut:   ac.Ctx.BytesToClient,
+			MaxSev:     ac.Ctx.MaxSeverity(),
+		})
+		return true
+	})
+	return snaps
 }

@@ -310,7 +310,7 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 			filteredEC = append(filteredEC, fmt.Sprintf("%d", ec))
 		}
 	}
-	
+
 	ecpfStrs := make([]string, len(ecPointFormats))
 	for i, pf := range ecPointFormats {
 		ecpfStrs[i] = fmt.Sprintf("%d", pf)
@@ -441,7 +441,7 @@ func (t *TLSInspector) parseServerHello(sess *tlsSession, data []byte) {
 			extType := binary.BigEndian.Uint16(data[offset : offset+2])
 			extLen := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
 			offset += 4
-			
+
 			extensions = append(extensions, extType)
 			extensionStrs = append(extensionStrs, fmt.Sprintf("%d", extType))
 			offset += extLen
@@ -556,12 +556,18 @@ func extractSupportedVersions(data []byte) []uint16 {
 
 func tlsVersionString(v uint16) string {
 	switch v {
-	case 0x0300: return "SSL 3.0"
-	case 0x0301: return "TLS 1.0"
-	case 0x0302: return "TLS 1.1"
-	case 0x0303: return "TLS 1.2"
-	case 0x0304: return "TLS 1.3"
-	default: return fmt.Sprintf("0x%04X", v)
+	case 0x0300:
+		return "SSL 3.0"
+	case 0x0301:
+		return "TLS 1.0"
+	case 0x0302:
+		return "TLS 1.1"
+	case 0x0303:
+		return "TLS 1.2"
+	case 0x0304:
+		return "TLS 1.3"
+	default:
+		return fmt.Sprintf("0x%04X", v)
 	}
 }
 

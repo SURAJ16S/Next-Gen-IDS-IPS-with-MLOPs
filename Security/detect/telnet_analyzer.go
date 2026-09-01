@@ -126,7 +126,7 @@ const (
 type nvtParseState int
 
 const (
-	nvtStateData    nvtParseState = iota // normal data
+	nvtStateData   nvtParseState = iota // normal data
 	nvtStateIAC                         // saw 0xFF, awaiting command byte
 	nvtStateOption                      // saw WILL/WONT/DO/DONT, awaiting option byte
 	nvtStateSB                          // inside subnegotiation
@@ -138,11 +138,11 @@ const (
 // ─────────────────────────────────────────────────────────────────────────────
 
 type TelnetSession struct {
-	connID   string
-	srcIP    string
-	srcPort  uint16
-	dstPort  uint16
-	startTime time.Time
+	connID       string
+	srcIP        string
+	srcPort      uint16
+	dstPort      uint16
+	startTime    time.Time
 	lastActivity time.Time
 
 	// TCP reassembly buffers (client→server, server→client)
@@ -151,19 +151,19 @@ type TelnetSession struct {
 
 	// NVT parser state (shared; direction tracked by which buffer we process)
 	nvtState   nvtParseState
-	nvtOptByte byte    // pending option byte for WILL/WONT/DO/DONT
-	sbPayload  []byte  // accumulating SB payload
-	iacCount   int     // total IAC sequences seen (for anomaly detection)
-	malformed  bool    // if true, deep inspection is stopped
+	nvtOptByte byte   // pending option byte for WILL/WONT/DO/DONT
+	sbPayload  []byte // accumulating SB payload
+	iacCount   int    // total IAC sequences seen (for anomaly detection)
+	malformed  bool   // if true, deep inspection is stopped
 
 	// Auth state machine
-	authState     telnetAuthState
-	username      string
-	passPresent   bool
+	authState       telnetAuthState
+	username        string
+	passPresent     bool
 	passFingerprint string // SHA-256[:16] of "username:password"
 	passOnlyFP      string // SHA-256[:16] of "password"
-	authResult    string   // "success", "failed", ""
-	serverLineBuf string   // accumulates server text for prompt matching
+	authResult      string // "success", "failed", ""
+	serverLineBuf   string // accumulates server text for prompt matching
 
 	// Shell/command line buffer (bounded; Track 2 uses for cmd detection)
 	cmdBuf    string
@@ -181,7 +181,7 @@ type TelnetSession struct {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type credPairKey struct {
-	username     string
+	username        string
 	passFingerprint string
 }
 
@@ -195,11 +195,11 @@ type TelnetSourceState struct {
 	sprayTimes     []time.Time
 
 	// Credential stuffing: set of unique (user, passHash) pairs
-	credPairs      map[credPairKey]struct{}
-	credPairTimes  []time.Time
+	credPairs     map[credPairKey]struct{}
+	credPairTimes []time.Time
 
 	// Whether a success has been recorded after prior failures
-	hadPriorFailures bool
+	hadPriorFailures    bool
 	bruteSuccessEmitted bool
 
 	// Scan: list of connection start times where conn was "short"
@@ -217,8 +217,8 @@ type TelnetAnalyzer struct {
 	bus *DetectionBus
 
 	mu       sync.Mutex
-	sessions map[string]*TelnetSession      // keyed by ConnID
-	sources  map[string]*TelnetSourceState  // keyed by srcIP
+	sessions map[string]*TelnetSession     // keyed by ConnID
+	sources  map[string]*TelnetSourceState // keyed by srcIP
 }
 
 // NewTelnetAnalyzer creates and starts the Telnet analyzer.
@@ -561,11 +561,11 @@ var authFailureIndicators = []string{
 // shellPromptPatterns are contextual shell-prompt patterns (not just $/#/>).
 // These require some surrounding context: username/hostname prefix.
 var shellPromptPatterns = []string{
-	"@", // hostname context: "root@host:~#" or "admin@router>"
-	"$ ", "# ", "> ",      // with trailing space (less ambiguous)
-	"~# ", "~$ ",          // bash-style
-	":~#", ":~$",          // with colon prefix
-	"/ # ", "/ $ ",        // root shell path
+	"@",              // hostname context: "root@host:~#" or "admin@router>"
+	"$ ", "# ", "> ", // with trailing space (less ambiguous)
+	"~# ", "~$ ", // bash-style
+	":~#", ":~$", // with colon prefix
+	"/ # ", "/ $ ", // root shell path
 	"# \r", "$ \r", "> \r", // with CR (common in Telnet)
 }
 
@@ -686,7 +686,7 @@ func (a *TelnetAnalyzer) processAuthState(sess *TelnetSession, text []byte, from
 					if len(sess.cmdBuf) > 0 {
 						cmd := sess.cmdBuf
 						sess.cmdBuf = ""
-						
+
 						a.mu.Unlock()
 						a.analyzeCommand(sess, cmd)
 						a.mu.Lock()
@@ -777,9 +777,9 @@ func (a *TelnetAnalyzer) emitCommandDetection(sess *TelnetSession, id string, se
 func (a *TelnetAnalyzer) handleAuthSuccess(sess *TelnetSession, connID string) {
 	// TELNET-AUTH-001: emit cred summary (no password)
 	details := map[string]any{
-		"username":          sess.username,
-		"password_present":  sess.passPresent,
-		"cred_fingerprint":  sess.passFingerprint,
+		"username":         sess.username,
+		"password_present": sess.passPresent,
+		"cred_fingerprint": sess.passFingerprint,
 	}
 	a.bus.EmitDetection(Detection{
 		ID:         "TELNET-AUTH-001",
