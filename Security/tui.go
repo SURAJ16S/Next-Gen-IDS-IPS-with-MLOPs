@@ -249,6 +249,12 @@ type tuiModel struct {
 	connKillPending bool
 	connKillID      string
 	connStatusMsg   string
+
+	// deduplication and redis isolation
+	dedupWindow     time.Duration
+	dedupSeen       map[string]time.Time
+	redisDetections []detect.Detection
+	redisVP         viewport.Model
 }
 
 // newTuiModel constructs the model for Integrated or eBPF-only modes.
@@ -296,10 +302,14 @@ func newTuiModel(port uint16, iface string, svc ServiceInfo, pStats *detect.Stat
 		iface:        iface,
 		svcInfo:      svc,
 		flog:         flog,
-		width:        120,
-		height:       40,
-		engine:       engine,
-		conns:        make([]proxy.ConnSnapshot, 0),
+		width:           120,
+		height:          40,
+		engine:          engine,
+		conns:           make([]proxy.ConnSnapshot, 0),
+		dedupWindow:     60 * time.Second,
+		dedupSeen:       make(map[string]time.Time),
+		redisDetections: make([]detect.Detection, 0, maxTUIDetections),
+		redisVP:         viewport.New(80, 20),
 	}
 }
 
@@ -339,6 +349,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detectionsVP.Height = vpHeight
 		m.metricsVP.Width = m.width - 4
 		m.metricsVP.Height = vpHeight
+		m.redisVP.Width = m.width - 4
+		m.redisVP.Height = vpHeight
 		return m, nil
 
 	// ── keyboard ──
@@ -353,8 +365,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			m.activeTab = 2
 		case "4":
+			m.activeTab = 3
+		case "5":
 			if m.engine != nil {
-				m.activeTab = 3
+				m.activeTab = 4
 			}
 		case "p":
 			m.paused = !m.paused
@@ -362,7 +376,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterInfo = !m.filterInfo
 			m.rebuildDetectionsVP()
 		case "up", "k":
-			if m.activeTab == 3 && len(m.conns) > 0 {
+			if m.activeTab == 4 && len(m.conns) > 0 {
 				m.connSelected--
 				if m.connSelected < 0 {
 					m.connSelected = 0
@@ -371,7 +385,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connStatusMsg = ""
 			}
 		case "down", "j":
-			if m.activeTab == 3 && len(m.conns) > 0 {
+			if m.activeTab == 4 && len(m.conns) > 0 {
 				m.connSelected++
 				if m.connSelected >= len(m.conns) {
 					m.connSelected = len(m.conns) - 1
@@ -380,7 +394,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connStatusMsg = ""
 			}
 		case "x":
-			if m.activeTab == 3 && m.engine != nil && len(m.conns) > 0 && m.connSelected < len(m.conns) {
+			if m.activeTab == 4 && m.engine != nil && len(m.conns) > 0 && m.connSelected < len(m.conns) {
 				selectedID := m.conns[m.connSelected].ConnID
 				if m.connKillPending && m.connKillID == selectedID {
 					// Confirm kill — do this async so we don't block the UI thread,
@@ -412,6 +426,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detectionsVP, cmd = m.detectionsVP.Update(msg)
 		case 2:
 			m.metricsVP, cmd = m.metricsVP.Update(msg)
+		case 3:
+			m.redisVP, cmd = m.redisVP.Update(msg)
 		}
 		return m, cmd
 
@@ -438,6 +454,35 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stats.addAlert(d.Severity) // safe: pointer receiver, atomic ops
 		if !m.paused {
 			m.mu.Lock()
+			
+			// 1. Redis Isolation
+			if strings.EqualFold(d.Protocol, "redis") {
+				m.redisDetections = append(m.redisDetections, d)
+				if len(m.redisDetections) > maxTUIDetections {
+					m.redisDetections = m.redisDetections[len(m.redisDetections)-maxTUIDetections:]
+				}
+				m.mu.Unlock()
+				m.rebuildRedisVP()
+				if m.activeTab == 3 {
+					m.redisVP.GotoBottom()
+				}
+				return m, nil
+			}
+
+			// 2. View-layer Deduplication (LOW / INFO only)
+			if d.Severity <= detect.SevLow {
+				key := fmt.Sprintf("%s:%s:%d", d.ID, d.SourceIP, d.DestPort)
+				now := time.Now()
+				if lastSeen, ok := m.dedupSeen[key]; ok {
+					if now.Sub(lastSeen) <= m.dedupWindow {
+						m.mu.Unlock()
+						return m, nil // Skip adding to display ring
+					}
+				}
+				m.dedupSeen[key] = now
+			}
+
+			// 3. Append to main detections ring
 			m.detections = append(m.detections, d)
 			if len(m.detections) > maxTUIDetections {
 				m.detections = m.detections[len(m.detections)-maxTUIDetections:]
@@ -460,6 +505,15 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── periodic metrics refresh ──
 	case tickMsg:
+		m.mu.Lock()
+		now := time.Now()
+		for key, lastSeen := range m.dedupSeen {
+			if now.Sub(lastSeen) > m.dedupWindow {
+				delete(m.dedupSeen, key)
+			}
+		}
+		m.mu.Unlock()
+
 		m.rebuildMetricsVP()
 		if m.engine != nil {
 			m.conns = m.engine.GetActiveConnections()
@@ -496,6 +550,8 @@ func (m tuiModel) View() string {
 	case 2:
 		sb.WriteString(m.renderMetricsTab())
 	case 3:
+		sb.WriteString(m.renderRedisTab())
+	case 4:
 		if m.engine != nil {
 			sb.WriteString(m.renderConnectionsTab())
 		}
@@ -564,8 +620,18 @@ func (m tuiModel) renderTabBar() string {
 	}
 
 	tabs := []string{"[1] eBPF Telemetry", alertsLabel, "[3] Protocol Utilisation"}
+	m.mu.Lock()
+	redisCount := len(m.redisDetections)
+	m.mu.Unlock()
+	
+	redisLabel := "[4] Redis Logs"
+	if redisCount > 0 {
+		redisLabel = fmt.Sprintf("[4] Redis Logs (%d)", redisCount)
+	}
+	tabs = append(tabs, redisLabel)
+
 	if m.engine != nil {
-		tabs = append(tabs, "[4] Connections")
+		tabs = append(tabs, "[5] Connections")
 	}
 	var parts []string
 	for i, label := range tabs {
@@ -593,14 +659,14 @@ func (m tuiModel) renderTabBar() string {
 // ── Footer ────────────────────────────────────────────────────────────────────
 
 func (m tuiModel) renderFooter() string {
-	tabsLegend := "  1/2/3"
+	tabsLegend := "  1/2/3/4"
 	if m.engine != nil {
-		tabsLegend = "  1/2/3/4"
+		tabsLegend = "  1/2/3/4/5"
 	}
 	hotkeys := tuiDim.Render(tabsLegend) + tuiWhite.Render(" tabs") +
 		tuiDim.Render("  ↑/↓") + tuiWhite.Render(" scroll")
 
-	if m.activeTab == 3 {
+	if m.activeTab == 4 {
 		hotkeys += tuiDim.Render("  x") + tuiWhite.Render(" kill")
 	}
 
@@ -739,6 +805,64 @@ func (m *tuiModel) rebuildDetectionsVP() {
 
 func (m tuiModel) renderDetectionsTab() string {
 	return m.detectionsVP.View()
+}
+
+// ── Redis Tab ─────────────────────────────────────────────────────────────────
+
+func (m *tuiModel) rebuildRedisVP() {
+	m.mu.Lock()
+	snap := make([]detect.Detection, len(m.redisDetections))
+	copy(snap, m.redisDetections)
+	m.mu.Unlock()
+
+	var sb strings.Builder
+
+	sb.WriteString(tuiCyan.Render("  ● REDIS LOGS  (internal traffic — isolated from main alert feed)\n"))
+	sb.WriteString(tuiDim.Render("  "+strings.Repeat("─", 80)) + "\n")
+
+	written := 0
+	for _, d := range snap {
+		sevStyle := tuiSevStyle(d.Severity)
+		ts := d.Timestamp.Format("15:04:05")
+
+		actorIP := d.SourceIP
+		if actorIP == "" {
+			actorIP = "—"
+		}
+		actorPort := ""
+		if d.SourcePort > 0 {
+			actorPort = fmt.Sprintf(":%d", d.SourcePort)
+		}
+		actorRaw := actorIP + actorPort
+		if len(actorRaw) > 22 {
+			actorRaw = actorRaw[:22]
+		}
+		actorPadded := actorRaw + spaces(22-len(actorRaw))
+
+		line := fmt.Sprintf("  %s %s  %s  %-22s  %s  %s → :%d  %s\n",
+			sevStyle.Render(d.Severity.Emoji()+" "+fmt.Sprintf("%-8s", d.Severity.String())),
+			tuiDim.Render(ts),
+			tuiProtoBadge(d.Protocol),
+			tuiCyan.Render(fmt.Sprintf("%-22s", d.ID)),
+			tuiActor.Render(actorPadded),
+			tuiDim.Render("→"),
+			d.DestPort,
+			d.Summary,
+		)
+		sb.WriteString(line)
+		written++
+	}
+
+	if written == 0 {
+		sb.WriteString("\n" + tuiDim.Render("  No Redis detection events yet."))
+		sb.WriteString("\n" + tuiDim.Render(fmt.Sprintf("  Run traffic through port %d to see alerts.", m.port)))
+	}
+
+	m.redisVP.SetContent(sb.String())
+}
+
+func (m tuiModel) renderRedisTab() string {
+	return m.redisVP.View()
 }
 
 // ── Metrics Tab ───────────────────────────────────────────────────────────────

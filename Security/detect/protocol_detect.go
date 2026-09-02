@@ -893,9 +893,18 @@ func protocolMatchesService(protocol, service string) bool {
 				return true
 			}
 		}
+		return false // Mismatch: we know this service and it doesn't match
 	}
 
-	return false
+	// If we don't have strict mapping for this service (e.g., "python3", "Prometheus"),
+	// check if the service string contains the protocol name.
+	if strings.Contains(service, protocol) {
+		return true
+	}
+
+	// Default to true for unknown services to avoid false positive PROTO-MISMATCH alerts
+	// when the proxy detects a generic process name.
+	return true
 }
 
 // extractLine extracts the first line from a string.

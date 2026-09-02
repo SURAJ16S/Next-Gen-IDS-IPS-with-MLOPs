@@ -232,7 +232,7 @@ listeners:
     - listen_port: 18080
       backend_addr: 127.0.0.1:8080
       transport: tcp
-      service: HTTP Alternate / Proxy [python3] PID:11569
+      service: HTTP Alternate / Proxy [python3] PID:7705
       enabled: true
     - listen_port: 10022
       backend_addr: 127.0.0.1:22
@@ -257,12 +257,17 @@ listeners:
     - listen_port: 19090
       backend_addr: 127.0.0.1:9090
       transport: tcp
-      service: Prometheus [python3] PID:32596
+      service: Prometheus [python] PID:53895
       enabled: true
     - listen_port: 13002
       backend_addr: 127.0.0.1:3000
       transport: tcp
       service: Node.js / Grafana (Dev) [MainThread] PID:4604
+      enabled: true
+    - listen_port: 13003
+      backend_addr: 127.0.0.1:3000
+      transport: tcp
+      service: Node.js / Grafana (Dev) [MainThread] PID:14648
       enabled: true
 tls:
     enabled: false

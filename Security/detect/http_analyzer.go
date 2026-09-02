@@ -127,6 +127,10 @@ func (a *HTTPAnalyzer) compilePatterns() {
 		{"HTTP-CMDI-004", "Command Injection /bin/", CatCommandInjection, SevHigh, `(?i)(/bin/|/usr/bin/|/sbin/)(sh|bash|zsh|dash|csh)`},
 
 		// ── SSRF ──
+		// NOTE: SSRF-001 must NOT be applied to the Referer header.
+		// Browsers legitimately set Referer to the origin URL (e.g. http://192.168.x.x/).
+		// Scanning Referer for internal IPs causes a HIGH false-positive on every request.
+		// SSRF-001/002 are applied only to URI, body, and x-forwarded-for (see scanTargetsSSRF below).
 		{"HTTP-SSRF-001", "SSRF Internal IP", CatSSRF, SevHigh, `(?i)(https?://)(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.0\.0\.0|\[::1?\]|localhost)`},
 		{"HTTP-SSRF-002", "SSRF Cloud Metadata", CatSSRF, SevCritical, `(?i)(169\.254\.169\.254|metadata\.google|metadata\.internal|100\.100\.100\.200)`},
 
@@ -397,26 +401,93 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 		decodedURI = doubleDecoded
 	}
 
+	decodedBody := body
+	if decoded, err := url.QueryUnescape(body); err == nil {
+		decodedBody = decoded
+	}
+	if doubleDecoded, err := url.QueryUnescape(decodedBody); err == nil && doubleDecoded != decodedBody {
+		decodedBody = doubleDecoded
+	}
+
 	// ── Scan all attack patterns against URI, headers, and body ──
-	scanTargets := []struct {
+	//
+	// IMPORTANT: Pattern sets are split into two target lists:
+	//   scanTargetsFull  — all patterns scan uri, body, cookie, user-agent, auth, x-fwd-for
+	//   scanTargetsSSRF  — SSRF patterns additionally scan x-forwarded-for & body
+	//
+	// Referer is intentionally EXCLUDED from all pattern scans:
+	//   Browsers set Referer to the page origin (e.g. http://192.168.x.x/) which
+	//   triggers false-positive SSRF alerts on every legitimate request.
+	//   SSRF attacks arrive in the URL parameter or POST body, not the Referer header.
+	scanTargetsFull := []struct {
 		location string
 		content  string
 	}{
 		{"uri", uri},
 		{"decoded_uri", decodedURI},
 		{"body", body},
+		{"decoded_body", decodedBody},
 		{"user-agent", headers["user-agent"]},
-		{"referer", headers["referer"]},
 		{"cookie", headers["cookie"]},
 		{"x-forwarded-for", headers["x-forwarded-for"]},
 		{"authorization", headers["authorization"]},
 	}
 
-	for _, target := range scanTargets {
+	for _, target := range scanTargetsFull {
 		if target.content == "" {
 			continue
 		}
 		for _, pat := range a.patterns {
+			// SSRF patterns are handled separately below with tighter context
+			if pat.id == "HTTP-SSRF-001" || pat.id == "HTTP-SSRF-002" {
+				continue
+			}
+			if pat.regex.MatchString(target.content) {
+				match := pat.regex.FindString(target.content)
+				a.bus.EmitDetection(Detection{
+					ID:         pat.id,
+					Timestamp:  time.Now(),
+					Severity:   pat.severity,
+					Category:   pat.category,
+					Protocol:   "HTTP",
+					SourceIP:   srcIP,
+					SourcePort: srcPort,
+					DestPort:   dstPort,
+					Summary:    fmt.Sprintf("%s detected in %s", pat.name, target.location),
+					ConnID:     connID,
+					Details: map[string]any{
+						"attack":   pat.name,
+						"location": target.location,
+						"method":   method,
+						"uri":      truncate(uri, 200),
+					},
+					RawEvidence: truncate(match, 200),
+				})
+			}
+		}
+	}
+
+	// ── SSRF-specific scan: uri + body + x-forwarded-for only (NOT referer) ──
+	// Referer is set by the browser to the origin URL and contains internal IPs
+	// in local/lab setups — scanning it causes HIGH false-positives on every request.
+	ssrfTargets := []struct {
+		location string
+		content  string
+	}{
+		{"uri", uri},
+		{"decoded_uri", decodedURI},
+		{"body", body},
+		{"decoded_body", decodedBody},
+		{"x-forwarded-for", headers["x-forwarded-for"]},
+	}
+	for _, target := range ssrfTargets {
+		if target.content == "" {
+			continue
+		}
+		for _, pat := range a.patterns {
+			if pat.id != "HTTP-SSRF-001" && pat.id != "HTTP-SSRF-002" {
+				continue
+			}
 			if pat.regex.MatchString(target.content) {
 				match := pat.regex.FindString(target.content)
 				a.bus.EmitDetection(Detection{
@@ -672,7 +743,12 @@ func (a *HTTPAnalyzer) analyzeResponse(connID, srcIP string, srcPort, dstPort ui
 		}
 	}
 
-	if len(missing) > 0 && statusCode >= 200 && statusCode < 400 {
+	// Emit missing security headers alert ONLY for HTML responses.
+	// Static assets (JS, CSS, images, fonts) do not need CSP/HSTS/etc.
+	// Alerting on every static file response causes severe noise with no security value.
+	contentType := headers["content-type"]
+	isHTMLResponse := strings.Contains(contentType, "text/html") || contentType == ""
+	if len(missing) > 0 && statusCode >= 200 && statusCode < 400 && isHTMLResponse {
 		a.bus.EmitDetection(Detection{
 			ID:         "HTTP-HDR-001",
 			Timestamp:  time.Now(),
@@ -811,7 +887,16 @@ func (a *HTTPAnalyzer) detectSmuggling(connID, srcIP string, srcPort, dstPort ui
 	hasCL := headers["content-length"] != ""
 	hasTE := headers["transfer-encoding"] != ""
 
-	if hasCL && hasTE {
+	// HTTP/1.1 chunked POST requests legitimately carry both Content-Length and
+	// Transfer-Encoding: chunked. A smuggling attempt requires both headers to be
+	// present AND Transfer-Encoding to be something other than plain "chunked"
+	// (e.g. "chunked, identity" or a malformed value), OR both to conflict.
+	// Only flag when Transfer-Encoding is NOT a simple "chunked" value, which
+	// reduces false-positives on normal multipart/POST browser traffic.
+	teValue := strings.ToLower(strings.TrimSpace(headers["transfer-encoding"]))
+	isSuspiciousTE := hasTE && teValue != "chunked"
+
+	if hasCL && hasTE && isSuspiciousTE {
 		a.bus.EmitDetection(Detection{
 			ID:         "HTTP-SMUG-003",
 			Timestamp:  time.Now(),
@@ -841,7 +926,11 @@ func (a *HTTPAnalyzer) detectInfoLeakage(connID, srcIP string, srcPort, dstPort 
 		{"HTTP-LEAK-001", regexp.MustCompile(`(?i)(stack\s*trace|traceback|at\s+\w+\.\w+\()`), "Stack trace in response"},
 		{"HTTP-LEAK-002", regexp.MustCompile(`(?i)(sql\s*error|mysql_error|pg_error|ora-\d{5}|sqlstate)`), "Database error exposed"},
 		{"HTTP-LEAK-003", regexp.MustCompile(`(?i)(\/home\/\w+|\/var\/www|C:\\\\(Users|Windows)|\/usr\/local)`), "Internal path disclosed"},
-		{"HTTP-LEAK-004", regexp.MustCompile(`(10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)`), "Internal IP address leaked"},
+		// HTTP-LEAK-004: Scope to longer surrounding context to avoid matching IPs
+		// that appear naturally in product URLs, image paths, or API responses.
+		// Require the IP to appear in a context that suggests leakage (e.g. error
+		// messages, config dumps) not just a URL path.
+		{"HTTP-LEAK-004", regexp.MustCompile(`(?i)(server|host|from|error|internal|backend|addr|address|origin)[\s=:"']+(?:https?://|//)?(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)`), "Internal IP address leaked in response context"},
 		{"HTTP-LEAK-005", regexp.MustCompile(`(?i)(phpinfo|server\s*info|debug\s*mode|development\s*mode)`), "Debug/development info exposed"},
 	}
 

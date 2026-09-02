@@ -50,8 +50,9 @@ type ipTracker struct {
 	connectionIntervals []time.Duration // Time between connections
 
 	// Last activity
-	lastSeen  time.Time
-	firstSeen time.Time
+	lastSeen      time.Time
+	firstSeen     time.Time
+	lastRateAlert time.Time
 }
 
 // NewBehavioralEngine creates a behavioral detection engine.
@@ -127,20 +128,23 @@ func (b *BehavioralEngine) TrackConnection(srcIP string, dstPort uint16) {
 	// ── Connection rate check ──
 	recentCount := len(tracker.connections)
 	if recentCount > b.connPerMinThreshold {
-		b.bus.EmitDetection(Detection{
-			ID:        "BEH-RATE-001",
-			Timestamp: now,
-			Severity:  SevHigh,
-			Category:  CatDDoS,
-			Protocol:  "TCP",
-			SourceIP:  srcIP,
-			DestPort:  dstPort,
-			Summary:   fmt.Sprintf("High connection rate: %d connections in 5 minutes from %s", recentCount, srcIP),
-			Details: map[string]any{
-				"connections_5min": recentCount,
-				"threshold":        b.connPerMinThreshold,
-			},
-		})
+		if now.Sub(tracker.lastRateAlert) > 1*time.Minute {
+			b.bus.EmitDetection(Detection{
+				ID:        "BEH-RATE-001",
+				Timestamp: now,
+				Severity:  SevHigh,
+				Category:  CatDDoS,
+				Protocol:  "TCP",
+				SourceIP:  srcIP,
+				DestPort:  dstPort,
+				Summary:   fmt.Sprintf("High connection rate: %d connections in 5 minutes from %s", recentCount, srcIP),
+				Details: map[string]any{
+					"connections_5min": recentCount,
+					"threshold":        b.connPerMinThreshold,
+				},
+			})
+			tracker.lastRateAlert = now
+		}
 	}
 
 	// ── Port scan detection ──
