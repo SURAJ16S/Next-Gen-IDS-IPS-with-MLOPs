@@ -34,6 +34,11 @@ import (
 	"ngfw-monitor/proxy"
 )
 
+var (
+	globalStreamer       *TelemetryStreamer
+	globalStreamInterval time.Duration
+)
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants & Styles
 // ──────────────────────────────────────────────────────────────────────────────
@@ -370,7 +375,7 @@ func promptPort(label string) uint16 {
 // conflicts with the user's real service.
 func findFreePort(base uint16) uint16 {
 	for port := base; port <= 65534; port++ {
-		// Browsers block port 10080 (Amanda) to prevent NAT slipstreaming, 
+		// Browsers block port 10080 (Amanda) to prevent NAT slipstreaming,
 		// and most ports under 1024. Skip them so we don't break web access.
 		if port == 10080 || (port < 1024 && port != 80 && port != 443) {
 			continue
@@ -426,13 +431,11 @@ func promptAppPort() (backendPort, proxyPort uint16) {
 	return backendPort, proxyPort
 }
 
-
-
 // managePort prompts for a port, checks if it's in use, and offers to kill it.
 func managePort() {
 	clearScreen()
 	fmt.Println(bannerStyle.Render("\n  ── Port Management ──\n"))
-	
+
 	port := promptPort("Enter port to check/manage")
 	fmt.Println()
 
@@ -448,7 +451,7 @@ func managePort() {
 	// Port is in use
 	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF1744")).Bold(true)
 	fmt.Println(errorStyle.Render(fmt.Sprintf("  ✗ Port %d is IN USE.", port)))
-	
+
 	// Show what is using it if possible using ss
 	cmd := exec.Command("ss", "-lptn", fmt.Sprintf("sport = :%d", port))
 	out, _ := cmd.CombinedOutput()
@@ -517,6 +520,13 @@ func initProxyEngineWithPort(configPath string, listenPort, backendPort uint16, 
 		bus.Subscribe(tuiSub)
 	}
 
+	nodeCfg, _ := LoadNodeConfig()
+	if nodeCfg != nil && globalStreamInterval > 0 {
+		globalStreamer = NewTelemetryStreamer(nodeCfg, stats, globalStreamInterval)
+		bus.Subscribe(globalStreamer)
+		globalStreamer.Start()
+	}
+
 	engine := proxy.NewProxyEngine(cfg, bus, stats)
 	if err := engine.Start(); err != nil {
 		return nil, nil, fmt.Errorf("failed to start proxy engine: %w", err)
@@ -550,7 +560,7 @@ func runInteractiveMenu() {
 			fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ Attaching eBPF hooks to %s on port %d...", ifaceName, backendPort)))
 			fmt.Println(dimStyle.Render(fmt.Sprintf("  ● Your app is still accessible at http://localhost:%d", backendPort)))
 			fmt.Println()
-			runEBPFMonitor(backendPort, ifaceName, nil, nil)
+			runEBPFMonitor(backendPort, ifaceName, nil, nil, nil)
 
 		case 2: // Proxy only
 			clearScreen()
@@ -606,7 +616,7 @@ func runInteractiveMenu() {
 			// Create a TUI subscriber placeholder; the TUI program pointer is
 			// injected by runEBPFMonitor after the program starts.
 			tuiAlertSub := &TUISubscriber{}
-			_, proxyStats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service, tuiAlertSub)
+			engine, proxyStats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service, tuiAlertSub)
 			if err != nil {
 				fmt.Println(errorStyle.Render("  ✗ Proxy initialization failed: " + err.Error()))
 				fmt.Println(statLabelStyle.Render("  Press Enter to return to menu..."))
@@ -614,7 +624,7 @@ func runInteractiveMenu() {
 				continue
 			}
 			// eBPF monitors the proxy listen port — same port clients connect to
-			runEBPFMonitor(proxyPort, ifaceName, proxyStats, tuiAlertSub)
+			runEBPFMonitor(proxyPort, ifaceName, proxyStats, tuiAlertSub, engine)
 
 		case 4: // Port Management
 			managePort()
@@ -757,7 +767,7 @@ func payloadSize(rec packetRecord) uint16 {
 
 // runEBPFMonitor starts the eBPF traffic monitoring session on the given port
 // and interface, optionally integrated with a running proxy detection engine.
-func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.StatsCollector, tuiAlertSub *TUISubscriber) {
+func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.StatsCollector, tuiAlertSub *TUISubscriber, engine *proxy.ProxyEngine) {
 	// ── Detect service running on the target port ──
 	fmt.Printf("\n  %s Detecting service on port %d...\n", statLabelStyle.Render("🔍"), targetPort)
 	svcInfo := detectService(targetPort)
@@ -871,7 +881,7 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 	fmt.Printf("  %s Flow aggregation active → logs/flow_stats.jsonl\n", ingressStyle.Render("✓"))
 
 	// ── Build TUI model and program ──
-	tuiM := newTuiModel(targetPort, ifaceName, svcInfo, proxyStats, flog)
+	tuiM := newTuiModel(targetPort, ifaceName, svcInfo, proxyStats, flog, engine)
 	p := tea.NewProgram(tuiM, tea.WithAltScreen())
 	// Wire the program pointer into the alert subscriber so proxy detections
 	// flow into the TUI immediately (non-nil only in Integrated Mode)
@@ -885,6 +895,9 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 	go func() {
 		<-sig
 		flowTracker.FlushAll()
+		if globalStreamer != nil {
+			globalStreamer.Stop()
+		}
 		p.Quit()
 	}()
 
@@ -1000,14 +1013,16 @@ func main() {
 	proxyFlag := flag.Bool("proxy", false, "Run in reverse proxy mode with detection engine")
 	configFlag := flag.String("config", "proxy_config.yaml", "Path to proxy configuration file")
 	setupFlag := flag.Bool("setup", false, "Run the node pairing setup wizard")
+	streamIntervalFlag := flag.Duration("stream-interval", 5*time.Second, "Telemetry batch interval for dashboard streaming")
 	flag.Parse()
+
+	globalStreamInterval = *streamIntervalFlag
 
 	if *setupFlag {
 		RunSetupWizard()
 		return
 	}
 
-	RunStreamer()
 	RunCommander()
 
 	// Detect if any meaningful flags were provided; if not, use the interactive menu.
@@ -1036,7 +1051,7 @@ func main() {
 		if ifaceName == "" {
 			ifaceName = "eth0" // sensible default when using flags
 		}
-		runEBPFMonitor(uint16(*portFlag), ifaceName, proxyStats, nil)
+		runEBPFMonitor(uint16(*portFlag), ifaceName, proxyStats, nil, nil)
 	} else if *proxyFlag {
 		// Proxy-only (no port flag)
 		runStandaloneProxy(proxyStats)
@@ -1073,6 +1088,13 @@ func initProxyEngine(configPath string) (*proxy.ProxyEngine, *detect.StatsCollec
 	bus.Subscribe(stats)
 	bus.Subscribe(&ConsoleLogger{})
 
+	nodeCfg, _ := LoadNodeConfig()
+	if nodeCfg != nil && globalStreamInterval > 0 {
+		globalStreamer = NewTelemetryStreamer(nodeCfg, stats, globalStreamInterval)
+		bus.Subscribe(globalStreamer)
+		globalStreamer.Start()
+	}
+
 	engine := proxy.NewProxyEngine(cfg, bus, stats)
 	if err := engine.Start(); err != nil {
 		return nil, nil, fmt.Errorf("failed to start proxy engine: %w", err)
@@ -1105,7 +1127,7 @@ func (c *ConsoleLogger) OnConnectionClose(conn detect.ConnectionRecord) {}
 func runStandaloneProxy(stats *detect.StatsCollector) {
 	// Proxy-only mode: launch TUI with no eBPF port / iface info.
 	// Alerts and Metrics tabs are active; Packets tab shows empty state.
-	tuiM := newTuiModel(0, "", ServiceInfo{}, stats, nil)
+	tuiM := newTuiModel(0, "", ServiceInfo{}, stats, nil, nil)
 	tuiM.activeTab = 1 // default to Alerts
 	p := tea.NewProgram(tuiM, tea.WithAltScreen())
 
@@ -1113,6 +1135,9 @@ func runStandaloneProxy(stats *detect.StatsCollector) {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sig
+		if globalStreamer != nil {
+			globalStreamer.Stop()
+		}
 		p.Quit()
 	}()
 

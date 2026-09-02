@@ -100,6 +100,21 @@ func (tl *TCPListener) handleConnection(ctx context.Context, clientConn net.Conn
 		CloseReason:     "normal",
 	}
 
+	// Create a per-connection context so we can cancel this one connection
+	// without affecting all others (the parent ctx is the engine-wide context).
+	connCanCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel() // Always cancel to release resources
+
+	// Register with engine for TUI visibility and operator kill
+	ac := &ActiveConn{
+		ConnID:     connCtx.ConnID,
+		ClientConn: clientConn,
+		Cancel:     connCancel,
+		Ctx:        connCtx,
+	}
+	tl.engine.RegisterConn(ac)
+	defer tl.engine.UnregisterConn(connCtx.ConnID)
+
 	// ── Tier-2: Redis reputation fast-path check ──────────────────────────────
 	// Runs before any packet reading or Tier-1 regex work. Fail-open: if
 	// repClient is nil or Redis is unavailable, we let the connection through.
@@ -153,8 +168,16 @@ func (tl *TCPListener) handleConnection(ctx context.Context, clientConn net.Conn
 	}
 	initialData := initialBuf[:n]
 
-	// Protocol detection on initial bytes
-	fp := tl.engine.protoDetector.Detect(initialData, connCtx.ListenPort, connCtx.ExpectedService)
+	// Protocol detection on initial bytes — pass client context so the emitted
+	// PROTO-DETECT-001 / PROTO-MISMATCH-001 events carry the full source info.
+	fp := tl.engine.protoDetector.Detect(
+		initialData,
+		connCtx.ListenPort,
+		connCtx.ExpectedService,
+		connCtx.ClientIP.String(),
+		connCtx.ClientPort,
+		connCtx.ConnID,
+	)
 	connCtx.DetectedProtocol = fp.Protocol
 	connCtx.ProtoConfidence = fp.Confidence
 	connCtx.ProtoMismatch = fp.Mismatch
@@ -219,7 +242,7 @@ func (tl *TCPListener) handleConnection(ctx context.Context, clientConn net.Conn
 	// Bidirectional forwarding with analysis tee
 	forwarder := NewForwarder(connCtx, tl.engine.analyzers,
 		tl.engine.config.Detection.MaxPayloadInspect)
-	forwarder.Forward(ctx, clientConn, backendConn)
+	forwarder.Forward(connCanCtx, clientConn, backendConn)
 
 	// Connection complete — emit close record
 	tl.emitClose(connCtx)
@@ -325,8 +348,15 @@ func (ul *UDPListener) Serve(ctx context.Context) {
 			StartTime:       time.Now(),
 		}
 
-		// Protocol detection
-		fp := ul.engine.protoDetector.Detect(data, ul.config.ListenPort, ul.config.Service)
+		// Protocol detection — pass client context for full attribution
+		fp := ul.engine.protoDetector.Detect(
+			data,
+			ul.config.ListenPort,
+			ul.config.Service,
+			clientAddr.IP.String(),
+			uint16(clientAddr.Port),
+			connCtx.ConnID,
+		)
 		connCtx.DetectedProtocol = fp.Protocol
 		connCtx.ProtoConfidence = fp.Confidence
 		connCtx.ProtoMismatch = fp.Mismatch

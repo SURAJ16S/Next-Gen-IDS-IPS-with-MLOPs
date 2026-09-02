@@ -133,8 +133,8 @@ func TestTelnetTCP_Coalesced(t *testing.T) {
 func TestTelnetNVT_IACFragmented(t *testing.T) {
 	a, sub := newTelnetTest()
 	// Split IAC command across two reads
-	a.Analyze("c4", "10.0.0.1", 54321, 23, []byte{telnetIAC}, false)         // partial: just IAC
-	a.Analyze("c4", "10.0.0.1", 54321, 23, []byte{telnetWILL, 0x01}, false)  // WILL ECHO
+	a.Analyze("c4", "10.0.0.1", 54321, 23, []byte{telnetIAC}, false)        // partial: just IAC
+	a.Analyze("c4", "10.0.0.1", 54321, 23, []byte{telnetWILL, 0x01}, false) // WILL ECHO
 	// Then send login prompt — should still be processed as plaintext
 	a.Analyze("c4", "10.0.0.1", 54321, 23, []byte("login: "), false)
 	a.Analyze("c4", "10.0.0.1", 54321, 23, []byte("root\r\n"), true)
@@ -754,18 +754,18 @@ func TestTelnetTrack2_Config(t *testing.T) {
 func TestTelnetTrack2_OversizedCommand(t *testing.T) {
 	a, sub := newTelnetTest()
 	authFlow(a, "cmd8", "10.0.0.1", "admin", "admin")
-	
+
 	// Send 5000 'a' characters followed by \r\n
 	bigCmd := strings.Repeat("a", 5000)
 	a.Analyze("cmd8", "10.0.0.1", 54321, 23, []byte(bigCmd+"\r\n"), true)
 	time.Sleep(5 * time.Millisecond)
-	
+
 	// Should not crash, and should not trigger rules (it's junk)
 	a.mu.Lock()
 	sess := a.sessions["cmd8"]
 	bufLen := len(sess.cmdBuf)
 	a.mu.Unlock()
-	
+
 	if bufLen > 4096 {
 		t.Fatalf("Expected cmdBuf to be bounded (<= 4096), but got %d", bufLen)
 	}

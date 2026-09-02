@@ -125,7 +125,6 @@ func (l *JSONLLogger) OnDetection(d Detection) {
 	proto = strings.ReplaceAll(proto, "\\", "_")
 	proto = strings.ReplaceAll(proto, " ", "_")
 
-
 	protoFile, exists := l.protocolFiles[proto]
 	if !exists {
 		fileName := fmt.Sprintf("%s_%s.jsonl", proto, l.sessionTimestamp)

@@ -114,7 +114,7 @@ func LoadNodeConfig() (*NodeConfig, error) {
 func RunSetupWizard() {
 	fmt.Println(bannerStyle.Render("  NGFW Agent Setup Wizard  "))
 	fmt.Println()
-	
+
 	if _, err := LoadNodeConfig(); err == nil {
 		fmt.Println("  " + ingressStyle.Render("✓") + " Node is already paired. Run without --setup to start monitoring.")
 		return
@@ -143,7 +143,7 @@ func RunSetupWizard() {
 	payload := map[string]string{
 		"enrollmentToken": enrollmentToken,
 		"hostname":        hostname,
-		"ipAddress":       getOutboundIP(), 
+		"ipAddress":       getOutboundIP(),
 		"osVersion":       runtime.GOOS + " " + runtime.GOARCH,
 	}
 	jsonData, _ := json.Marshal(payload)
@@ -176,12 +176,12 @@ func RunSetupWizard() {
 		NodeSecretKey: regResult.NodeSecretKey,
 		DashboardURL:  dashboardURL,
 	}
-	
+
 	if err := SaveNodeConfig(cfg); err != nil {
 		fmt.Printf("\n  "+egressStyle.Render("✗")+" Failed to save node config: %v\n", err)
 		return
 	}
-	
+
 	fmt.Println("\n  " + ingressStyle.Render("✓") + " Node Paired Successfully!")
 	fmt.Println("  Credentials saved securely to encrypted configuration.")
 }

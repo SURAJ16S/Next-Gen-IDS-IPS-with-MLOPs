@@ -24,11 +24,16 @@ type ftpSub struct {
 	detections []Detection
 }
 
-func (s *ftpSub) OnDetection(d Detection)          { s.mu.Lock(); s.detections = append(s.detections, d); s.mu.Unlock() }
+func (s *ftpSub) OnDetection(d Detection) {
+	s.mu.Lock()
+	s.detections = append(s.detections, d)
+	s.mu.Unlock()
+}
 func (s *ftpSub) OnConnectionClose(_ ConnectionRecord) {}
 
 func (s *ftpSub) has(id string) bool {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, d := range s.detections {
 		if d.ID == id {
 			return true
@@ -38,7 +43,8 @@ func (s *ftpSub) has(id string) bool {
 }
 
 func (s *ftpSub) count(id string) int {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := 0
 	for _, d := range s.detections {
 		if d.ID == id {
@@ -78,9 +84,9 @@ func TestFTP_FragmentedCommand(t *testing.T) {
 
 	// Split "USER admin\r\n" across 3 TCP reads
 	full := []byte("USER admin\r\n")
-	a.Analyze(cid, "1.2.3.4", "10.0.0.2", 12345, 21, full[:4], true)   // "USER"
-	a.Analyze(cid, "1.2.3.4", "10.0.0.2", 12345, 21, full[4:9], true)  // " admi"
-	a.Analyze(cid, "1.2.3.4", "10.0.0.2", 12345, 21, full[9:], true)   // "n\r\n"
+	a.Analyze(cid, "1.2.3.4", "10.0.0.2", 12345, 21, full[:4], true)  // "USER"
+	a.Analyze(cid, "1.2.3.4", "10.0.0.2", 12345, 21, full[4:9], true) // " admi"
+	a.Analyze(cid, "1.2.3.4", "10.0.0.2", 12345, 21, full[9:], true)  // "n\r\n"
 
 	if !sub.has("FTP-USER-001") {
 		t.Error("Fragmented USER command not detected")

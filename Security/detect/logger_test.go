@@ -52,7 +52,7 @@ func verifyProtocolLog(t *testing.T, logDir, timestamp, proto string, expectedCo
 	if len(lines) != expectedCount {
 		t.Errorf("Expected %d lines in %s, got %d", expectedCount, filename, len(lines))
 	}
-	
+
 	if expectedCount > 0 {
 		var d Detection
 		if err := json.Unmarshal([]byte(lines[0]), &d); err != nil {
@@ -72,21 +72,21 @@ func TestJSONLLogger_Rotation(t *testing.T) {
 		t.Fatalf("Failed to create logger: %v", err)
 	}
 	logger.maxFileSize = 10 // Very small to trigger rotation
-	
 
 	d1 := Detection{Protocol: "FTP", Summary: "Very long summary to trigger rotation"}
 	logger.OnDetection(d1) // Writes to ftp_<originalTimestamp>.jsonl
-	
+
 	// Should have rotated
-	time.Sleep(1 * time.Second); logger.OnDetection(d1)
+	time.Sleep(1 * time.Second)
+	logger.OnDetection(d1)
 	logger.Close()
-	
+
 	// Check directory for multiple FTP files
 	entries, err := os.ReadDir(filepath.Join(tempDir, "protocols"))
 	if err != nil {
 		t.Fatalf("Failed to read protocols dir: %v", err)
 	}
-	
+
 	ftpFilesCount := 0
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), "ftp_") {

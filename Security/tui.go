@@ -1,15 +1,15 @@
 // tui.go — Interactive TUI dashboard for NGFW Monitor
 // Implements a Bubble Tea tea.Model with three tabs:
-//   [1] Packets  — live eBPF packet feed (deduped for loopback)
-//   [2] Alerts   — ML / proxy detection events (INFO filtered by default)
-//   [3] Metrics  — uptime, rates, severity counts, ASCII bar chart
+//   [1] eBPF Telemetry      — live eBPF packet feed (deduped for loopback)
+//   [2] L7 Detections       — ML / proxy detection events (INFO filtered by default)
+//   [3] Protocol Utilisation — per-protocol traffic volume, detection breakdown, top talkers
 //
 // Hotkeys:
-//   1 / 2 / 3      switch tabs
+//   1 / 2 / 3           switch tabs
 //   ↑ / ↓ / pgup / pgdn  scroll active pane
-//   p              pause / resume live scroll
-//   f              toggle: hide/show INFO events in Alerts tab
-//   q / ctrl+c     graceful shutdown
+//   p                   pause / resume live scroll
+//   f                   toggle: hide/show INFO events in L7 Detections tab
+//   q / ctrl+c          graceful shutdown
 
 package main
 
@@ -26,20 +26,29 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"ngfw-monitor/detect"
+	"ngfw-monitor/proxy"
 )
 
 // ── ring-buffer sizes ──────────────────────────────────────────────────────────
 
 const (
-	maxTUIPackets = 200
-	maxTUIAlerts  = 500
+	maxTUIPackets    = 200
+	maxTUIDetections = 500
 )
 
 // ── message types sent into the TUI event loop ────────────────────────────────
 
-type packetMsg packetRecord     // from eBPF ring-buffer goroutine
-type alertMsg  detect.Detection // from DetectionBus subscriber
-type tickMsg   time.Time        // periodic metrics refresh
+type packetMsg packetRecord
+
+// detectionMsg is sent by the detection bus to the UI.
+type detectionMsg detect.Detection
+
+// killResultMsg is sent after attempting to kill a connection.
+type killResultMsg struct {
+	ip     string
+	killed bool
+} // from DetectionBus subscriber
+type tickMsg time.Time             // periodic metrics refresh
 
 // ── TUI severity colour palette ───────────────────────────────────────────────
 
@@ -89,6 +98,43 @@ func tuiSevStyle(s detect.Severity) lipgloss.Style {
 		return tuiInfo
 	}
 }
+
+// tuiActorStyle highlights the connecting IP address — the actor that triggered
+// a detection. Bright yellow makes it immediately distinguishable from other
+// fields in a busy log feed.
+var tuiActor = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD600")).Bold(true)
+
+func tuiProtoBadge(proto string) string {
+	if proto == "" {
+		return tuiDim.Render("[—  ]")
+	}
+	// Pad to 6 chars so badge widths are consistent in the table
+	padded := proto
+	if len(padded) < 6 {
+		padded = padded + spaces(6-len(padded))
+	}
+	switch detect.Protocol(proto) {
+	case detect.ProtocolHTTP:
+		return tuiCyan.Render("[" + padded + "]")
+	case detect.ProtocolTLS:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#E040FB")).Bold(true).Render("[" + padded + "]")
+	case detect.ProtocolSSH:
+		return tuiGreen.Render("[" + padded + "]")
+	case detect.ProtocolFTP, detect.ProtocolFTPS:
+		return tuiOrange.Render("[" + padded + "]")
+	case detect.ProtocolDNS:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6D00")).Bold(true).Render("[" + padded + "]")
+	case detect.ProtocolSMTP:
+		return tuiLow.Render("[" + padded + "]")
+	case detect.ProtocolTelnet:
+		return tuiCrit.Render("[" + padded + "]")
+	default:
+		return tuiDim.Render("[" + padded + "]")
+	}
+}
+
+// spaces returns n space characters (helper for fixed-width badge padding).
+func spaces(n int) string { return strings.Repeat(" ", n) }
 
 // ── tuiStats — heap-allocated so atomic fields survive model copies ────────────
 // IMPORTANT: atomic.Int64 must NOT be copied after first use.
@@ -155,7 +201,7 @@ func (t *TUISubscriber) OnDetection(d detect.Detection) {
 	p := t.program
 	t.mu.Unlock()
 	if p != nil {
-		p.Send(alertMsg(d))
+		p.Send(detectionMsg(d))
 	}
 }
 
@@ -170,14 +216,14 @@ type tuiModel struct {
 	filterInfo bool // hide INFO-severity events in Alerts tab
 
 	// data rings
-	mu      sync.Mutex
-	packets []packetRecord
-	alerts  []detect.Detection
+	mu         sync.Mutex
+	packets    []packetRecord
+	detections []detect.Detection
 
 	// sub-components
-	pktsTable table.Model
-	alertsVP  viewport.Model
-	metricsVP viewport.Model
+	pktsTable    table.Model
+	detectionsVP viewport.Model
+	metricsVP    viewport.Model
 
 	// stats — pointer so atomic fields survive value copies in Bubble Tea
 	stats      *tuiStats
@@ -195,10 +241,24 @@ type tuiModel struct {
 
 	// file logger (shared with eBPF goroutine)
 	flog *fileLogger
+
+	// connections tab state
+	engine          *proxy.ProxyEngine
+	conns           []proxy.ConnSnapshot
+	connSelected    int
+	connKillPending bool
+	connKillID      string
+	connStatusMsg   string
+
+	// deduplication and redis isolation
+	dedupWindow     time.Duration
+	dedupSeen       map[string]time.Time
+	redisDetections []detect.Detection
+	redisVP         viewport.Model
 }
 
 // newTuiModel constructs the model for Integrated or eBPF-only modes.
-func newTuiModel(port uint16, iface string, svc ServiceInfo, pStats *detect.StatsCollector, flog *fileLogger) tuiModel {
+func newTuiModel(port uint16, iface string, svc ServiceInfo, pStats *detect.StatsCollector, flog *fileLogger, engine *proxy.ProxyEngine) tuiModel {
 	// Packets table columns
 	cols := []table.Column{
 		{Title: "Dir", Width: 9},
@@ -228,22 +288,28 @@ func newTuiModel(port uint16, iface string, svc ServiceInfo, pStats *detect.Stat
 	t.SetStyles(ts)
 
 	return tuiModel{
-		activeTab:  1,    // default to Alerts tab — most useful at a glance
-		filterInfo: true, // filter INFO noise by default; press f to toggle
-		packets:    make([]packetRecord, 0, maxTUIPackets),
-		alerts:     make([]detect.Detection, 0, maxTUIAlerts),
-		pktsTable:  t,
-		alertsVP:   viewport.New(80, 20),
-		metricsVP:  viewport.New(80, 20),
-		stats:      &tuiStats{}, // heap-allocated — safe across model copies
-		proxyStats: pStats,
-		startTime:  time.Now(),
-		port:       port,
-		iface:      iface,
-		svcInfo:    svc,
-		flog:       flog,
-		width:      120,
-		height:     40,
+		activeTab:    1,    // default to Alerts tab — most useful at a glance
+		filterInfo:   true, // filter INFO noise by default; press f to toggle
+		packets:      make([]packetRecord, 0, maxTUIPackets),
+		detections:   make([]detect.Detection, 0, maxTUIDetections),
+		pktsTable:    t,
+		detectionsVP: viewport.New(80, 20),
+		metricsVP:    viewport.New(80, 20),
+		stats:        &tuiStats{}, // heap-allocated — safe across model copies
+		proxyStats:   pStats,
+		startTime:    time.Now(),
+		port:         port,
+		iface:        iface,
+		svcInfo:      svc,
+		flog:         flog,
+		width:           120,
+		height:          40,
+		engine:          engine,
+		conns:           make([]proxy.ConnSnapshot, 0),
+		dedupWindow:     60 * time.Second,
+		dedupSeen:       make(map[string]time.Time),
+		redisDetections: make([]detect.Detection, 0, maxTUIDetections),
+		redisVP:         viewport.New(80, 20),
 	}
 }
 
@@ -267,7 +333,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// The UI outside of the data areas uses about 10 lines of vertical space 
+		// The UI outside of the data areas uses about 10 lines of vertical space
 		// (headers, tabs, separators, borders, footers).
 		tableHeight := m.height - 10
 		if tableHeight < 2 {
@@ -279,10 +345,12 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if vpHeight < 2 {
 			vpHeight = 2
 		}
-		m.alertsVP.Width = m.width - 4
-		m.alertsVP.Height = vpHeight
+		m.detectionsVP.Width = m.width - 4
+		m.detectionsVP.Height = vpHeight
 		m.metricsVP.Width = m.width - 4
 		m.metricsVP.Height = vpHeight
+		m.redisVP.Width = m.width - 4
+		m.redisVP.Height = vpHeight
 		return m, nil
 
 	// ── keyboard ──
@@ -296,11 +364,57 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = 1
 		case "3":
 			m.activeTab = 2
+		case "4":
+			m.activeTab = 3
+		case "5":
+			if m.engine != nil {
+				m.activeTab = 4
+			}
 		case "p":
 			m.paused = !m.paused
 		case "f":
 			m.filterInfo = !m.filterInfo
-			m.rebuildAlertsVP()
+			m.rebuildDetectionsVP()
+		case "up", "k":
+			if m.activeTab == 4 && len(m.conns) > 0 {
+				m.connSelected--
+				if m.connSelected < 0 {
+					m.connSelected = 0
+				}
+				m.connKillPending = false
+				m.connStatusMsg = ""
+			}
+		case "down", "j":
+			if m.activeTab == 4 && len(m.conns) > 0 {
+				m.connSelected++
+				if m.connSelected >= len(m.conns) {
+					m.connSelected = len(m.conns) - 1
+				}
+				m.connKillPending = false
+				m.connStatusMsg = ""
+			}
+		case "x":
+			if m.activeTab == 4 && m.engine != nil && len(m.conns) > 0 && m.connSelected < len(m.conns) {
+				selectedID := m.conns[m.connSelected].ConnID
+				if m.connKillPending && m.connKillID == selectedID {
+					// Confirm kill — do this async so we don't block the UI thread,
+					// which causes a deadlock if EmitDetection tries to send back to the UI.
+					ip := m.conns[m.connSelected].ClientIP
+					m.connKillPending = false
+					m.connKillID = ""
+					m.connStatusMsg = fmt.Sprintf("Killing connection %s...", ip)
+					engine := m.engine // capture for goroutine
+					return m, func() tea.Msg {
+						killed := engine.KillConnection(selectedID)
+						return killResultMsg{ip: ip, killed: killed}
+					}
+				} else {
+					// First press
+					m.connKillPending = true
+					m.connKillID = selectedID
+					m.connStatusMsg = "Press x again to confirm kill"
+				}
+			}
 		}
 
 		// Delegate scroll / cursor keys to the active pane
@@ -309,9 +423,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case 0:
 			m.pktsTable, cmd = m.pktsTable.Update(msg)
 		case 1:
-			m.alertsVP, cmd = m.alertsVP.Update(msg)
+			m.detectionsVP, cmd = m.detectionsVP.Update(msg)
 		case 2:
 			m.metricsVP, cmd = m.metricsVP.Update(msg)
+		case 3:
+			m.redisVP, cmd = m.redisVP.Update(msg)
 		}
 		return m, cmd
 
@@ -333,28 +449,84 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	// ── new ML detection alert ──
-	case alertMsg:
+	case detectionMsg:
 		d := detect.Detection(msg)
 		m.stats.addAlert(d.Severity) // safe: pointer receiver, atomic ops
 		if !m.paused {
-			// Skip INFO events when filter is on — don't even store them
-			if !(m.filterInfo && d.Severity == detect.SevInfo) {
-				m.mu.Lock()
-				m.alerts = append(m.alerts, d)
-				if len(m.alerts) > maxTUIAlerts {
-					m.alerts = m.alerts[len(m.alerts)-maxTUIAlerts:]
+			m.mu.Lock()
+			
+			// 1. Redis Isolation
+			if strings.EqualFold(d.Protocol, "redis") {
+				m.redisDetections = append(m.redisDetections, d)
+				if len(m.redisDetections) > maxTUIDetections {
+					m.redisDetections = m.redisDetections[len(m.redisDetections)-maxTUIDetections:]
 				}
 				m.mu.Unlock()
-				m.rebuildAlertsVP()
-				if m.activeTab == 1 {
-					m.alertsVP.GotoBottom()
+				m.rebuildRedisVP()
+				if m.activeTab == 3 {
+					m.redisVP.GotoBottom()
 				}
+				return m, nil
+			}
+
+			// 2. View-layer Deduplication (LOW / INFO only)
+			if d.Severity <= detect.SevLow {
+				key := fmt.Sprintf("%s:%s:%d", d.ID, d.SourceIP, d.DestPort)
+				now := time.Now()
+				if lastSeen, ok := m.dedupSeen[key]; ok {
+					if now.Sub(lastSeen) <= m.dedupWindow {
+						m.mu.Unlock()
+						return m, nil // Skip adding to display ring
+					}
+				}
+				m.dedupSeen[key] = now
+			}
+
+			// 3. Append to main detections ring
+			m.detections = append(m.detections, d)
+			if len(m.detections) > maxTUIDetections {
+				m.detections = m.detections[len(m.detections)-maxTUIDetections:]
+			}
+			m.mu.Unlock()
+			m.rebuildDetectionsVP()
+			if m.activeTab == 1 {
+				m.detectionsVP.GotoBottom()
 			}
 		}
 
+	// ── connection kill result ──
+	case killResultMsg:
+		if msg.killed {
+			m.connStatusMsg = fmt.Sprintf("Killed connection %s", msg.ip)
+		} else {
+			m.connStatusMsg = "[already closed]"
+		}
+		return m, nil
+
 	// ── periodic metrics refresh ──
 	case tickMsg:
+		m.mu.Lock()
+		now := time.Now()
+		for key, lastSeen := range m.dedupSeen {
+			if now.Sub(lastSeen) > m.dedupWindow {
+				delete(m.dedupSeen, key)
+			}
+		}
+		m.mu.Unlock()
+
 		m.rebuildMetricsVP()
+		if m.engine != nil {
+			m.conns = m.engine.GetActiveConnections()
+			if len(m.conns) == 0 {
+				m.connSelected = 0
+			} else if m.connSelected >= len(m.conns) {
+				m.connSelected = len(m.conns) - 1
+			}
+			// Clear status message after a few ticks (rudimentary timeout)
+			if m.connStatusMsg == "[already closed]" || strings.HasPrefix(m.connStatusMsg, "Killed") {
+				m.connStatusMsg = ""
+			}
+		}
 		return m, tickEvery(2 * time.Second)
 	}
 
@@ -374,9 +546,15 @@ func (m tuiModel) View() string {
 	case 0:
 		sb.WriteString(m.renderPacketsTab())
 	case 1:
-		sb.WriteString(m.renderAlertsTab())
+		sb.WriteString(m.renderDetectionsTab())
 	case 2:
 		sb.WriteString(m.renderMetricsTab())
+	case 3:
+		sb.WriteString(m.renderRedisTab())
+	case 4:
+		if m.engine != nil {
+			sb.WriteString(m.renderConnectionsTab())
+		}
 	}
 
 	sb.WriteString("\n")
@@ -436,12 +614,25 @@ func (m tuiModel) renderHeader() string {
 func (m tuiModel) renderTabBar() string {
 	// Build alert badge for Alerts tab label
 	highCrit := m.stats.highPlusCrit()
-	alertsLabel := "[2] Alerts"
+	alertsLabel := "[2] L7 Detections"
 	if highCrit > 0 {
-		alertsLabel = fmt.Sprintf("[2] Alerts %s", tuiAlertBadge.Render(fmt.Sprintf("(%d!)", highCrit)))
+		alertsLabel = fmt.Sprintf("[2] L7 Detections %s", tuiAlertBadge.Render(fmt.Sprintf("(%d!)", highCrit)))
 	}
 
-	tabs := []string{"[1] Packets", alertsLabel, "[3] Metrics"}
+	tabs := []string{"[1] eBPF Telemetry", alertsLabel, "[3] Protocol Utilisation"}
+	m.mu.Lock()
+	redisCount := len(m.redisDetections)
+	m.mu.Unlock()
+	
+	redisLabel := "[4] Redis Logs"
+	if redisCount > 0 {
+		redisLabel = fmt.Sprintf("[4] Redis Logs (%d)", redisCount)
+	}
+	tabs = append(tabs, redisLabel)
+
+	if m.engine != nil {
+		tabs = append(tabs, "[5] Connections")
+	}
 	var parts []string
 	for i, label := range tabs {
 		if i == m.activeTab {
@@ -468,9 +659,18 @@ func (m tuiModel) renderTabBar() string {
 // ── Footer ────────────────────────────────────────────────────────────────────
 
 func (m tuiModel) renderFooter() string {
-	hotkeys := tuiDim.Render("  1/2/3") + tuiWhite.Render(" tabs") +
-		tuiDim.Render("  ↑/↓") + tuiWhite.Render(" scroll") +
-		tuiDim.Render("  p") + tuiWhite.Render(" pause") +
+	tabsLegend := "  1/2/3/4"
+	if m.engine != nil {
+		tabsLegend = "  1/2/3/4/5"
+	}
+	hotkeys := tuiDim.Render(tabsLegend) + tuiWhite.Render(" tabs") +
+		tuiDim.Render("  ↑/↓") + tuiWhite.Render(" scroll")
+
+	if m.activeTab == 4 {
+		hotkeys += tuiDim.Render("  x") + tuiWhite.Render(" kill")
+	}
+
+	hotkeys += tuiDim.Render("  p") + tuiWhite.Render(" pause") +
 		tuiDim.Render("  f") + tuiWhite.Render(" toggle INFO") +
 		tuiDim.Render("  q") + tuiWhite.Render(" quit") +
 		tuiDim.Render("  │  log → output.txt  │  detections → logs/detections.jsonl")
@@ -528,10 +728,10 @@ func (m tuiModel) renderPacketsTab() string {
 
 // ── Alerts Tab ────────────────────────────────────────────────────────────────
 
-func (m *tuiModel) rebuildAlertsVP() {
+func (m *tuiModel) rebuildDetectionsVP() {
 	m.mu.Lock()
-	snap := make([]detect.Detection, len(m.alerts))
-	copy(snap, m.alerts)
+	snap := make([]detect.Detection, len(m.detections))
+	copy(snap, m.detections)
 	m.mu.Unlock()
 
 	var sb strings.Builder
@@ -551,21 +751,39 @@ func (m *tuiModel) rebuildAlertsVP() {
 	))
 	sb.WriteString(tuiDim.Render("  "+strings.Repeat("─", 80)) + "\n")
 
-	// Event rows
+	// Event rows — fixed-width columns so arrows align in a scan-friendly column
 	written := 0
 	for _, d := range snap {
+		if m.filterInfo && d.Severity == detect.SevInfo {
+			continue // Skip rendering INFO events if filter is active
+		}
+
 		sevStyle := tuiSevStyle(d.Severity)
 		ts := d.Timestamp.Format("15:04:05")
-		srcPort := ""
-		if d.SourcePort > 0 {
-			srcPort = fmt.Sprintf(":%d", d.SourcePort)
+
+		// ── Actor: source IP and port ──────────────────────────────────
+		actorIP := d.SourceIP
+		if actorIP == "" {
+			actorIP = "—"
 		}
-		line := fmt.Sprintf("  %s %s  %s  %s%s → :%d  %s\n",
+		actorPort := ""
+		if d.SourcePort > 0 {
+			actorPort = fmt.Sprintf(":%d", d.SourcePort)
+		}
+		// Pad actor field to 22 chars so the → arrow column stays aligned
+		actorRaw := actorIP + actorPort
+		if len(actorRaw) > 22 {
+			actorRaw = actorRaw[:22]
+		}
+		actorPadded := actorRaw + spaces(22-len(actorRaw))
+
+		line := fmt.Sprintf("  %s %s  %s  %-22s  %s  %s → :%d  %s\n",
 			sevStyle.Render(d.Severity.Emoji()+" "+fmt.Sprintf("%-8s", d.Severity.String())),
 			tuiDim.Render(ts),
+			tuiProtoBadge(d.Protocol),
 			tuiCyan.Render(fmt.Sprintf("%-22s", d.ID)),
-			tuiWhite.Render(d.SourceIP),
-			tuiDim.Render(srcPort),
+			tuiActor.Render(actorPadded),
+			tuiDim.Render("→"),
 			d.DestPort,
 			d.Summary,
 		)
@@ -582,11 +800,69 @@ func (m *tuiModel) rebuildAlertsVP() {
 		sb.WriteString("\n" + tuiDim.Render(fmt.Sprintf("  Run traffic through port %d to see alerts.", m.port)))
 	}
 
-	m.alertsVP.SetContent(sb.String())
+	m.detectionsVP.SetContent(sb.String())
 }
 
-func (m tuiModel) renderAlertsTab() string {
-	return m.alertsVP.View()
+func (m tuiModel) renderDetectionsTab() string {
+	return m.detectionsVP.View()
+}
+
+// ── Redis Tab ─────────────────────────────────────────────────────────────────
+
+func (m *tuiModel) rebuildRedisVP() {
+	m.mu.Lock()
+	snap := make([]detect.Detection, len(m.redisDetections))
+	copy(snap, m.redisDetections)
+	m.mu.Unlock()
+
+	var sb strings.Builder
+
+	sb.WriteString(tuiCyan.Render("  ● REDIS LOGS  (internal traffic — isolated from main alert feed)\n"))
+	sb.WriteString(tuiDim.Render("  "+strings.Repeat("─", 80)) + "\n")
+
+	written := 0
+	for _, d := range snap {
+		sevStyle := tuiSevStyle(d.Severity)
+		ts := d.Timestamp.Format("15:04:05")
+
+		actorIP := d.SourceIP
+		if actorIP == "" {
+			actorIP = "—"
+		}
+		actorPort := ""
+		if d.SourcePort > 0 {
+			actorPort = fmt.Sprintf(":%d", d.SourcePort)
+		}
+		actorRaw := actorIP + actorPort
+		if len(actorRaw) > 22 {
+			actorRaw = actorRaw[:22]
+		}
+		actorPadded := actorRaw + spaces(22-len(actorRaw))
+
+		line := fmt.Sprintf("  %s %s  %s  %-22s  %s  %s → :%d  %s\n",
+			sevStyle.Render(d.Severity.Emoji()+" "+fmt.Sprintf("%-8s", d.Severity.String())),
+			tuiDim.Render(ts),
+			tuiProtoBadge(d.Protocol),
+			tuiCyan.Render(fmt.Sprintf("%-22s", d.ID)),
+			tuiActor.Render(actorPadded),
+			tuiDim.Render("→"),
+			d.DestPort,
+			d.Summary,
+		)
+		sb.WriteString(line)
+		written++
+	}
+
+	if written == 0 {
+		sb.WriteString("\n" + tuiDim.Render("  No Redis detection events yet."))
+		sb.WriteString("\n" + tuiDim.Render(fmt.Sprintf("  Run traffic through port %d to see alerts.", m.port)))
+	}
+
+	m.redisVP.SetContent(sb.String())
+}
+
+func (m tuiModel) renderRedisTab() string {
+	return m.redisVP.View()
 }
 
 // ── Metrics Tab ───────────────────────────────────────────────────────────────
@@ -608,8 +884,87 @@ func (m *tuiModel) rebuildMetricsVP() {
 	var sb strings.Builder
 	sb.WriteString("\n")
 
-	// ── eBPF Traffic section ──
-	sb.WriteString(tuiCyan.Render("  ── eBPF Traffic Metrics ──") + "\n\n")
+	if m.proxyStats != nil {
+		// ── Protocol Traffic Volume (proxy connections) ──
+		sb.WriteString(tuiCyan.Render("  ── Protocol Traffic Volume (proxy connections) ──") + "\n\n")
+		sb.WriteString(fmt.Sprintf("  %-10s  %-12s  %-10s  %-10s\n",
+			tuiDim.Render("PROTOCOL"),
+			tuiDim.Render("CONNECTIONS"),
+			tuiDim.Render("BYTES IN"),
+			tuiDim.Render("BYTES OUT"),
+		))
+
+		connStats := m.proxyStats.ProtocolConnStats()
+		hasRows := false
+		for _, proto := range []string{"HTTP", "TLS", "SSH", "FTP", "DNS", "SMTP", "TELNET", "REDIS", "MYSQL", "POSTGRES", "UNKNOWN"} {
+			if stats, ok := connStats[proto]; ok && stats.Connections > 0 {
+				sb.WriteString(fmt.Sprintf("  %-10s  %-12s  %-10s  %-10s\n",
+					tuiWhite.Render(proto),
+					tuiWhite.Render(fmt.Sprintf("%d", stats.Connections)),
+					tuiGreen.Render(formatBytes(stats.BytesIn)),
+					tuiOrange.Render(formatBytes(stats.BytesOut)),
+				))
+				hasRows = true
+			}
+		}
+		if !hasRows {
+			sb.WriteString(tuiDim.Render("  No proxy connections yet.\n"))
+		}
+		sb.WriteString("\n")
+
+		// ── L7 Detection Breakdown by Protocol ──
+		sb.WriteString(tuiCyan.Render("  ── L7 Detection Breakdown by Protocol ──") + "\n\n")
+		sb.WriteString(fmt.Sprintf("  %-10s  %-8s\n",
+			tuiDim.Render("PROTOCOL"),
+			tuiDim.Render("TOTAL"),
+		))
+		detCounts := m.proxyStats.ProtocolCounts()
+		hasDetRows := false
+		for _, proto := range []string{"HTTP", "TLS", "SSH", "FTP", "DNS", "SMTP", "TELNET", "REDIS", "MYSQL", "POSTGRES", "UNKNOWN"} {
+			if count, ok := detCounts[proto]; ok && count > 0 {
+				sb.WriteString(fmt.Sprintf("  %-10s  %-8s\n",
+					tuiWhite.Render(proto),
+					tuiCrit.Render(fmt.Sprintf("%d", count)),
+				))
+				hasDetRows = true
+			}
+		}
+		if !hasDetRows {
+			sb.WriteString(tuiDim.Render("  No detections yet.\n"))
+		}
+		sb.WriteString("\n")
+
+		// ── Top Talkers (IPs with most detections) ──
+		sb.WriteString(tuiCyan.Render("  ── Top Talkers (by detection count) ──") + "\n\n")
+		sb.WriteString(fmt.Sprintf("  %-22s  %-8s\n",
+			tuiDim.Render("SOURCE IP"),
+			tuiDim.Render("DETECTIONS"),
+		))
+		talkers := m.proxyStats.TopTalkers(5)
+		if len(talkers) == 0 {
+			sb.WriteString(tuiDim.Render("  No active actors yet.\n"))
+		} else {
+			for i, t := range talkers {
+				ip := t.IP
+				if ip == "" {
+					continue
+				}
+				// First entry is the highest-count actor — highlight in yellow
+				ipStyle := tuiWhite
+				if i == 0 {
+					ipStyle = tuiActor
+				}
+				sb.WriteString(fmt.Sprintf("  %-22s  %-8s\n",
+					ipStyle.Render(fmt.Sprintf("%-22s", ip)),
+					tuiCrit.Render(fmt.Sprintf("%d", t.Detections)),
+				))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// ── eBPF Layer (kernel-level) ──
+	sb.WriteString(tuiCyan.Render("  ── eBPF Layer (kernel-level) ──") + "\n\n")
 	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Uptime:"), tuiWhite.Render(uptime.String())))
 	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Total Packets:"), tuiWhite.Render(fmt.Sprintf("%d", totalPkts))))
 	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("  ⬇ Incoming:"), tuiGreen.Render(fmt.Sprintf("%d", ingress))))
@@ -618,58 +973,71 @@ func (m *tuiModel) rebuildMetricsVP() {
 	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Packet Rate:"), tuiCyan.Render(fmt.Sprintf("%.1f pkt/s", pps))))
 	sb.WriteString("\n")
 
-	// ── Proxy / Detection section ──
-	if m.proxyStats != nil {
-		active := m.proxyStats.ActiveConnections()
-		total := m.proxyStats.TotalConnections()
-		dets := m.proxyStats.TotalDetections()
-		sevs := m.proxyStats.SeverityCounts()
-
-		sb.WriteString(tuiCyan.Render("  ── Proxy / Detection Metrics ──") + "\n\n")
-		sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Active Conns:"), tuiWhite.Render(fmt.Sprintf("%d", active))))
-		sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Total Conns:"), tuiWhite.Render(fmt.Sprintf("%d", total))))
-		sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Total Detections:"), tuiWhite.Render(fmt.Sprintf("%d", dets))))
-		sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("  🔴 Critical:"), tuiCrit.Render(fmt.Sprintf("%d", sevs["CRITICAL"]))))
-		sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("  🟠 High:"), tuiHigh.Render(fmt.Sprintf("%d", sevs["HIGH"]))))
-		sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("  🟡 Medium:"), tuiMed.Render(fmt.Sprintf("%d", sevs["MEDIUM"]))))
-		sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("  🔵 Low:"), tuiLow.Render(fmt.Sprintf("%d", sevs["LOW"]))))
-		sb.WriteString("\n")
-	}
-
-	// ── Traffic Direction bar chart ──
-	if totalPkts > 0 {
-		sb.WriteString(tuiCyan.Render("  ── Traffic Direction ──") + "\n\n")
-		barWidth := 36
-		ingressRatio := float64(ingress) / float64(totalPkts)
-		ingressBars := int(ingressRatio * float64(barWidth))
-		if ingressBars > barWidth {
-			ingressBars = barWidth
-		}
-		egressBars := barWidth - ingressBars
-
-		sb.WriteString(fmt.Sprintf("  ⬇ IN  %s%s  %.0f%%\n",
-			tuiGreen.Render(strings.Repeat("█", ingressBars)),
-			tuiDim.Render(strings.Repeat("░", egressBars)),
-			ingressRatio*100,
-		))
-		sb.WriteString(fmt.Sprintf("  ⬆ OUT %s%s  %.0f%%\n",
-			tuiOrange.Render(strings.Repeat("█", egressBars)),
-			tuiDim.Render(strings.Repeat("░", ingressBars)),
-			(1-ingressRatio)*100,
-		))
-		sb.WriteString("\n")
-	}
-
-	// ── Log file status ──
-	sb.WriteString(tuiCyan.Render("  ── Log Files ──") + "\n\n")
-	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Packet log:"), tuiWhite.Render("output.txt")))
-	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Detections:"), tuiWhite.Render("logs/detections.jsonl")))
-	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Flows:"), tuiWhite.Render("logs/flow_stats.jsonl")))
-	sb.WriteString(fmt.Sprintf("  %-18s  %s\n", tuiDim.Render("Protocol logs:"), tuiWhite.Render("logs/protocols/")))
-
 	m.metricsVP.SetContent(sb.String())
 }
 
 func (m tuiModel) renderMetricsTab() string {
 	return m.metricsVP.View()
+}
+
+// ── Connections Tab ───────────────────────────────────────────────────────────
+
+func (m tuiModel) renderConnectionsTab() string {
+	var sb strings.Builder
+	
+	header := fmt.Sprintf("  Active Connections  (%d live)\n", len(m.conns))
+	sb.WriteString(tuiWhite.Render(header))
+	sb.WriteString(tuiDim.Render("  " + strings.Repeat("─", 80) + "\n"))
+
+	if len(m.conns) == 0 {
+		sb.WriteString(tuiDim.Render("\n  No active connections.\n"))
+		sb.WriteString(tuiDim.Render(fmt.Sprintf("  Run traffic through port %d to see connections.", m.port)))
+	} else {
+		for i, c := range m.conns {
+			cursor := "  "
+			if i == m.connSelected {
+				cursor = tuiCyan.Render("[>]")
+			}
+			
+			ipStr := fmt.Sprintf("%s:%d", c.ClientIP, c.ClientPort)
+			if len(ipStr) > 22 {
+				ipStr = ipStr[:22]
+			}
+			
+			uptime := time.Since(c.StartTime).Round(time.Second)
+			upStr := uptime.String()
+			
+			sevStr := ""
+			if c.MaxSev > detect.SevInfo {
+				sevStyle := tuiSevStyle(c.MaxSev)
+				sevStr = sevStyle.Render(c.MaxSev.Emoji() + " " + c.MaxSev.String())
+			} else {
+				sevStr = tuiDim.Render(detect.SevInfo.Emoji() + " INFO")
+			}
+
+			line := fmt.Sprintf("  %s %-22s   %-8s   %-10s   ↓ %-8s  ↑ %-8s   %s\n",
+				cursor,
+				tuiWhite.Render(ipStr),
+				tuiProtoBadge(c.Protocol),
+				tuiDim.Render(upStr),
+				formatBytes(c.BytesIn),
+				formatBytes(c.BytesOut),
+				sevStr,
+			)
+			sb.WriteString(line)
+		}
+	}
+	
+	sb.WriteString(tuiDim.Render("  " + strings.Repeat("─", 80) + "\n"))
+	if m.connStatusMsg != "" {
+		msgColor := tuiMed
+		if strings.HasPrefix(m.connStatusMsg, "Killed") {
+			msgColor = tuiCrit
+		}
+		sb.WriteString(fmt.Sprintf("  %s\n", msgColor.Render(m.connStatusMsg)))
+	} else {
+		sb.WriteString("  \n")
+	}
+
+	return sb.String()
 }

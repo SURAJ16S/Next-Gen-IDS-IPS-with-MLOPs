@@ -25,8 +25,8 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 const (
-	ftpMaxBuf          = 65536         // 64 KB max reassembly buffer per direction
-	ftpMaxLineLen      = 4096          // Max single line — drop oversized partials
+	ftpMaxBuf          = 65536 // 64 KB max reassembly buffer per direction
+	ftpMaxLineLen      = 4096  // Max single line — drop oversized partials
 	ftpSessionTTL      = 5 * time.Minute
 	ftpCleanupInterval = 2 * time.Minute
 )

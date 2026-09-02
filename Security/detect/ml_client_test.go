@@ -24,17 +24,17 @@ func TestScoreHTTPPayload(t *testing.T) {
 	defer cancel()
 
 	sampleStats := map[string]interface{}{
-		"method":             "GET",
-		"uri_length":         25,
-		"query_param_count":  1,
-		"content_length":     0,
-		"header_count":       10,
-		"header_size":        500,
-		"jwt_present":        false,
-		"auth_present":       false,
-		"entropy":            2.5,
-		"sql_keyword_count":  0,
-		"xss_pattern_count":  0,
+		"method":            "GET",
+		"uri_length":        25,
+		"query_param_count": 1,
+		"content_length":    0,
+		"header_count":      10,
+		"header_size":       500,
+		"jwt_present":       false,
+		"auth_present":      false,
+		"entropy":           2.5,
+		"sql_keyword_count": 0,
+		"xss_pattern_count": 0,
 	}
 
 	res, err := ScoreHTTPPayload(ctx, sampleStats)
