@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -20,10 +21,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	ebpflib "github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -473,9 +474,8 @@ func managePort() {
 // initProxyEngineWithPort loads (or creates) the proxy config, injects the
 // user-specified listen/backend port pair into it, saves the updated config
 // back to disk, then initialises and starts the proxy engine.
-// This ensures that any custom port always works regardless of what was
-// previously in proxy_config.yaml.
-func initProxyEngineWithPort(configPath string, listenPort, backendPort uint16, service string) (*proxy.ProxyEngine, *detect.StatsCollector, error) {
+// tuiSub may be nil; when non-nil, detection events are also forwarded to the TUI.
+func initProxyEngineWithPort(configPath string, listenPort, backendPort uint16, service string, tuiSub *TUISubscriber) (*proxy.ProxyEngine, *detect.StatsCollector, error) {
 	// Load existing config, or fall back to the built-in default
 	cfg, err := proxy.LoadConfig(configPath)
 	if err != nil {
@@ -512,6 +512,10 @@ func initProxyEngineWithPort(configPath string, listenPort, backendPort uint16, 
 	}
 	bus.Subscribe(jsonLogger)
 	bus.Subscribe(stats)
+	// Forward detections to TUI if one is attached
+	if tuiSub != nil {
+		bus.Subscribe(tuiSub)
+	}
 
 	engine := proxy.NewProxyEngine(cfg, bus, stats)
 	if err := engine.Start(); err != nil {
@@ -546,7 +550,7 @@ func runInteractiveMenu() {
 			fmt.Println(successStyle.Render(fmt.Sprintf("  ✓ Attaching eBPF hooks to %s on port %d...", ifaceName, backendPort)))
 			fmt.Println(dimStyle.Render(fmt.Sprintf("  ● Your app is still accessible at http://localhost:%d", backendPort)))
 			fmt.Println()
-			runEBPFMonitor(backendPort, ifaceName, nil)
+			runEBPFMonitor(backendPort, ifaceName, nil, nil)
 
 		case 2: // Proxy only
 			clearScreen()
@@ -568,7 +572,7 @@ func runInteractiveMenu() {
 			fmt.Println(highlightStyle.Render(fmt.Sprintf("  ● Open in browser: http://localhost:%d", proxyPort)))
 			fmt.Println(dimStyle.Render(fmt.Sprintf("  ● Flow: browser → :%d (proxy) → :%d (your app)", proxyPort, backendPort)))
 			fmt.Println()
-			_, stats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service)
+			_, stats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service, nil)
 			if err != nil {
 				fmt.Println(errorStyle.Render("  ✗ Proxy initialization failed: " + err.Error()))
 				fmt.Println(statLabelStyle.Render("  Press Enter to return to menu..."))
@@ -599,7 +603,10 @@ func runInteractiveMenu() {
 			fmt.Println(highlightStyle.Render(fmt.Sprintf("  ● Open in browser: http://localhost:%d", proxyPort)))
 			fmt.Println(dimStyle.Render(fmt.Sprintf("  ● Flow: browser → :%d (eBPF+Proxy) → :%d (your app)", proxyPort, backendPort)))
 			fmt.Println()
-			_, proxyStats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service)
+			// Create a TUI subscriber placeholder; the TUI program pointer is
+			// injected by runEBPFMonitor after the program starts.
+			tuiAlertSub := &TUISubscriber{}
+			_, proxyStats, err := initProxyEngineWithPort("proxy_config.yaml", proxyPort, backendPort, service, tuiAlertSub)
 			if err != nil {
 				fmt.Println(errorStyle.Render("  ✗ Proxy initialization failed: " + err.Error()))
 				fmt.Println(statLabelStyle.Render("  Press Enter to return to menu..."))
@@ -607,7 +614,7 @@ func runInteractiveMenu() {
 				continue
 			}
 			// eBPF monitors the proxy listen port — same port clients connect to
-			runEBPFMonitor(proxyPort, ifaceName, proxyStats)
+			runEBPFMonitor(proxyPort, ifaceName, proxyStats, tuiAlertSub)
 
 		case 4: // Port Management
 			managePort()
@@ -739,224 +746,10 @@ func payloadSize(rec packetRecord) uint16 {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Dashboard Renderer
+// Dashboard placeholder — kept for unused-import safety; real UI is in tui.go
 // ──────────────────────────────────────────────────────────────────────────────
 
-type dashboard struct {
-	port        uint16
-	iface       string
-	service     ServiceInfo
-	startTime   time.Time
-	events      []packetRecord
-	mu          sync.Mutex
-	totalPkts   atomic.Int64
-	ingressPkts atomic.Int64
-	egressPkts  atomic.Int64
-	totalBytes  atomic.Int64
-	proxyStats  *detect.StatsCollector
-}
-
-func newDashboard(port uint16, iface string, svc ServiceInfo, pStats *detect.StatsCollector) *dashboard {
-	return &dashboard{
-		port:       port,
-		iface:      iface,
-		service:    svc,
-		startTime:  time.Now(),
-		events:     make([]packetRecord, 0, maxEvents),
-		proxyStats: pStats,
-	}
-}
-
-func (d *dashboard) addEvent(rec packetRecord) {
-	d.totalPkts.Add(1)
-	d.totalBytes.Add(int64(rec.Size))
-	if rec.Direction == "INCOMING" {
-		d.ingressPkts.Add(1)
-	} else {
-		d.egressPkts.Add(1)
-	}
-
-	d.mu.Lock()
-	d.events = append(d.events, rec)
-	if len(d.events) > maxEvents {
-		d.events = d.events[len(d.events)-maxEvents:]
-	}
-	d.mu.Unlock()
-}
-
-func (d *dashboard) render() {
-	moveCursor(1, 1)
-
-	// ── Banner ──
-	banner := `
-  ╔══════════════════════════════════════════════════════════════════╗
-  ║      ███╗   ██╗ ██████╗ ███████╗██╗    ██╗                     ║
-  ║      ████╗  ██║██╔════╝ ██╔════╝██║    ██║                     ║
-  ║      ██╔██╗ ██║██║  ███╗█████╗  ██║ █╗ ██║                     ║
-  ║      ██║╚██╗██║██║   ██║██╔══╝  ██║███╗██║                     ║
-  ║      ██║ ╚████║╚██████╔╝██║     ╚███╔███╔╝                     ║
-  ║      ╚═╝  ╚═══╝ ╚═════╝ ╚═╝      ╚══╝╚══╝                     ║
-  ║              eBPF Traffic Monitor v1.1                         ║
-  ╚══════════════════════════════════════════════════════════════════╝`
-
-	fmt.Println(bannerStyle.Render(banner))
-	fmt.Println()
-
-	// ── Status Bar ──
-	uptime := time.Since(d.startTime).Round(time.Second)
-	total := d.totalPkts.Load()
-	ingress := d.ingressPkts.Load()
-	egress := d.egressPkts.Load()
-	totalBytesVal := d.totalBytes.Load()
-
-	pps := float64(0)
-	elapsed := time.Since(d.startTime).Seconds()
-	if elapsed > 0 {
-		pps = float64(total) / elapsed
-	}
-
-	// Build the port + service string
-	portLabel := fmt.Sprintf("%d", d.port)
-	svcBadge := d.service.StatusBadge()
-	svcDisplay := d.service.DisplayName()
-	portDisplay := fmt.Sprintf("%s  %s %s", portLabel, svcBadge, svcDisplay)
-
-	statusLine := fmt.Sprintf(
-		"  %s %s   %s %s   %s %s   %s %s",
-		statLabelStyle.Render("PORT:"),
-		statValueStyle.Render(portDisplay),
-		statLabelStyle.Render("IFACE:"),
-		statValueStyle.Render(d.iface),
-		statLabelStyle.Render("UPTIME:"),
-		statValueStyle.Render(uptime.String()),
-		statLabelStyle.Render("STATUS:"),
-		ingressStyle.Render("● MONITORING"),
-	)
-	fmt.Println(statusLine)
-
-	// ── Service Detail line (only if active listener was found) ──
-	if d.service.ProcessName != "" {
-		svcProto := d.service.Proto
-		if svcProto == "" {
-			svcProto = "TCP/UDP"
-		}
-		svcUser := d.service.User
-		if svcUser == "" {
-			svcUser = "unknown"
-		}
-		svcLine := fmt.Sprintf(
-			"  %s %s  %s %s  %s %s",
-			statLabelStyle.Render("Process:"),
-			statValueStyle.Render(d.service.ProcessName),
-			statLabelStyle.Render("User:"),
-			statValueStyle.Render(svcUser),
-			statLabelStyle.Render("Proto:"),
-			statValueStyle.Render(svcProto),
-		)
-		fmt.Println(svcLine)
-		// Show truncated command line if available
-		if d.service.Command != "" {
-			cmd := d.service.Command
-			if len(cmd) > 80 {
-				cmd = cmd[:80] + "…"
-			}
-			fmt.Println(dimStyle.Render("  CMD: ") + dimStyle.Render(cmd))
-		}
-	}
-	fmt.Println()
-
-	// ── Proxy Status ──
-	if d.proxyStats != nil {
-		active := d.proxyStats.ActiveConnections()
-		totalConns := d.proxyStats.TotalConnections()
-		dets := d.proxyStats.TotalDetections()
-		sevs := d.proxyStats.SeverityCounts()
-		crit := sevs["CRITICAL"]
-		high := sevs["HIGH"]
-		proxyContent := fmt.Sprintf(
-			"  %s %s    %s %s    %s %s",
-			statLabelStyle.Render("Proxy Conns:"),
-			statValueStyle.Render(fmt.Sprintf("%d", active)),
-			statLabelStyle.Render("Total Conns:"),
-			statValueStyle.Render(fmt.Sprintf("%d", totalConns)),
-			statLabelStyle.Render("Detections:"),
-			egressStyle.Render(fmt.Sprintf("%d (Crit: %d, High: %d)", dets, crit, high)),
-		)
-		fmt.Println(borderStyle.Render(proxyContent))
-		fmt.Println()
-	}
-
-	// ── Stats Panel ──
-	statsContent := fmt.Sprintf(
-		"  %s %s    %s %s    %s %s    %s %s    %s %s",
-		statLabelStyle.Render("Total Packets:"),
-		statValueStyle.Render(fmt.Sprintf("%d", total)),
-		statLabelStyle.Render("Incoming:"),
-		ingressStyle.Render(fmt.Sprintf("⬇ %d", ingress)),
-		statLabelStyle.Render("Outgoing:"),
-		egressStyle.Render(fmt.Sprintf("⬆ %d", egress)),
-		statLabelStyle.Render("Bytes:"),
-		statValueStyle.Render(formatBytes(totalBytesVal)),
-		statLabelStyle.Render("Rate:"),
-		statValueStyle.Render(fmt.Sprintf("%.1f pkt/s", pps)),
-	)
-	fmt.Println(borderStyle.Render(statsContent))
-	fmt.Println()
-
-	// ── Packet Table ──
-	hdr := fmt.Sprintf(
-		"  %-11s  %-6s  %-3s  %-22s  %-22s  %-5s  %-15s  %-8s  %-4s  %-12s",
-		"DIRECTION", "FragOff", "MF", "SOURCE", "DESTINATION", "PROTO", "FLAGS", "SIZE", "TTL", "TIME",
-	)
-	fmt.Println(headerStyle.Render(hdr))
-	fmt.Println(dimStyle.Render("  " + strings.Repeat("─", 110)))
-
-	// Events
-	d.mu.Lock()
-	eventsSnapshot := make([]packetRecord, len(d.events))
-	copy(eventsSnapshot, d.events)
-	d.mu.Unlock()
-
-	if len(eventsSnapshot) == 0 {
-		fmt.Println()
-		fmt.Println(dimStyle.Render("  Waiting for packets on port " + fmt.Sprintf("%d", d.port) + "..."))
-		fmt.Println(dimStyle.Render("  Generate traffic with: curl http://localhost:" + fmt.Sprintf("%d", d.port)))
-	} else {
-		for i := len(eventsSnapshot) - 1; i >= 0; i-- {
-			ev := eventsSnapshot[i]
-			var dirStr string
-			if ev.Direction == "INCOMING" {
-				dirStr = ingressStyle.Render("  ⬇ INCOMING")
-			} else {
-				dirStr = egressStyle.Render("  ⬆ OUTGOING")
-			}
-
-			var protoStr string
-			if ev.Protocol == "TCP" {
-				protoStr = tcpStyle.Render("TCP")
-			} else {
-				protoStr = udpStyle.Render("UDP")
-			}
-
-			src := fmt.Sprintf("%s:%d", ev.SrcIP, ev.SrcPort)
-			dst := fmt.Sprintf("%s:%d", ev.DstIP, ev.DstPort)
-			sizeStr := formatBytes(int64(ev.Size))
-			timeStr := ev.Timestamp.Format("15:04:05.000")
-			flagsStr := flagStyle.Render(ev.TCPFlags)
-			ttlStr := fmt.Sprintf("%d", ev.TTL)
-
-			line := fmt.Sprintf(
-				"%-11s  %-6d  %-3t  %-22s  %-22s  %-5s  %-15s  %-8s  %-4s  %s",
-				dirStr, ev.FragOffset, ev.MoreFrag, src, dst, protoStr, flagsStr, sizeStr, ttlStr, dimStyle.Render(timeStr),
-			)
-			fmt.Println(line)
-		}
-	}
-
-	// ── Footer ──
-	fmt.Println()
-	fmt.Println(dimStyle.Render("  Logging to: output.txt   |   Press Ctrl+C to stop"))
-}
+// sync and sync/atomic are used in tui.go and the file logger.
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Main
@@ -964,7 +757,7 @@ func (d *dashboard) render() {
 
 // runEBPFMonitor starts the eBPF traffic monitoring session on the given port
 // and interface, optionally integrated with a running proxy detection engine.
-func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.StatsCollector) {
+func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.StatsCollector, tuiAlertSub *TUISubscriber) {
 	// ── Detect service running on the target port ──
 	fmt.Printf("\n  %s Detecting service on port %d...\n", statLabelStyle.Render("🔍"), targetPort)
 	svcInfo := detectService(targetPort)
@@ -1077,21 +870,30 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 
 	fmt.Printf("  %s Flow aggregation active → logs/flow_stats.jsonl\n", ingressStyle.Render("✓"))
 
-	// ── Initialize dashboard ──
-	dash := newDashboard(targetPort, ifaceName, svcInfo, proxyStats)
+	// ── Build TUI model and program ──
+	tuiM := newTuiModel(targetPort, ifaceName, svcInfo, proxyStats, flog)
+	p := tea.NewProgram(tuiM, tea.WithAltScreen())
+	// Wire the program pointer into the alert subscriber so proxy detections
+	// flow into the TUI immediately (non-nil only in Integrated Mode)
+	if tuiAlertSub != nil {
+		tuiAlertSub.SetProgram(p)
+	}
 
 	// ── Signal handler for graceful shutdown ──
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		flowTracker.FlushAll()
+		p.Quit()
+	}()
 
-	// ── Ring buffer event reader goroutine ──
-	eventCh := make(chan packetRecord, 256)
-
+	// ── Ring buffer → TUI event pipeline ──
 	go func() {
 		for {
 			record, err := rd.Read()
 			if err != nil {
-				return // Reader closed
+				return // reader closed on shutdown
 			}
 
 			var event bpfPacketEvent
@@ -1103,18 +905,14 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 			if event.Direction == 1 {
 				dir = "OUTGOING"
 			}
-
 			proto := "TCP"
 			if event.Protocol == 17 {
 				proto = "UDP"
 			}
 
 			rec := packetRecord{
-				// Metadata
-				Direction: dir,
-				Timestamp: time.Now(),
-
-				// IP Layer
+				Direction:  dir,
+				Timestamp:  time.Now(),
 				SrcIP:      intToIP(event.SrcIp),
 				DstIP:      intToIP(event.DestIp),
 				Protocol:   proto,
@@ -1125,41 +923,31 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 				IPHdrLen:   event.IpHdrLen,
 				FragOffset: event.IpFragOffset,
 				MoreFrag:   event.IpMf != 0,
-
-				// L4 Layer
-				SrcPort: event.SrcPort,
-				DstPort: event.DestPort,
-
-				// TCP-specific
-				TCPFlags:  tcpFlagsToString(event.TcpFlags),
-				FlagsRaw:  event.TcpFlags,
-				SeqNum:    event.TcpSeq,
-				AckNum:    event.TcpAck,
-				Window:    event.TcpWindow,
-				TCPHdrLen: event.TcpHdrLen,
+				SrcPort:    event.SrcPort,
+				DstPort:    event.DestPort,
+				TCPFlags:   tcpFlagsToString(event.TcpFlags),
+				FlagsRaw:   event.TcpFlags,
+				SeqNum:     event.TcpSeq,
+				AckNum:     event.TcpAck,
+				Window:     event.TcpWindow,
+				TCPHdrLen:  event.TcpHdrLen,
 			}
 
-			eventCh <- rec
-		}
-	}()
+			// Deduplicate loopback echoing at the source so stats, flows, and output.txt are accurate
+			if rec.SrcIP == "127.0.0.1" && rec.DstIP == "127.0.0.1" && rec.Direction == "OUTGOING" {
+				continue
+			}
 
-	// ── Dashboard refresh loop ──
-	clearScreen()
-	dash.render()
+			// Align the logical direction with the perspective of the protected application
+			if targetPort > 0 {
+				if rec.DstPort == targetPort {
+					rec.Direction = "INCOMING"
+				} else if rec.SrcPort == targetPort {
+					rec.Direction = "OUTGOING"
+				}
+			}
 
-	refreshTicker := time.NewTicker(500 * time.Millisecond)
-	defer refreshTicker.Stop()
-
-	needsRefresh := false
-
-	for {
-		select {
-		case rec := <-eventCh:
-			dash.addEvent(rec)
-			// Log every packet to output.txt
-			flog.logPacket(dash.totalPkts.Load(), rec)
-
-			// Feed into flow aggregator
+			// Feed flow tracker
 			flowTracker.TrackPacket(detect.PacketEvent{
 				Timestamp: rec.Timestamp,
 				SrcIP:     rec.SrcIP,
@@ -1171,45 +959,25 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 				TCPFlags:  rec.FlagsRaw,
 				Direction: rec.Direction,
 			})
-			needsRefresh = true
 
-		case <-refreshTicker.C:
-			if needsRefresh || dash.totalPkts.Load() > 0 {
-				clearScreen()
-				dash.render()
-				needsRefresh = false
-			}
-
-		case <-sig:
-			// Flush all remaining flows before shutdown
-			flowTracker.FlushAll()
-
-			// Write session summary to output.txt
-			total := dash.totalPkts.Load()
-			ingress := dash.ingressPkts.Load()
-			egress := dash.egressPkts.Load()
-			totalBytesVal := dash.totalBytes.Load()
-			uptime := time.Since(dash.startTime).Round(time.Second)
-
-			flog.writeSummary(total, ingress, egress, totalBytesVal, uptime)
-
-			clearScreen()
-			fmt.Println()
-			fmt.Println(bannerStyle.Render("  NGFW eBPF Traffic Monitor — Shutting Down"))
-			fmt.Println()
-
-			fmt.Printf("  %s %s\n", statLabelStyle.Render("Session Duration:"), statValueStyle.Render(uptime.String()))
-			fmt.Printf("  %s %s\n", statLabelStyle.Render("Total Packets:"), statValueStyle.Render(fmt.Sprintf("%d", total)))
-			fmt.Printf("  %s %s\n", statLabelStyle.Render("Incoming:"), ingressStyle.Render(fmt.Sprintf("⬇ %d", ingress)))
-			fmt.Printf("  %s %s\n", statLabelStyle.Render("Outgoing:"), egressStyle.Render(fmt.Sprintf("⬆ %d", egress)))
-			fmt.Printf("  %s %s\n", statLabelStyle.Render("Total Bytes:"), statValueStyle.Render(formatBytes(totalBytesVal)))
-			fmt.Printf("  %s %s\n", statLabelStyle.Render("Log saved to:"), statValueStyle.Render("output.txt"))
-			fmt.Println()
-			fmt.Println(ingressStyle.Render("  ✓ eBPF programs detached. Goodbye!"))
-			fmt.Println()
-			return
+			// Send to TUI (file logging happens inside tuiModel.Update)
+			p.Send(packetMsg(rec))
 		}
+	}()
+
+	// ── Run TUI (blocks until quit) ──
+	if _, err := p.Run(); err != nil {
+		log.Printf("TUI error: %v", err)
 	}
+
+	// Write a minimal session summary to output.txt after TUI exits
+	if flog != nil {
+		flog.writeSummary(0, 0, 0, 0, time.Since(time.Now()))
+	}
+
+	fmt.Println()
+	fmt.Println(ingressStyle.Render("  ✓ eBPF programs detached. Goodbye!"))
+	fmt.Println()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1217,6 +985,15 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 // ──────────────────────────────────────────────────────────────────────────────
 
 func main() {
+	// Redirect all standard log output to a file so it doesn't corrupt the TUI
+	logFile, err := os.OpenFile("ngfw-app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err == nil {
+		log.SetOutput(logFile)
+	} else {
+		// If we can't open a log file, discard logs to save the TUI
+		log.SetOutput(io.Discard)
+	}
+
 	// ── Parse CLI flags for non-interactive (scripted/automated) usage ──
 	portFlag := flag.Int("port", 0, "Port number to monitor (required in monitor mode)")
 	ifaceFlag := flag.String("iface", "", "Network interface to attach eBPF programs to")
@@ -1259,7 +1036,7 @@ func main() {
 		if ifaceName == "" {
 			ifaceName = "eth0" // sensible default when using flags
 		}
-		runEBPFMonitor(uint16(*portFlag), ifaceName, proxyStats)
+		runEBPFMonitor(uint16(*portFlag), ifaceName, proxyStats, nil)
 	} else if *proxyFlag {
 		// Proxy-only (no port flag)
 		runStandaloneProxy(proxyStats)
@@ -1326,34 +1103,21 @@ func (c *ConsoleLogger) OnDetection(d detect.Detection) {
 func (c *ConsoleLogger) OnConnectionClose(conn detect.ConnectionRecord) {}
 
 func runStandaloneProxy(stats *detect.StatsCollector) {
-	clearScreen()
-	fmt.Println(bannerStyle.Render(`
-  ╔══════════════════════════════════════════════════════════════════╗
-  ║              NGFW — Detection Reverse Proxy                      ║
-  ║              Deep Packet Inspection Engine                       ║
-  ╚══════════════════════════════════════════════════════════════════╝`))
-	fmt.Println()
+	// Proxy-only mode: launch TUI with no eBPF port / iface info.
+	// Alerts and Metrics tabs are active; Packets tab shows empty state.
+	tuiM := newTuiModel(0, "", ServiceInfo{}, stats, nil)
+	tuiM.activeTab = 1 // default to Alerts
+	p := tea.NewProgram(tuiM, tea.WithAltScreen())
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		p.Quit()
+	}()
 
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-sig:
-			fmt.Println("\n  " + ingressStyle.Render("✓") + " Shutting down reverse proxy gracefully...")
-			return
-		case <-ticker.C:
-			active := stats.ActiveConnections()
-			total := stats.TotalConnections()
-			dets := stats.TotalDetections()
-			sevs := stats.SeverityCounts()
-			crit := sevs["CRITICAL"]
-			high := sevs["HIGH"]
-			fmt.Printf("  \r\033[K%s Active Conns: %d | Total Conns: %d | Detections: %d (Critical: %d, High: %d)",
-				statLabelStyle.Render("⚡"), active, total, dets, crit, high)
-		}
+	if _, err := p.Run(); err != nil {
+		log.Printf("TUI error: %v", err)
 	}
+	fmt.Println("\n  " + ingressStyle.Render("✓") + " Shutting down reverse proxy gracefully...")
 }
