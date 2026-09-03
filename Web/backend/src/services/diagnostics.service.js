@@ -52,13 +52,43 @@ const analyzeLogsAndDiagnose = (logsText) => {
     });
   }
 
-  // 5. Module not found / missing dependency
-  const moduleMissingMatch = logsText.match(/Error: Cannot find module ['"]([^'"]+)['"]/);
+  // 4b. npm peer dependency conflict (ERESOLVE)
+  if (/ERESOLVE|Could not resolve dependency|Conflicting peer dependency/i.test(logsText)) {
+    const conflictMatch = logsText.match(/Could not resolve dependency:\s*([^\n]+)/);
+    const conflictDep = conflictMatch ? conflictMatch[1].trim() : 'a package';
+    diagnoses.push({
+      error: `npm Peer Dependency Conflict (ERESOLVE)`,
+      solution: `npm could not resolve peer dependencies for ${conflictDep}. The self-healing agent automatically retried the build with --legacy-peer-deps and --force flags. If the build still fails, try manually downgrading conflicting packages in your package.json, or use 'overrides' in package.json to force a specific version. You can also try disabling 'Dependency Upgrade Mode' to use your original package.json versions.`
+    });
+  }
+
+  // 5. Module not found / missing dependency (Next.js / Webpack / Node format)
+  const moduleMissingMatch = logsText.match(/(?:Error:\s*Cannot find module|Module not found:\s*Can't resolve)\s+['"]([^'"]+)['"]/i);
   if (moduleMissingMatch) {
     const missingModule = moduleMissingMatch[1];
+    if (!missingModule.startsWith('.') && !missingModule.startsWith('@/') && !missingModule.startsWith('/')) {
+      diagnoses.push({
+        error: `Missing Package Dependency (${missingModule})`,
+        solution: `The dependency "${missingModule}" was imported in your source code but not installed in package.json. The self-healing agent will automatically inject "${missingModule}" into your package.json dependencies and retry compilation.`
+      });
+    }
+  }
+
+  // 5b. Tailwind CSS PostCSS plugin error
+  if (/tailwindcss directly as a PostCSS plugin|@tailwindcss\/postcss/i.test(logsText)) {
     diagnoses.push({
-      error: `Missing Node Module (${missingModule})`,
-      solution: `The dependency "${missingModule}" was required but not found. Make sure it is listed in your package.json dependencies and that npm install completed successfully.`
+      error: "Tailwind CSS v4 PostCSS Plugin Mismatch",
+      solution: "Tailwind CSS v4 requires '@tailwindcss/postcss' instead of 'tailwindcss' in PostCSS config. The self-healing agent will automatically install '@tailwindcss/postcss' and patch your postcss.config file."
+    });
+  }
+
+  // 5c. Missing environment variable during static build evaluation
+  const missingEnvDiag = logsText.match(/(?:Please define the|Missing|Define the)\s+([A-Z0-9_]+)\s+environment variable/i);
+  if (missingEnvDiag) {
+    const missingVar = missingEnvDiag[1];
+    diagnoses.push({
+      error: `Missing Environment Variable (${missingVar})`,
+      solution: `Your application code threw an error during build evaluation because "${missingVar}" is not defined. The self-healing agent will automatically inject a default "${missingVar}" variable into .env.local and retry compilation.`
     });
   }
 

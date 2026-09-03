@@ -32,7 +32,7 @@ const adminSchema = new mongoose.Schema(
     mobile: { type: String, required: true },
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    role: { type: String, enum: ['superadmin', 'admin'], default: 'admin' },
+    role: { type: String, enum: ['superadmin', 'admin', 'user'], default: 'admin' },
     status: { type: String, enum: ['active', 'banned'], default: 'active' },
     // GitHub OAuth
     githubAccessToken: { type: String, set: encryptToken, get: decryptToken },

@@ -92,7 +92,10 @@ const isReadOnlyCommand = (command) => {
 /**
  * Execute a command inside the DevOps preview container
  */
-const runCommandInContainer = async (containerName, cmd) => {
+/**
+ * Execute a command inside the DevOps preview container, or fallback to host execution in extractDir if container is offline
+ */
+const runCommandInContainer = async (containerName, cmd, extractDir = null) => {
   try {
     const activeDocker = new Docker();
     const container = activeDocker.getContainer(containerName);
@@ -103,26 +106,43 @@ const runCommandInContainer = async (containerName, cmd) => {
       isRunning = inspect.State.Running;
     } catch (_) {}
 
-    if (!isRunning) {
-      return `Execution blocked: Preview container "${containerName}" is offline.\n`;
+    if (isRunning) {
+      const preparedCmd = cmd.includes('curl') ? `(which curl >/dev/null 2>&1 || apk add --no-cache curl 2>/dev/null || true); cd /project 2>/dev/null || cd /workspace 2>/dev/null || true; ${cmd}` : `cd /project 2>/dev/null || cd /workspace 2>/dev/null || true; ${cmd}`;
+      const exec = await container.exec({ 
+        Cmd: ['sh', '-c', preparedCmd], 
+        AttachStdout: true, 
+        AttachStderr: true 
+      });
+      
+      const stream = await exec.start();
+      return await new Promise((resolve) => {
+        const chunks = [];
+        stream.on('data', chunk => chunks.push(chunk));
+        stream.on('end', () => {
+          const fullBuffer = Buffer.concat(chunks);
+          resolve(cleanDockerOutput(fullBuffer));
+        });
+        stream.on('error', () => resolve(''));
+      });
     }
 
-    const exec = await container.exec({ 
-      Cmd: ['sh', '-c', `cd /project 2>/dev/null || cd /workspace 2>/dev/null || true; ${cmd}`], 
-      AttachStdout: true, 
-      AttachStderr: true 
-    });
-    
-    const stream = await exec.start();
-    return await new Promise((resolve) => {
-      const chunks = [];
-      stream.on('data', chunk => chunks.push(chunk));
-      stream.on('end', () => {
-        const fullBuffer = Buffer.concat(chunks);
-        resolve(cleanDockerOutput(fullBuffer));
+    // Fallback: If container is offline/exited (e.g. build failed or preview stopped),
+    // but the workspace directory exists on host disk, run command via host process in extractDir!
+    if (extractDir && fs.existsSync(extractDir)) {
+      const { exec: hostExec } = require('child_process');
+      return await new Promise((resolve) => {
+        const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
+        hostExec(cmd, { cwd: extractDir, shell, timeout: 30000 }, (error, stdout, stderr) => {
+          let output = '';
+          if (stdout) output += stdout;
+          if (stderr) output += (output ? '\n' : '') + stderr;
+          if (error && !output) output = `[Host Command Error]: ${error.message}`;
+          resolve(output || '[Command executed on workspace host directory]');
+        });
       });
-      stream.on('error', () => resolve(''));
-    });
+    }
+
+    return `Execution blocked: Preview container "${containerName}" is offline and workspace directory was not found.\n`;
   } catch (err) {
     return `Error executing command: ${err.message}\n`;
   }
@@ -139,8 +159,8 @@ const sanitizeTerminalLogs = (text) => {
   // 2. Mask PGPASSWORD variable
   sanitized = sanitized.replace(/PGPASSWORD=[^\s&|;]+/g, 'PGPASSWORD=********');
 
-  // 3. Mask inline MySQL passwords e.g. -ppassword (excluding common option flags like -path, -port, -parent, etc.)
-  sanitized = sanitized.replace(/-p(?!ath|ort|latform|rovider|aram|rofile|lugin|roperties|arent|ackage|roxy|roject|ull|ush|rocess|ing|atch|refix|om|arse|kg)[^\s&|;]+/g, '-p********');
+  // 3. Mask inline MySQL passwords e.g. -ppassword (excluding flags starting with -- or common option names)
+  sanitized = sanitized.replace(/(?<!-)\b-p(?!ath|ort|eer|latform|rovider|aram|rofile|lugin|roperties|arent|ackage|roxy|roject|ull|ush|rocess|ing|atch|refix|om|arse|kg)[^\s&|;]+/g, '-p********');
 
   // 4. Mask credentials in connection URIs (e.g. mongodb://user:pass@host)
   sanitized = sanitized.replace(/(mongodb(?:\+srv)?:\/\/)([^:@\s]+):([^@\s]+)@/gi, '$1********:********@');

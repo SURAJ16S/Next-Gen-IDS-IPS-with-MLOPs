@@ -946,8 +946,24 @@ const executeDeploymentDbQuery = async (req, res) => {
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else if (dbType === 'mongodb') {
       const remoteUri = await getRemoteMongoUri(deployment);
-      const connectionString = remoteUri || dbName;
-      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/run.js`];
+      const connectionString = remoteUri || 'mongodb://localhost:27017';
+      const wrappedQuery = `
+        let targetDb = db;
+        try {
+          const dbs = db.getMongo().getDBNames().filter(d => d !== 'admin' && d !== 'config' && d !== 'local');
+          for (const dName of dbs) {
+            const currentDb = db.getSiblingDB(dName);
+            const cols = currentDb.getCollectionNames();
+            if (cols.length > 0) {
+              targetDb = currentDb;
+              break;
+            }
+          }
+        } catch (_) {}
+        db = targetDb;
+        ${query}
+      `;
+      const writeAndRunCmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/run.js\n${wrappedQuery}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/run.js`];
       output = await runExecWithTimeout(writeAndRunCmd, 15000);
     } else if (dbType === 'sqlite') {
       const writeAndRunCmd = ['sh', '-c', `sqliteFile=$(find /workspace -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db" | head -n 1); if [ -z "$sqliteFile" ]; then sqliteFile="/workspace/preview_db.sqlite3"; fi; sqlite3 "$sqliteFile" "${query.replace(/"/g, '\\"')}"`];
@@ -1131,9 +1147,22 @@ const getDbCollections = async (req, res) => {
     const dbName = 'preview_db';
     if (dbType === 'mongodb') {
       const remoteUri = await getRemoteMongoUri(deployment);
-      const connectionString = remoteUri || dbName;
+      const connectionString = remoteUri || 'mongodb://localhost:27017';
       const delimiter = '__DB_QUERY_EOF__';
-      const query = `printjson(db.getCollectionNames())`;
+      const query = `
+        let allColls = [];
+        try {
+          const dbs = db.getMongo().getDBNames().filter(d => d !== 'admin' && d !== 'config' && d !== 'local');
+          for (const dName of dbs) {
+            const currentDb = db.getSiblingDB(dName);
+            const cols = currentDb.getCollectionNames();
+            cols.forEach(c => allColls.push(cols.length > 0 && dbs.length > 1 ? \`\${dName}.\${c}\` : c));
+          }
+        } catch (_) {
+          allColls = db.getCollectionNames();
+        }
+        printjson(allColls);
+      `;
       const cmd = ['sh', '-c', `cat << '${delimiter}' > /tmp/collections.js\n${query}\n${delimiter}\nmongosh "${connectionString}" --quiet /tmp/collections.js`];
       const output = await runExec(cmd);
       try {
@@ -1767,6 +1796,12 @@ const executeAgentChat = async (req, res) => {
     const deployment = await Deployment.findById(req.params.id);
     if (!deployment) return res.status(404).json({ message: 'Deployment not found' });
     
+    if (['building', 'pending', 'scanning'].includes(deployment.status)) {
+      return res.status(400).json({ 
+        message: 'The build is currently running and monitoring the pipeline. Please wait until the build finishes or fails before asking the agent to update files.' 
+      });
+    }
+
     const { message, chatId, imageBase64, imageMimeType } = req.body;
     if (!message) return res.status(400).json({ message: 'Message is required' });
     
