@@ -30,8 +30,9 @@ type jwtHeader struct {
 
 // jwtPayload is the minimal set of claims we inspect.
 type jwtPayload struct {
-	Exp int64 `json:"exp"` // Unix timestamp; 0 = not present
-	Iat int64 `json:"iat"`
+	Exp  int64  `json:"exp"` // Unix timestamp; 0 = not present
+	Iat  int64  `json:"iat"`
+	Role string `json:"role"`
 }
 
 // AnalyzeJWT inspects a raw Authorization header value (the full "Bearer …"
@@ -47,10 +48,10 @@ func AnalyzeJWT(
 	srcPort uint16,
 	destPort uint16,
 	connID string,
-) {
+) string {
 	raw := strings.TrimSpace(authHeader)
 	if !strings.HasPrefix(raw, "Bearer ") && !strings.HasPrefix(raw, "bearer ") {
-		return // not a Bearer token — nothing to do
+		return "" // not a Bearer token — nothing to do
 	}
 	token := strings.TrimSpace(raw[len("Bearer "):])
 	if strings.HasPrefix(raw, "bearer ") {
@@ -72,7 +73,7 @@ func AnalyzeJWT(
 			Summary:     "Malformed JWT: does not have 3 dot-separated base64url segments",
 			RawEvidence: truncate(token, 120),
 		})
-		return
+		return ""
 	}
 
 	header, err := decodeJWTPart(parts[0])
@@ -90,7 +91,7 @@ func AnalyzeJWT(
 			Summary:     "JWT header is not valid base64url-encoded JSON",
 			RawEvidence: truncate(parts[0], 80),
 		})
-		return
+		return ""
 	}
 
 	var h jwtHeader
@@ -142,29 +143,34 @@ func AnalyzeJWT(
 
 	// --- Expired token check ---
 	payload, err := decodeJWTPart(parts[1])
+	role := ""
 	if err == nil {
 		var p jwtPayload
-		if err := json.Unmarshal(payload, &p); err == nil && p.Exp > 0 {
-			if time.Now().Unix() > p.Exp {
-				bus.EmitDetection(Detection{
-					ID:         "JWT-EXPIRED-001",
-					Timestamp:  time.Now(),
-					Severity:   SevMedium,
-					Category:   CatJWTExpiredAccepted,
-					Protocol:   "HTTP",
-					SourceIP:   srcIP,
-					SourcePort: srcPort,
-					DestPort:   destPort,
-					ConnID:     connID,
-					Summary:    "Expired JWT presented — backend accepting this token would indicate missing expiry validation",
-					Details: map[string]any{
-						"exp":        p.Exp,
-						"expired_by": time.Now().Unix() - p.Exp,
-					},
-				})
+		if err := json.Unmarshal(payload, &p); err == nil {
+			role = p.Role
+			if p.Exp > 0 {
+				if time.Now().Unix() > p.Exp {
+					bus.EmitDetection(Detection{
+						ID:         "JWT-EXPIRED-001",
+						Timestamp:  time.Now(),
+						Severity:   SevMedium,
+						Category:   CatJWTExpiredAccepted,
+						Protocol:   "HTTP",
+						SourceIP:   srcIP,
+						SourcePort: srcPort,
+						DestPort:   destPort,
+						ConnID:     connID,
+						Summary:    "Expired JWT presented — backend accepting this token would indicate missing expiry validation",
+						Details: map[string]any{
+							"exp":        p.Exp,
+							"expired_by": time.Now().Unix() - p.Exp,
+						},
+					})
+				}
 			}
 		}
 	}
+	return role
 }
 
 // decodeJWTPart base64url-decodes one segment of a JWT (no padding required).

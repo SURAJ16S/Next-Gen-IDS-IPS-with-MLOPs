@@ -4,7 +4,8 @@ import {
   User, Mail, Lock, Phone, Calendar, AtSign,
   Eye, EyeOff, AlertCircle, CheckCircle, Info,
 } from 'lucide-react';
-import { registerUser } from '../services/api';
+import { registerUser, refreshCaptcha } from '../services/api';
+import CaptchaGate from '../components/CaptchaGate';
 import './Auth.css';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -171,6 +172,11 @@ function Register() {
   const [githubRegToken, setGithubRegToken] = useState('');
   const [githubUsername, setGithubUsername] = useState('');
 
+  // Captcha State
+  const [captchaChallenge, setCaptchaChallenge] = useState(null);
+  const [captchaToken, setCaptchaToken] = useState(null);
+  const [captchaStatus, setCaptchaStatus] = useState('idle');
+
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -261,6 +267,10 @@ function Register() {
     }
     setErrors(allErrors);
     if (Object.values(allErrors).some(Boolean)) return;
+    doRegister(captchaToken);
+  };
+
+  const doRegister = async (overrideToken) => {
 
     setLoading(true);
     setServerError('');
@@ -276,7 +286,17 @@ function Register() {
         password:  form.password.trim(),
         githubRegToken: githubRegToken || undefined,
         githubUsername: githubUsername || undefined,
+        captchaToken: overrideToken || captchaToken,
       });
+      // Clear CAPTCHA if successful
+      if (captchaChallenge) {
+        setCaptchaStatus('success');
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      setCaptchaChallenge(null);
+      setCaptchaToken(null);
+      setCaptchaStatus('idle');
+
       setSuccess('Account created successfully! Logging you in...');
       if (res.data && res.data.token) {
         localStorage.setItem('token', res.data.token);
@@ -292,6 +312,14 @@ function Register() {
           mapped[field] = Array.isArray(msgs) ? msgs[0] : msgs;
         }
         setErrors((prev) => ({ ...prev, ...mapped }));
+      } else if (err.response?.status === 403 && data?.captcha_required) {
+        setCaptchaChallenge({
+          challenge_id: data.challenge_id,
+          image_svg: data.image_svg
+        });
+        setCaptchaStatus('error');
+        setTimeout(() => setCaptchaStatus('idle'), 400); // Reset animation state
+        setServerError('Security check required due to unusual request rate.');
       } else {
         setServerError(data?.message || 'Registration failed. Please try again.');
       }
@@ -353,6 +381,32 @@ function Register() {
           <h1>Create Account</h1>
           <p>Register for IDPS Security Platform</p>
         </div>
+
+        {/* Captcha Gate challenge when required */}
+        {captchaChallenge && (
+          <div style={{ marginBottom: '16px' }}>
+            <CaptchaGate
+              challenge={captchaChallenge}
+              loading={loading}
+              status={captchaStatus}
+              onToken={(token) => {
+                setCaptchaToken(token);
+                doRegister(token);
+              }}
+              onRefresh={async () => {
+                setLoading(true);
+                try {
+                  const res = await refreshCaptcha();
+                  setCaptchaChallenge(res.data);
+                  setCaptchaStatus('idle');
+                } catch (err) {
+                  setServerError('Failed to refresh CAPTCHA.');
+                }
+                setLoading(false);
+              }}
+            />
+          </div>
+        )}
 
         {githubRegToken && (
           <div style={{

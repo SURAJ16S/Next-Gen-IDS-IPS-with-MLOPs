@@ -113,4 +113,8 @@ export const getAdminLogs = () => api.get('/admin/logs');
 export const purgeAdminLogs = (beforeDate) => api.post('/admin/logs/purge', { beforeDate });
 export const pruneAdminLogs = purgeAdminLogs;
 
+export const getAdminBlockedEntities = () => api.get('/admin/blocked');
+export const unblockAdminEntity = (id) => api.patch(`/admin/blocked/${id}/unblock`);
+export const createAdminBlock = (data) => api.post('/admin/blocked', data);
+
 export default api;

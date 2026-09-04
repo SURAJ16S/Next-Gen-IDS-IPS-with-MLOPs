@@ -266,6 +266,26 @@ func (b *BehavioralEngine) TrackDataVolume(srcIP string, bytesIn, bytesOut int64
 	}
 }
 
+// TrackSlowConnection records connections that have existed for a long duration with little data transfer (Slowloris/Slow-POST).
+func (b *BehavioralEngine) TrackSlowConnection(srcIP string, dstPort uint16, duration time.Duration, bytesIn int64) {
+	if duration > 30*time.Second && bytesIn < 1024 {
+		b.bus.EmitDetection(Detection{
+			ID:        "BEH-SLOWLORIS-001",
+			Timestamp: time.Now(),
+			Severity:  SevHigh,
+			Category:  CatDDoS,
+			Protocol:  "TCP",
+			SourceIP:  srcIP,
+			DestPort:  dstPort,
+			Summary:   fmt.Sprintf("Slowloris/Slow-POST detected: %s held connection for %v but sent only %d bytes", srcIP, duration, bytesIn),
+			Details: map[string]any{
+				"duration_sec": duration.Seconds(),
+				"bytes_in":     bytesIn,
+			},
+		})
+	}
+}
+
 // detectBeaconing checks for regular periodic connections (C2 pattern).
 func (b *BehavioralEngine) detectBeaconing(srcIP string, tracker *ipTracker, now time.Time) {
 	intervals := tracker.connectionIntervals

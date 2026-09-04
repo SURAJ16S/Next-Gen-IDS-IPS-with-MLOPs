@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"sync"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -17,12 +18,17 @@ import (
 
 // SMTPAnalyzer inspects SMTP traffic for security-relevant patterns.
 type SMTPAnalyzer struct {
-	bus *DetectionBus
+	bus                *DetectionBus
+	mu                 sync.Mutex
+	starttlsRequested  map[string]bool
 }
 
 // NewSMTPAnalyzer creates an SMTP analyzer.
 func NewSMTPAnalyzer(bus *DetectionBus) *SMTPAnalyzer {
-	return &SMTPAnalyzer{bus: bus}
+	return &SMTPAnalyzer{
+		bus:               bus,
+		starttlsRequested: make(map[string]bool),
+	}
 }
 
 // Analyze inspects SMTP data and emits detections.
@@ -75,6 +81,31 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 
 		// ── MAIL FROM ──
 		if strings.HasPrefix(upper, "MAIL FROM:") {
+			a.mu.Lock()
+			starttlsReq := a.starttlsRequested[connID]
+			a.mu.Unlock()
+
+			if starttlsReq {
+				// We saw STARTTLS before, but now we are parsing plaintext MAIL FROM.
+				// This implies a downgrade/stripping attack where the TLS handshake failed or was blocked.
+				a.bus.EmitDetection(Detection{
+					ID:         "SMTP-STARTTLS-STRIP",
+					Timestamp:  time.Now(),
+					Severity:   SevHigh,
+					Category:   CatTLSDowngrade,
+					Protocol:   "SMTP",
+					SourceIP:   srcIP,
+					SourcePort: srcPort,
+					DestPort:   dstPort,
+					Summary:    "STARTTLS stripping / downgrade detected: Plaintext continuation after STARTTLS",
+					ConnID:     connID,
+				})
+				// Reset state to avoid spamming
+				a.mu.Lock()
+				delete(a.starttlsRequested, connID)
+				a.mu.Unlock()
+			}
+
 			mailFrom = extractEmailAddress(line[10:])
 			a.bus.EmitDetection(Detection{
 				ID:         "SMTP-FROM-001",
@@ -142,6 +173,28 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 
 		// ── AUTH LOGIN/PLAIN ──
 		if strings.HasPrefix(upper, "AUTH ") {
+			a.mu.Lock()
+			starttlsReq := a.starttlsRequested[connID]
+			a.mu.Unlock()
+
+			if starttlsReq {
+				a.bus.EmitDetection(Detection{
+					ID:         "SMTP-STARTTLS-STRIP",
+					Timestamp:  time.Now(),
+					Severity:   SevHigh,
+					Category:   CatTLSDowngrade,
+					Protocol:   "SMTP",
+					SourceIP:   srcIP,
+					SourcePort: srcPort,
+					DestPort:   dstPort,
+					Summary:    "STARTTLS stripping / downgrade detected: Plaintext continuation after STARTTLS",
+					ConnID:     connID,
+				})
+				a.mu.Lock()
+				delete(a.starttlsRequested, connID)
+				a.mu.Unlock()
+			}
+
 			authMethod := strings.TrimSpace(line[5:])
 			if idx := strings.Index(authMethod, " "); idx > 0 {
 				authMethod = authMethod[:idx]
@@ -165,6 +218,10 @@ func (a *SMTPAnalyzer) analyzeClientCommands(connID, srcIP string, srcPort, dstP
 
 		// ── STARTTLS ──
 		if strings.HasPrefix(upper, "STARTTLS") {
+			a.mu.Lock()
+			a.starttlsRequested[connID] = true
+			a.mu.Unlock()
+
 			a.bus.EmitDetection(Detection{
 				ID:         "SMTP-TLS-001",
 				Timestamp:  time.Now(),

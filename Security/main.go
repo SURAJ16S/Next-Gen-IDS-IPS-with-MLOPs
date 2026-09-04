@@ -515,6 +515,10 @@ func initProxyEngineWithPort(configPath string, listenPort, backendPort uint16, 
 	}
 	bus.Subscribe(jsonLogger)
 	bus.Subscribe(stats)
+	detect.NewGraphEngine(bus)
+	detect.NewThresholdCalibrator(bus)
+	detect.NewDeceptionMesh(bus, []int{3306, 5432, 23}).Start()
+	
 	// Forward detections to TUI if one is attached
 	if tuiSub != nil {
 		bus.Subscribe(tuiSub)
@@ -856,7 +860,12 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 
 	// ── Initialize flow tracker and logger ──
 	flowTracker := detect.NewFlowTracker(10000, 120*time.Second)
-	flowLogger, err := detect.NewFlowLogger("logs", 100)
+	// Create a dummy bus for now since eBPF monitor doesn't have a shared one
+	flowLoggerBus := detect.NewDetectionBus()
+	if tuiAlertSub != nil {
+		flowLoggerBus.Subscribe(tuiAlertSub)
+	}
+	flowLogger, err := detect.NewFlowLogger("logs", 100, flowLoggerBus)
 	if err != nil {
 		log.Fatalf("❌  Failed to create flow logger: %v", err)
 	}
@@ -1087,6 +1096,9 @@ func initProxyEngine(configPath string) (*proxy.ProxyEngine, *detect.StatsCollec
 	bus.Subscribe(jsonLogger)
 	bus.Subscribe(stats)
 	bus.Subscribe(&ConsoleLogger{})
+	detect.NewGraphEngine(bus)
+	detect.NewThresholdCalibrator(bus)
+	detect.NewDeceptionMesh(bus, []int{3306, 5432, 23}).Start()
 
 	nodeCfg, _ := LoadNodeConfig()
 	if nodeCfg != nil && globalStreamInterval > 0 {

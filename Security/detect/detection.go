@@ -137,6 +137,9 @@ const (
 	CatCredStuff  = "credential-stuffing"
 	CatPwdSpray   = "password-spray"
 
+	CatSuspicious = "suspicious"
+	CatSSHTool = "ssh-tool"
+
 	// ── HTTP/API additions (from 01_Protocol_Threat_Matrix §4) ──────────────
 	CatLFI                     = "lfi"
 	CatRFI                     = "rfi"

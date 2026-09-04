@@ -14,9 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"context"
 )
 
-// FlowLogger writes completed flow records to a JSONL file.
 type FlowLogger struct {
 	logDir      string
 	file        *os.File
@@ -24,10 +24,10 @@ type FlowLogger struct {
 	maxFileSize int64
 	currentSize int64
 	count       atomic.Int64
+	bus         *DetectionBus
 }
 
-// NewFlowLogger creates a flow logger that writes to the given directory.
-func NewFlowLogger(logDir string, maxFileSizeMB int) (*FlowLogger, error) {
+func NewFlowLogger(logDir string, maxFileSizeMB int, bus *DetectionBus) (*FlowLogger, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
@@ -49,10 +49,11 @@ func NewFlowLogger(logDir string, maxFileSizeMB int) (*FlowLogger, error) {
 		file:        f,
 		maxFileSize: maxSize,
 		currentSize: stat.Size(),
+		bus:         bus,
 	}, nil
 }
 
-// LogFlow writes a single FlowRecord as a JSON line.
+// LogFlow writes a single FlowRecord as a JSON line and scores it via ML.
 func (fl *FlowLogger) LogFlow(rec FlowRecord) {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
@@ -62,6 +63,43 @@ func (fl *FlowLogger) LogFlow(rec FlowRecord) {
 		log.Printf("[flow-logger] Failed to marshal flow: %v", err)
 		return
 	}
+	
+	// Convert to map for ML scoring
+	var flowMap map[string]interface{}
+	if err := json.Unmarshal(data, &flowMap); err == nil && fl.bus != nil {
+		go func(m map[string]interface{}, origRec FlowRecord) {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Millisecond)
+			defer cancel()
+			
+			score, _ := ScoreFlow(ctx, m)
+			if score != nil && score.RiskScore > 70 && score.ModelVersion != "unavailable" {
+				sev := SevMedium
+				if score.RiskScore > 85 {
+					sev = SevHigh
+				}
+				
+				fl.bus.EmitDetection(Detection{
+					ID:         fmt.Sprintf("ML-FLOW-%s", score.PredictedCategory),
+					Timestamp:  time.Now(),
+					Severity:   sev,
+					Category:   "ml-anomaly",
+					Protocol:   origRec.Protocol,
+					SourceIP:   origRec.SrcIP,
+					SourcePort: origRec.SrcPort,
+					DestPort:   origRec.DstPort,
+					Summary: fmt.Sprintf("ML flow anomaly score %.1f — predicted: %s (model: %s)",
+						score.RiskScore, score.PredictedCategory, score.ModelVersion),
+					ConnID: origRec.FlowID,
+					Details: map[string]any{
+						"risk_score":         score.RiskScore,
+						"predicted_category": score.PredictedCategory,
+						"model_version":      score.ModelVersion,
+					},
+				})
+			}
+		}(flowMap, rec)
+	}
+
 	data = append(data, '\n')
 
 	n, err := fl.file.Write(data)

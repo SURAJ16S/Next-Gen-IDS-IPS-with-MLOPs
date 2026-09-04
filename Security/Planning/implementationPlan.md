@@ -488,6 +488,10 @@ Update this table as you complete each task. Mark `[x]` when done.
 | H.2 | Register `/admin/blocklist` route in App router | [ ] | Suraj |
 | H.3 | Add Blocklist link to `AdminSidebar.jsx` | [ ] | Suraj |
 | H.4 | Add "Block" button to `AdminManageNetwork.jsx` | [ ] | Suraj |
+| I.1 | 1.5 SMTP STARTTLS stripping detection (`smtp_analyzer.go`) | [x] | Suraj |
+| I.2 | 1.6 TLS SNI/Certificate mismatch rule (`tls_inspect.go`) | [x] | Suraj |
+| I.3 | 1.7 FTP PORT command bounce detection (`ftp_analyzer.go`) | [ ] | Suraj |
+| I.4 | 1.8 DNS transaction ID mismatch / cache poisoning (`dns_analyzer.go`) | [ ] | Suraj |
 
 ### End-to-End Verification Checklist (Phase I equivalent)
 

@@ -182,6 +182,9 @@ type sshSession struct {
 	// Both are protected by SSHAnalyzer.sessionMu.
 	clientBuf []byte
 	serverBuf []byte
+	clientBytes int64
+	serverBytes int64
+	tunnelAlerted bool
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -235,8 +238,10 @@ type SSHAnalyzer struct {
 	knownTools  map[string]sshToolInfo
 
 	// knownBadHASSH maps known attack-tool HASSH fingerprints to descriptions.
-	// Source: https://github.com/salesforce/hassh (public threat intelligence).
 	knownBadHASSH map[string]string
+
+	// knownVulnerableSSH maps known vulnerable SSH client versions to their CVEs.
+	knownVulnerableSSH map[string]string
 }
 
 // NewSSHAnalyzer creates a stateful SSH analyzer.
@@ -310,6 +315,15 @@ func NewSSHAnalyzer(bus *DetectionBus) *SSHAnalyzer {
 			"92674389fa1e47a27ddd8d9b63ecd42b": "Metasploit Framework SSH scanner",
 			"d41d8cd98f00b204e9800998ecf8427e": "Empty HASSH (null/buggy SSH implementation)",
 			"1c7a1b9c44f45c91a5dce5b5e3f660b3": "Ncrack SSH module (known fingerprint)",
+			"5f41249ed2e1a3d90610f6797a760b94": "Hydra SSH Brute-force Tool",
+			"3c26027df2fbc5d7c474dc1d054238db": "Medusa SSH Brute-force Tool",
+		},
+
+		knownVulnerableSSH: map[string]string{
+			"OpenSSH_8.1": "CVE-202X-XXXX (Possible RCE or privilege escalation)",
+			"OpenSSH_7.2p2": "CVE-2016-6210 (User enumeration vulnerability)",
+			"Dropbear_2016.74": "CVE-2016-7406 (Format string vulnerability)",
+			"libssh_0.7.5": "CVE-2018-10933 (Authentication bypass)",
 		},
 	}
 	go a.cleanupLoop()
@@ -420,6 +434,39 @@ func (a *SSHAnalyzer) Analyze(connID, srcIP string, srcPort, dstPort uint16, dat
 
 	// Process as many complete protocol units as the buffer allows.
 	a.processStream(sess, fromClient, &detections)
+
+	// ── SSH-TUNNEL-001: Tunnel anomaly detection ──
+	if fromClient {
+		sess.clientBytes += int64(len(data))
+	} else {
+		sess.serverBytes += int64(len(data))
+	}
+
+	if sess.state == sshPostNewKeys && !sess.tunnelAlerted {
+		// Threshold: 10MB transferred, connection alive for at least 1 minute
+		totalBytes := sess.clientBytes + sess.serverBytes
+		if totalBytes > 10*1024*1024 && time.Since(sess.newKeysAt) > 1*time.Minute {
+			sess.tunnelAlerted = true
+			detections = append(detections, Detection{
+				ID:         "SSH-TUNNEL-001",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatSuspicious,
+				Protocol:   "SSH",
+				SourceIP:   sess.srcIP,
+				SourcePort: sess.srcPort,
+				DestPort:   sess.dstPort,
+				Summary:    fmt.Sprintf("SSH Tunnel suspected: %d bytes transferred over %s", totalBytes, time.Since(sess.newKeysAt).Round(time.Second)),
+				ConnID:     sess.connID,
+				Details: map[string]any{
+					"client_bytes": sess.clientBytes,
+					"server_bytes": sess.serverBytes,
+					"duration_sec": time.Since(sess.newKeysAt).Seconds(),
+				},
+			})
+		}
+	}
+
 	a.sessionMu.Unlock()
 
 	// Emit detections outside the session lock.
@@ -726,6 +773,28 @@ func (a *SSHAnalyzer) handleVersionString(sess *sshSession, banner string, fromC
 		a.detectKnownTool(sess, softVer, direction, out)
 	}
 
+	// ── SSH-CVE-EXPLOIT: Vulnerable Client Watchlist ──
+	if fromClient {
+		if cveInfo, vulnerable := a.knownVulnerableSSH[softVer]; vulnerable {
+			*out = append(*out, Detection{
+				ID:         "SSH-CVE-EXPLOIT",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatSSHCVEExploit,
+				Protocol:   "SSH",
+				SourceIP:   sess.srcIP,
+				SourcePort: sess.srcPort,
+				DestPort:   sess.dstPort,
+				Summary:    fmt.Sprintf("Vulnerable SSH client detected: %s (%s)", softVer, cveInfo),
+				ConnID:     sess.connID,
+				Details: map[string]any{
+					"software_version": softVer,
+					"cve_details":      cveInfo,
+				},
+			})
+		}
+	}
+
 	// Once both sides have exchanged versions, advance to KEXInit.
 	if sess.gotClientVer && sess.gotServerVer {
 		a.transition(sess, sshKEXInit)
@@ -851,34 +920,52 @@ func (a *SSHAnalyzer) parseKEXInit(sess *sshSession, pkt []byte, paddingLen int,
 	}
 
 	hasshNote := a.knownBadHASSH[hassh]
-	hasshSev := SevInfo
 	if hasshNote != "" {
-		hasshSev = SevHigh
+		*out = append(*out, Detection{
+			ID:         "SSH-HASSH-BAD-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatSSHTool,
+			Protocol:   "SSH",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("Malicious SSH Client HASSH detected: %s (%s)", hassh, hasshNote),
+			ConnID:     sess.connID,
+			Details: map[string]any{
+				"hassh":             hassh,
+				"direction":         direction,
+				"kex_algorithms":    kex,
+				"enc_algorithms":    enc,
+				"mac_algorithms":    mac,
+				"comp_algorithms":   comp,
+				"known_attack_tool": hasshNote,
+				"hash_input":        hashInput,
+			},
+		})
+	} else {
+		*out = append(*out, Detection{
+			ID:         "SSH-HASSH-001",
+			Timestamp:  time.Now(),
+			Severity:   SevInfo,
+			Category:   CatProtocolDetect,
+			Protocol:   "SSH",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("SSH %s HASSH: %s", direction, hassh),
+			ConnID:     sess.connID,
+			Details: map[string]any{
+				"hassh":             hassh,
+				"direction":         direction,
+				"kex_algorithms":    kex,
+				"enc_algorithms":    enc,
+				"mac_algorithms":    mac,
+				"comp_algorithms":   comp,
+				"hash_input":        hashInput,
+			},
+		})
 	}
-
-	*out = append(*out, Detection{
-		ID:         "SSH-HASSH-001",
-		Timestamp:  time.Now(),
-		Severity:   hasshSev,
-		Category:   CatProtocolDetect,
-		Protocol:   "SSH",
-		SourceIP:   sess.srcIP,
-		SourcePort: sess.srcPort,
-		DestPort:   sess.dstPort,
-		Summary:    fmt.Sprintf("SSH %s HASSH: %s%s", direction, hassh, sshFmtNote(hasshNote)),
-		ConnID:     sess.connID,
-		Details: map[string]any{
-			"hassh":             hassh,
-			"direction":         direction,
-			"kex_algorithms":    kex,
-			"enc_algorithms":    enc,
-			"mac_algorithms":    mac,
-			"comp_algorithms":   comp,
-			"known_attack_tool": hasshNote,
-			// hash_input is included for verification against reference implementations.
-			"hash_input": hashInput,
-		},
-	})
 
 	// ── Weak algorithm checks (separate rule IDs per algorithm type) ──
 	a.checkWeak(sess, "SSH-WEAK-KEX", "key-exchange", kex, a.weakKEX, out)

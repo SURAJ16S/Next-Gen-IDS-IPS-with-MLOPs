@@ -39,6 +39,8 @@ type tlsSession struct {
 	serverHelloParsed bool
 	serverCertParsed  bool
 
+	sni string // Extracted from ClientHello
+
 	clientEncrypted bool
 	serverEncrypted bool
 }
@@ -47,6 +49,7 @@ type tlsSession struct {
 type TLSInspector struct {
 	bus         *DetectionBus
 	weakCiphers map[uint16]string
+	knownBadJA3 map[string]string
 	sessions    map[string]*tlsSession
 	sessionMu   sync.Mutex
 }
@@ -70,6 +73,11 @@ func NewTLSInspector(bus *DetectionBus) *TLSInspector {
 			0x0061: "TLS_RSA_EXPORT1024_WITH_RC2_CBC_56_MD5",
 			0x0062: "TLS_RSA_EXPORT1024_WITH_DES_CBC_SHA",
 			0x0064: "TLS_RSA_EXPORT1024_WITH_RC4_56_SHA",
+		},
+		knownBadJA3: map[string]string{
+			"6734f37431670b3ab4292b8f60f29984": "Trickbot Malware",
+			"51c64c77e60f3980eea90869b68c58a8": "Metasploit Meterpreter",
+			"e7d705a3286e19ea42f587b344ee6865": "Standard Kali Linux Client",
 		},
 	}
 	bus.Subscribe(t)
@@ -283,6 +291,7 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 			switch extType {
 			case 0x0000: // server_name (SNI)
 				sni = extractSNI(extData)
+				sess.sni = sni
 			case 0x0010: // ALPN
 				alpn = extractALPN(extData)
 			case 0x000A: // supported_groups (elliptic_curves)
@@ -341,29 +350,49 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 
 	sessionResumption := (sessionIDLen > 0) || hasPSK
 
-	t.bus.EmitDetection(Detection{
-		ID:         "TLS-HELLO-001",
-		Timestamp:  time.Now(),
-		Severity:   SevInfo,
-		Category:   CatProtocolDetect,
-		Protocol:   "TLS",
-		SourceIP:   sess.srcIP,
-		SourcePort: sess.srcPort,
-		DestPort:   sess.dstPort,
-		Summary:    fmt.Sprintf("TLS ClientHello: %s, SNI=%s, JA3=%s", actualVersion, sni, ja3Hash),
-		ConnID:     sess.connID,
-		Details: map[string]any{
-			"ja3_hash":                   ja3Hash,
-			"ja3_string":                 truncate(ja3String, 500),
-			"tls_version":                actualVersion,
-			"sni":                        sni,
-			"alpn":                       alpn,
-			"cipher_suite_count":         len(cipherSuites),
-			"extension_count":            len(extensions),
-			"supported_versions":         supportedVersions,
-			"session_resumption_attempt": sessionResumption,
-		},
-	})
+	if ja3Note, found := t.knownBadJA3[ja3Hash]; found {
+		t.bus.EmitDetection(Detection{
+			ID:         "TLS-JA3-BAD-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatTLSKnownBadFingerprint,
+			Protocol:   "TLS",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("Malicious TLS Client JA3 detected: %s (%s)", ja3Hash, ja3Note),
+			ConnID:     sess.connID,
+			Details: map[string]any{
+				"ja3_hash":   ja3Hash,
+				"ja3_string": truncate(ja3String, 500),
+				"note":       ja3Note,
+			},
+		})
+	} else {
+		t.bus.EmitDetection(Detection{
+			ID:         "TLS-HELLO-001",
+			Timestamp:  time.Now(),
+			Severity:   SevInfo,
+			Category:   CatProtocolDetect,
+			Protocol:   "TLS",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("TLS ClientHello: %s, SNI=%s, JA3=%s", actualVersion, sni, ja3Hash),
+			ConnID:     sess.connID,
+			Details: map[string]any{
+				"ja3_hash":                   ja3Hash,
+				"ja3_string":                 truncate(ja3String, 500),
+				"tls_version":                actualVersion,
+				"sni":                        sni,
+				"alpn":                       alpn,
+				"cipher_suite_count":         len(cipherSuites),
+				"extension_count":            len(extensions),
+				"supported_versions":         supportedVersions,
+				"session_resumption_attempt": sessionResumption,
+			},
+		})
+	}
 
 	if len(weakFound) > 0 {
 		t.bus.EmitDetection(Detection{
@@ -651,6 +680,29 @@ func (t *TLSInspector) parseCertificate(sess *tlsSession, data []byte) {
 			Summary:    fmt.Sprintf("Expired TLS Certificate: %s", cert.Subject.CommonName),
 			ConnID:     sess.connID,
 		})
+	}
+
+	// Rule: SNI Mismatch
+	if sess.sni != "" {
+		if err := cert.VerifyHostname(sess.sni); err != nil {
+			t.bus.EmitDetection(Detection{
+				ID:         "TLS-SNI-MISMATCH",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatTLSSNIMismatch,
+				Protocol:   "TLS",
+				SourceIP:   sess.srcIP,
+				SourcePort: sess.srcPort,
+				DestPort:   sess.dstPort,
+				Summary:    fmt.Sprintf("SNI mismatch: SNI=%s, CertCN=%s", sess.sni, cert.Subject.CommonName),
+				ConnID:     sess.connID,
+				Details: map[string]any{
+					"sni":          sess.sni,
+					"cert_cn":      cert.Subject.CommonName,
+					"cert_dns":     cert.DNSNames,
+				},
+			})
+		}
 	}
 
 	// Rule: Self-Signed Certificate

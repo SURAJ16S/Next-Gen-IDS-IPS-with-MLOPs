@@ -32,6 +32,7 @@ import AdminManageThreats from './pages/AdminManageThreats';
 import AdminManageNetwork from './pages/AdminManageNetwork';
 import AdminManageLogs from './pages/AdminManageLogs';
 import AdminManageNodes from './pages/AdminManageNodes';
+import AdminManageBlocklist from './pages/AdminManageBlocklist';
 
 function App() {
   return (
@@ -84,6 +85,7 @@ function App() {
         <Route path="manage-network" element={<AdminManageNetwork />} />
         <Route path="manage-logs" element={<AdminManageLogs />} />
         <Route path="manage-nodes" element={<AdminManageNodes />} />
+        <Route path="blocklist" element={<AdminManageBlocklist />} />
       </Route>
 
       {/* Redirects for legacy links */}

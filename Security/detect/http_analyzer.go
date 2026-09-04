@@ -28,6 +28,7 @@ type HTTPAnalyzer struct {
 	mu             sync.Mutex
 	reqTimes       map[string]time.Time
 	sessionTracker *SessionTracker
+	floodTracker   *HTTPFloodTracker
 }
 
 type attackPattern struct {
@@ -46,6 +47,7 @@ func NewHTTPAnalyzer(ctx context.Context, bus *DetectionBus) *HTTPAnalyzer {
 		bus:            bus,
 		reqTimes:       make(map[string]time.Time),
 		sessionTracker: NewSessionTracker(bus),
+		floodTracker:   NewHTTPFloodTracker(bus, 10*time.Second, 100),
 	}
 	a.compilePatterns()
 	bus.Subscribe(a)
@@ -154,6 +156,15 @@ func (a *HTTPAnalyzer) compilePatterns() {
 
 		// ── File Upload Risk ──
 		{"HTTP-UPLD-001", "Executable Upload", CatFileUpload, SevHigh, `(?i)\.(php[3-8]?|phtml|asp|aspx|jsp|jspx|exe|dll|bat|cmd|ps1|sh|cgi|py|pl|rb|war|jar)\b`},
+
+		// ── XPath Injection ──
+		{"HTTP-XPATH-001", "XPath Injection", CatSQLi, SevHigh, `(?i)(count\(/\*\)|substring\(|translate\(|string-length\()|['"]?\s*or\s*['"]?1['"]?\s*=\s*['"]?1`},
+
+		// ── Open Redirect ──
+		{"HTTP-REDIR-001", "Open Redirect", CatPathTraversal, SevMedium, `(?i)(redirect|url|next|return_to|returnUrl|goto)\s*=\s*(https?://|//)[^/]`},
+
+		// ── CMS Recon Paths (Behavioral via Regex for convenience) ──
+		{"HTTP-CMS-RECON-001", "CMS Reconnaissance Path", CatBotScanner, SevMedium, `(?i)(/wp-login\.php|/administrator/manifests/|/CHANGELOG\.txt)`},
 	}
 
 	for _, r := range raw {
@@ -291,8 +302,33 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 	}
 	jwtPresent := strings.Contains(headers["authorization"], "Bearer ") ||
 		strings.Contains(headers["cookie"], "eyJ")
-	authPresent := headers["authorization"] != ""
+	
+	var role string
+	authPresent := false
+	if authHeader := headers["authorization"]; authHeader != "" {
+		authPresent = true
+		role = AnalyzeJWT(a.bus, authHeader, srcIP, srcPort, dstPort, connID)
+	}
 
+	// ── HTTP-BFLA-001: BFLA Check ──
+	if role != "" && role != "admin" && strings.HasPrefix(uri, "/admin") {
+		a.bus.EmitDetection(Detection{
+			ID:         "HTTP-BFLA-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatBFLA,
+			Protocol:   "HTTP",
+			SourceIP:   srcIP,
+			SourcePort: srcPort,
+			DestPort:   dstPort,
+			Summary:    fmt.Sprintf("BFLA suspected: User with role '%s' attempted to access '%s'", role, uri),
+			ConnID:     connID,
+			Details: map[string]any{
+				"role": role,
+				"uri":  uri,
+			},
+		})
+	}
 	// ── Emit request metadata detection (INFO level) ──
 	a.bus.EmitDetection(Detection{
 		ID:         "HTTP-REQ-001",
@@ -537,6 +573,53 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 		})
 	}
 
+	// ── Honeytoken / Honeypot Paths ──
+	honeypotPaths := []string{
+		"/.env", "/wp-config.php.bak", "/.git/config",
+		"/phpmyadmin/", "/admin.php", "/.aws/credentials",
+		"/wp-login.php", "/.htpasswd", "/config.php.bak",
+		"/.DS_Store", "/server-status", "/actuator/env",
+	}
+	for _, p := range honeypotPaths {
+		if strings.Contains(decodedURI, p) {
+			a.bus.EmitDetection(Detection{
+				ID:         "HTTP-HONEY-001",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatPathTraversal, // Reusing category or create new
+				Protocol:   "HTTP",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("Access to honeytoken path: %s", p),
+				ConnID:     connID,
+			})
+			break // Emit once per request
+		}
+	}
+
+	// ── Host Header Injection ──
+	hostHeader := headers["host"]
+	// Basic check: if it contains a comma or multiple colons (not IPv6), it might be tampered.
+	// We'll look for simple space or multiple domains.
+	if strings.Contains(hostHeader, " ") || strings.Contains(hostHeader, ",") {
+		a.bus.EmitDetection(Detection{
+			ID:         "HTTP-HOST-001",
+			Timestamp:  time.Now(),
+			Severity:   SevMedium,
+			Category:   CatHTTPSmuggling, // Reusing or new category
+			Protocol:   "HTTP",
+			SourceIP:   srcIP,
+			SourcePort: srcPort,
+			DestPort:   dstPort,
+			Summary:    "Suspicious Host header format",
+			ConnID:     connID,
+			Details: map[string]any{
+				"host": hostHeader,
+			},
+		})
+	}
+
 	// ── WebSocket upgrade detection ──
 	if strings.EqualFold(headers["upgrade"], "websocket") {
 		a.bus.EmitDetection(Detection{
@@ -556,6 +639,24 @@ func (a *HTTPAnalyzer) analyzeRequest(connID, srcIP string, srcPort, dstPort uin
 				"ws_protocol": headers["sec-websocket-protocol"],
 			},
 		})
+
+		// Check for Origin mismatch or missing Sec-WebSocket-Key
+		origin := headers["origin"]
+		// simplistic check: if origin is absent, it's suspicious for a WS upgrade.
+		if origin == "" || headers["sec-websocket-key"] == "" {
+			a.bus.EmitDetection(Detection{
+				ID:         "HTTP-WS-002",
+				Timestamp:  time.Now(),
+				Severity:   SevMedium,
+				Category:   CatProtocolDetect, // Or CSRF
+				Protocol:   "HTTP",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary:    "WebSocket upgrade missing Origin or Sec-WebSocket-Key",
+				ConnID:     connID,
+			})
+		}
 	}
 
 	// ── Tier-3: ML payload scoring (fail-open, 50 ms budget) ─────────────────
@@ -851,6 +952,24 @@ func (a *HTTPAnalyzer) analyzeUserAgent(connID, srcIP string, srcPort, dstPort u
 		"curl":            "curl",
 		"wget":            "wget",
 		"scrapy":          "Scrapy (web scraper)",
+		// New additions
+		"ffuf":        "FFuF (web fuzzer)",
+		"feroxbuster": "Feroxbuster (directory brute-forcer)",
+		"acunetix":    "Acunetix (web vulnerability scanner)",
+		"nessus":      "Nessus (vulnerability scanner)",
+		"qualys":      "Qualys (vulnerability scanner)",
+		"arachni":     "Arachni (web vulnerability scanner)",
+		"w3af":        "w3af (web vulnerability scanner)",
+		"wpscan":      "WPScan (WordPress scanner)",
+		"joomscan":    "JoomScan (Joomla scanner)",
+		"droopescan":  "Droopescan (CMS scanner)",
+		"whatweb":     "WhatWeb (web scanner)",
+		"medusa":      "Medusa (brute-force tool)",
+		"ncrack":      "Ncrack (network authentication cracker)",
+		"patator":     "Patator (multi-purpose brute-forcer)",
+		"crowbar":     "Crowbar (brute-force tool)",
+		"rustscan":    "RustScan (port scanner)",
+		"zmap":        "ZMap (internet scanner)",
 	}
 
 	uaLower := strings.ToLower(ua)
@@ -913,6 +1032,25 @@ func (a *HTTPAnalyzer) detectSmuggling(connID, srcIP string, srcPort, dstPort ui
 				"transfer_encoding": headers["transfer-encoding"],
 			},
 		})
+	}
+
+	// 0.CL check
+	if hasTE && !hasCL {
+		// Just a heuristic check for malformed chunked requests
+		if strings.Contains(raw, "Transfer-Encoding:") && !strings.Contains(raw, "0\r\n\r\n") {
+			a.bus.EmitDetection(Detection{
+				ID:         "HTTP-SMUG-004",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatHTTPSmuggling,
+				Protocol:   "HTTP",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary:    "TE present without CL (0.CL style smuggling anomaly)",
+				ConnID:     connID,
+			})
+		}
 	}
 }
 

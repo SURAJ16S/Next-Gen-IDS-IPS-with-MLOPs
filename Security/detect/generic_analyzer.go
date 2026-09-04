@@ -8,6 +8,7 @@ package detect
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,11 +19,16 @@ import (
 // GenericAnalyzer handles protocols without dedicated analyzers.
 type GenericAnalyzer struct {
 	bus *DetectionBus
+	udpReqMu   sync.Mutex
+	udpReqSize map[string]int
 }
 
 // NewGenericAnalyzer creates a generic analyzer.
 func NewGenericAnalyzer(bus *DetectionBus) *GenericAnalyzer {
-	return &GenericAnalyzer{bus: bus}
+	return &GenericAnalyzer{
+		bus:        bus,
+		udpReqSize: make(map[string]int),
+	}
 }
 
 // Analyze inspects data for the given protocol and emits detections.
@@ -425,6 +431,33 @@ func (a *GenericAnalyzer) analyzeNTP(connID, srcIP string, srcPort, dstPort uint
 			ConnID:     connID,
 		})
 	}
+	if fromClient {
+		a.udpReqMu.Lock()
+		a.udpReqSize[connID] = len(data)
+		a.udpReqMu.Unlock()
+	} else {
+		a.udpReqMu.Lock()
+		reqSize := a.udpReqSize[connID]
+		a.udpReqMu.Unlock()
+		if reqSize > 0 && len(data) > reqSize*5 && len(data) > 300 {
+			a.bus.EmitDetection(Detection{
+				ID:         "GEN-NTP-AMP-001",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatUDPAmplification,
+				Protocol:   "NTP",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("NTP Amplification suspected: response is %d bytes (request %d bytes)", len(data), reqSize),
+				ConnID:     connID,
+				Details: map[string]any{
+					"req_size":  reqSize,
+					"resp_size": len(data),
+				},
+			})
+		}
+	}
 }
 
 // ── SNMP ─────────────────────────────────────────────────────────────────────
@@ -468,6 +501,34 @@ func (a *GenericAnalyzer) analyzeSNMP(connID, srcIP string, srcPort, dstPort uin
 				},
 			})
 			break
+		}
+	}
+
+	if fromClient {
+		a.udpReqMu.Lock()
+		a.udpReqSize[connID] = len(data)
+		a.udpReqMu.Unlock()
+	} else {
+		a.udpReqMu.Lock()
+		reqSize := a.udpReqSize[connID]
+		a.udpReqMu.Unlock()
+		if reqSize > 0 && len(data) > reqSize*5 && len(data) > 500 {
+			a.bus.EmitDetection(Detection{
+				ID:         "GEN-SNMP-AMP-001",
+				Timestamp:  time.Now(),
+				Severity:   SevHigh,
+				Category:   CatUDPAmplification,
+				Protocol:   "SNMP",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary:    fmt.Sprintf("SNMP Amplification suspected: response is %d bytes (request %d bytes)", len(data), reqSize),
+				ConnID:     connID,
+				Details: map[string]any{
+					"req_size":  reqSize,
+					"resp_size": len(data),
+				},
+			})
 		}
 	}
 }
