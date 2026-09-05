@@ -77,7 +77,6 @@ const PIPELINE_STAGES = [
   { id: 'extract', label: '📦 Extract & Clean' },
   { id: 'techDetect', label: '🔍 Tech Detection' },
   { id: 'install', label: '⚙️ Resolve Deps' },
-  { id: 'optimize', label: '⚡ Speed Optimization' },
   { id: 'sast', label: '🛡️ SAST Security' },
   { id: 'osv', label: '🔬 Supply Chain Scan' },
   { id: 'trivy', label: '🐳 Container Sec' },
@@ -90,7 +89,6 @@ const computeStagesFromLogs = (logs, currentStatus) => {
     extract: 'pending',
     techDetect: 'pending',
     install: 'pending',
-    optimize: 'pending',
     sast: 'pending',
     osv: 'pending',
     trivy: 'pending',
@@ -111,7 +109,6 @@ const computeStagesFromLogs = (logs, currentStatus) => {
   let hasExtractDone = false;
   let hasTechDone = false;
   let hasAuditDone = false;
-  let hasPerfDone = false;
   let hasSastStarted = false;
   let hasSastDone = false;
   let hasOsvStarted = false;
@@ -139,12 +136,8 @@ const computeStagesFromLogs = (logs, currentStatus) => {
     if (uppercaseLog.includes('AUDITING PACKAGE DEPENDENCIES') || uppercaseLog.includes('DEPENDENCY-AUDIT') || uppercaseLog.includes('RESOLVING DEPENDENCIES')) {
       hasAuditDone = true;
     }
-    if (uppercaseLog.includes('[PERF-OPTIMIZE]') || uppercaseLog.includes('PERFORMANCE OPTIMIZATION')) {
-      hasPerfDone = true;
-    }
     if (uppercaseLog.includes('STARTING STEP: SEMGREP') || uppercaseLog.includes('RUNNING SEMGREP') || uppercaseLog.includes('SEMGREP-SAST')) {
       hasSastStarted = true;
-      hasPerfDone = true;
       hasAuditDone = true;
     }
     if (uppercaseLog.includes('STEP COMPLETED: SEMGREP') || uppercaseLog.includes('SEMGREP SAST: PASSED') || uppercaseLog.includes('ALERT(S) FOUND')) {
@@ -193,12 +186,9 @@ const computeStagesFromLogs = (logs, currentStatus) => {
   if (hasSastStarted || hasOsvStarted || hasTrivyStarted || hasPackStarted) statuses.install = 'done';
   else if (hasTechDone || hasAuditDone) statuses.install = 'running';
 
-  if (hasPerfDone || hasSastStarted) statuses.optimize = 'done';
-  else if (statuses.install === 'done') statuses.optimize = 'running';
-
   if (hasSastDone) statuses.sast = 'done';
   else if (hasSastStarted) statuses.sast = 'running';
-  else if (statuses.optimize === 'done') statuses.sast = 'running';
+  else if (statuses.install === 'done') statuses.sast = 'running';
 
   if (hasOsvDone) statuses.osv = 'done';
   else if (hasOsvStarted) statuses.osv = 'running';
@@ -218,7 +208,7 @@ const computeStagesFromLogs = (logs, currentStatus) => {
 
   // Override stages on failure
   if (currentStatus === 'failed') {
-    const order = ['extract', 'techDetect', 'install', 'optimize', 'sast', 'osv', 'trivy', 'package', 'preview'];
+    const order = ['extract', 'techDetect', 'install', 'sast', 'osv', 'trivy', 'package', 'preview'];
     let foundActive = false;
     for (const key of order) {
       if (statuses[key] === 'running') {
@@ -1249,8 +1239,7 @@ function DevOps() {
         <p className="page-subtitle">Compile, secure-gate, and run application source containers dynamically — no Docker Desktop required</p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: isLogExpanded ? '5fr 5fr' : '7fr 3fr', gap: '24px', alignItems: 'start', transition: 'grid-template-columns 0.3s ease' }}>
-
+     <div style={{ display: 'grid', gridTemplateColumns: window.innerWidth <= 900 ? '1fr' : (isLogExpanded ? '5fr 5fr' : '7fr 3fr'), gap: '24px', alignItems: 'start', transition: 'grid-template-columns 0.3s ease' }}>
         {/* ── Upload Card ──────────────────────────────────────────────── */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px', height: '1250px', overflowY: 'auto', paddingRight: '12px' }}>
 
@@ -2064,7 +2053,7 @@ function DevOps() {
           <form onSubmit={handleUploadSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
 
             {/* Project name + port side-by-side */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
+           <div style={{ display: 'grid', gridTemplateColumns: window.innerWidth <= 480 ? '1fr' : '1fr auto', gap: '10px' }}>
               <div style={sectionStyle}>
                 <label style={labelStyle}>Project Name</label>
                 <input
@@ -3879,7 +3868,7 @@ function DevOps() {
       {/* ── Deployment History Table ────────────────────────────────────────── */}
       <div>
         <h3 className="section-heading" style={{ margin: '12px 0 14px' }}>Deployment History</h3>
-        <div className="card" style={{ padding: '0', height: '400px', overflowY: 'auto' }}>
+        <div className="card" style={{ padding: '0', height: '400px', overflowY: 'auto', overflowX: 'auto' }}>
           <table>
             <thead>
               <tr>
@@ -4323,7 +4312,7 @@ function DevOps() {
           position: 'fixed',
           bottom: '90px',
           right: '24px',
-          width: '380px',
+           width: 'min(380px, calc(100vw - 32px))',
           height: '520px',
           background: 'var(--bg-secondary)',
           border: '1px solid var(--border-subtle)',
@@ -4367,7 +4356,6 @@ function DevOps() {
               jobId={activeJobId} 
               birdMessage={showBirdAgent ? birdMessage : null} 
               disabled={!getChatAccess(activeDep)}
-              buildStatus={activeDep?.status}
             />
           )}
         </div>
@@ -4376,16 +4364,13 @@ function DevOps() {
   );
 }
 
-function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, buildStatus }) {
+function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled }) {
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
   const [isAgentTyping, setIsAgentTyping] = useState(false);
   const chatEndRef = useRef(null);
-
-  const isBuilding = ['building', 'pending', 'scanning'].includes(buildStatus);
-  const isFailed = buildStatus === 'failed';
 
   useEffect(() => {
     if (deploymentId) {
@@ -4406,7 +4391,7 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, bu
       setChatMessages(prev => {
         const exists = prev.some(m => m.text === birdMessage);
         if (exists) return prev;
-        return [...prev, { role: 'agent', text: `✨ [Self-Healing Log]: ${birdMessage}`, isSelfHealing: true }];
+        return [...prev, { role: 'agent', text: `✨ [Self-Healing Log]: ${birdMessage}` }];
       });
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     }
@@ -4440,16 +4425,16 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, bu
     } catch (_) {}
   };
 
-  const handleSendChat = async (presetText) => {
-    const textToSend = presetText || chatInput;
-    if (!textToSend.trim() || isAgentTyping || isBuilding) return;
-    if (!presetText) setChatInput('');
-    setChatMessages(prev => [...prev, { role: 'user', text: textToSend }]);
+  const handleSendChat = async () => {
+    if (!chatInput.trim() || isAgentTyping) return;
+    const text = chatInput;
+    setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', text }]);
     setIsAgentTyping(true);
     setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
 
     try {
-      const res = await api.post(`/devops/${deploymentId}/agent/chat`, { message: textToSend, chatId: activeChatId });
+      const res = await api.post(`/devops/${deploymentId}/agent/chat`, { message: text, chatId: activeChatId });
       setChatMessages(prev => [...prev, { role: 'agent', text: res.data.message, pendingAction: res.data.pendingExec ? { commands: res.data.commands } : null }]);
     } catch (err) {
       setChatMessages(prev => [...prev, { role: 'agent', text: `Error: ${err.response?.data?.message || err.message}` }]);
@@ -4482,31 +4467,6 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, bu
     setChatMessages(prev => [...prev, { role: 'agent', text: 'Execution rejected by user.' }]);
   };
 
-  const promptCategories = [
-    {
-      category: "🔧 Fix Build Errors",
-      prompts: [
-        "Fix npm peer dependency conflicts (use --legacy-peer-deps)",
-        "Fix TypeScript compilation errors in tsconfig.json",
-        "Relax package dependencies in package.json to resolve conflicts"
-      ]
-    },
-    {
-      category: "🔍 Inspect & Diagnose",
-      prompts: [
-        "Show me the build error log summary",
-        "Inspect package.json and tsconfig.json for errors"
-      ]
-    },
-    {
-      category: "♻️ Patch & Retry",
-      prompts: [
-        "Patch package.json to fix peer dependencies and trigger rebuild",
-        "Relax tsconfig.json strictness to bypass compiler errors"
-      ]
-    }
-  ];
-
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       {/* Session selector */}
@@ -4536,7 +4496,7 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, bu
             key={idx} 
             style={{ 
               alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-              maxWidth: '88%',
+              maxWidth: '85%',
               background: msg.role === 'user' ? 'var(--accent-blue)' : 'rgba(255,255,255,0.05)',
               padding: '8px 10px',
               borderRadius: '8px',
@@ -4549,35 +4509,6 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, bu
           >
             {(() => {
               if (!msg.text) return null;
-
-              // Handle Self-Healing Thinking UI
-              const isSelfHealing = msg.isSelfHealing || msg.text.includes('[Self-Healing Log]') || msg.text.includes('[SELF-HEALING]');
-              if (isSelfHealing) {
-                const cleanText = msg.text.replace(/^✨\s*\[Self-Healing Log\]:\s*/, '');
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <details 
-                      open
-                      style={{
-                        background: 'rgba(15, 23, 42, 0.75)',
-                        border: '1px solid rgba(56, 189, 248, 0.3)',
-                        borderRadius: '6px',
-                        padding: '8px 10px',
-                        fontSize: '11.5px'
-                      }}
-                    >
-                      <summary style={{ cursor: 'pointer', color: '#38bdf8', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', outline: 'none' }}>
-                        <span style={{ display: 'inline-block', animation: 'pulse 1.5s infinite' }}>✨</span>
-                        Self-Healing Agent Thinking & Diagnosis
-                      </summary>
-                      <div style={{ marginTop: '6px', whiteSpace: 'pre-wrap', color: '#e2e8f0', fontFamily: 'monospace', fontSize: '11px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '6px' }}>
-                        {cleanText}
-                      </div>
-                    </details>
-                  </div>
-                );
-              }
-
               const thoughtRegex = /<(thought|thinking)>([\s\S]*?)<\/\1>/gi;
               const match = thoughtRegex.exec(msg.text);
               if (match) {
@@ -4592,8 +4523,8 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, bu
                       padding: '4px 8px',
                       fontSize: '11px'
                     }}>
-                      <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontWeight: 500, outline: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <Bot size={12} color="#38bdf8" /> Agent Thinking Process...
+                      <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontWeight: 500, outline: 'none' }}>
+                        Thinking Process...
                       </summary>
                       <div style={{ marginTop: '4px', whiteSpace: 'pre-wrap', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: '10px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '4px' }}>
                         {thoughtContent}
@@ -4664,97 +4595,35 @@ function FloatingAgentChatPanel({ deploymentId, jobId, birdMessage, disabled, bu
         ))}
         {isAgentTyping && (
           <div style={{ alignSelf: 'flex-start', color: 'var(--text-muted)', fontSize: '11.5px', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <Bot size={12} className="animate-spin" /> DevOps Agent is thinking & writing...
+            <Bot size={12} /> DevOps Agent is writing...
           </div>
         )}
         <div ref={chatEndRef} />
       </div>
 
-      {/* Build Failure Quick Prompt Chips */}
-      {isFailed && !disabled && (
-        <div style={{ padding: '8px 10px', background: 'rgba(239, 68, 68, 0.08)', borderTop: '1px solid rgba(239, 68, 68, 0.2)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <div style={{ fontSize: '10.5px', fontWeight: 700, color: '#f87171', display: 'flex', alignItems: 'center', gap: '4px' }}>
-            <AlertCircle size={11} /> Build Failed — Allowed Fix Prompts (Click to Use):
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', maxHeight: '90px', overflowY: 'auto' }}>
-            {promptCategories.flatMap(cat => cat.prompts).map((prompt, pIdx) => (
-              <button
-                key={pIdx}
-                onClick={() => setChatInput(prompt)}
-                style={{
-                  background: 'rgba(30, 41, 59, 0.8)',
-                  border: '1px solid rgba(56, 189, 248, 0.3)',
-                  color: '#e2e8f0',
-                  borderRadius: '4px',
-                  padding: '3px 7px',
-                  fontSize: '10.5px',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  transition: 'all 0.15s'
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = '#38bdf8'; e.currentTarget.style.color = '#fff'; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'rgba(56, 189, 248, 0.3)'; e.currentTarget.style.color = '#e2e8f0'; }}
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Chat input form / Build Status Lock Banner */}
-      <div style={{ padding: '8px', borderTop: '1px solid var(--border-subtle)', background: 'rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-        {isBuilding ? (
-          <div style={{
-            padding: '10px 12px',
-            background: 'rgba(234, 179, 8, 0.1)',
-            border: '1px solid rgba(234, 179, 8, 0.3)',
-            borderRadius: '6px',
-            color: '#fde047',
-            fontSize: '11.5px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px'
-          }}>
-            <Cpu size={16} color="#facc15" style={{ animation: 'spin 2s linear infinite' }} />
-            <div>
-              <span style={{ fontWeight: 700 }}>Build currently running...</span>
-              <div style={{ fontSize: '10.5px', color: '#fef08a', marginTop: '1px' }}>
-                The self-healing build agent is monitoring the pipeline. Input will unlock if build fails or completes.
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', gap: '6px' }}>
-            <textarea
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              disabled={disabled || isBuilding}
-              placeholder={
-                disabled 
-                  ? "Chat with AI agent is restricted by the project owner."
-                  : isFailed 
-                    ? "Select a prompt above or describe how to patch files..."
-                    : "Ask agent to check file or fix errors..."
-              }
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendChat();
-                }
-              }}
-              rows={2}
-              style={{ flex: 1, background: '#fff', color: 'black', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', fontSize: '12px', outline: 'none', resize: 'none', fontFamily: 'inherit', lineHeight: '1.3' }}
-            />
-            <button
-              onClick={() => handleSendChat()}
-              disabled={isAgentTyping || disabled || isBuilding}
-              style={{ background: isBuilding ? '#475569' : 'var(--accent-blue)', color: '#fff', border: 'none', borderRadius: '4px', width: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: isBuilding ? 'not-allowed' : 'pointer' }}
-            >
-              <Send size={12} />
-            </button>
-          </div>
-        )}
+      {/* Chat input form */}
+      <div style={{ padding: '8px', borderTop: '1px solid var(--border-subtle)', background: 'rgba(0,0,0,0.15)', display: 'flex', gap: '6px' }}>
+        <textarea
+          value={chatInput}
+          onChange={(e) => setChatInput(e.target.value)}
+          disabled={disabled}
+          placeholder={disabled ? "Chat with AI agent is restricted by the project owner." : "Ask agent to check file or fix errors..."}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              handleSendChat();
+            }
+          }}
+          rows={2}
+          style={{ flex: 1, background: '#fff', color: 'black', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', fontSize: '12px', outline: 'none', resize: 'none', fontFamily: 'inherit', lineHeight: '1.3' }}
+        />
+        <button
+          onClick={handleSendChat}
+          disabled={isAgentTyping || disabled}
+          style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', borderRadius: '4px', width: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+        >
+          <Send size={12} />
+        </button>
       </div>
     </div>
   );
