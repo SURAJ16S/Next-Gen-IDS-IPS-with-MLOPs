@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0
-// detect/tls_inspect.go — TLS deep parsing and JA3/JA3S fingerprinting.
+// detect/tls_inspect.go — TLS deep parsing, JA3/JA3N/JA3S/JA4 fingerprinting.
 // Includes robust TCP stream reassembly for fragmented records and TLS 1.2
 // certificate inspection. Note: TLS 1.3 certificates are encrypted and
 // invisible to passive inspection.
+//
+// Fingerprint hierarchy:
+//   JA3   — MD5 of (version,ciphers,extensions,curves,ecpf) in wire order
+//   JA3N  — Same as JA3 but extensions sorted before hashing (Chrome-stable)
+//   JA3S  — MD5 of (version,selectedCipher,extensions) from ServerHello
+//   JA4   — FoxIO two-part SHA-256 prefix fingerprint (Chrome 110+ stable)
 
 package detect
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,7 +59,8 @@ type tlsSession struct {
 type TLSInspector struct {
 	bus         *DetectionBus
 	weakCiphers map[uint16]string
-	knownBadJA3 map[string]string
+	knownBadJA3 map[string]string // JA3 MD5 hash → threat label
+	knownBadJA4 map[string]string // JA4 fingerprint → threat label
 	sessions    map[string]*tlsSession
 	sessionMu   sync.Mutex
 }
@@ -78,6 +89,15 @@ func NewTLSInspector(bus *DetectionBus) *TLSInspector {
 			"6734f37431670b3ab4292b8f60f29984": "Trickbot Malware",
 			"51c64c77e60f3980eea90869b68c58a8": "Metasploit Meterpreter",
 			"e7d705a3286e19ea42f587b344ee6865": "Standard Kali Linux Client",
+		},
+		// knownBadJA4 is populated from the FoxIO JA4+ threat-intel database.
+		// JA4 fingerprints are stable across Chrome 110+ (extension-order randomisation
+		// does not affect them) and are the preferred feed format going forward.
+		// Feed: https://github.com/FoxIO-LLC/ja4/tree/main/technical_details
+		// Redis key: rep:feed:ja4_bad  (populated by feed_ingest job)
+		knownBadJA4: map[string]string{
+			// Example entries — replace with live FoxIO feed data.
+			// Format: "t13d<N><N>h2_<12hexchars>_<12hexchars>" : "<threat label>"
 		},
 	}
 	bus.Subscribe(t)
@@ -267,6 +287,7 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 	var ellipticCurves []uint16
 	var ecPointFormats []uint8
 	var supportedVersions []uint16
+	var signatureAlgorithms []uint16 // parsed for JA4 extension hash (Bug #2 fix)
 	hasPSK := false
 
 	if offset+2 <= len(data) {
@@ -302,6 +323,8 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 						ecPointFormats = append(ecPointFormats, b)
 					}
 				}
+			case 0x000D: // signature_algorithms — required in JA4 extension hash (FoxIO spec §ext-hash)
+				signatureAlgorithms = extractSignatureAlgorithms(extData)
 			case 0x002B: // supported_versions
 				supportedVersions = extractSupportedVersions(extData)
 			case 0x0029: // pre_shared_key
@@ -312,7 +335,7 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 		}
 	}
 
-	// ── Compute JA3 fingerprint ──
+	// ── Compute JA3 fingerprint (wire order — do NOT sort; preserves feed compatibility) ──
 	var filteredEC []string
 	for _, ec := range ellipticCurves {
 		if !isGREASE(ec) {
@@ -326,7 +349,7 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 	}
 
 	filteredCiphers := filterGREASE16(cipherStrs, cipherSuites)
-	filteredExts := filterGREASE16(extensionStrs, extensions)
+	filteredExts := filterGREASE16(extensionStrs, extensions) // wire order — unchanged for JA3
 
 	ja3String := fmt.Sprintf("%d,%s,%s,%s,%s",
 		clientVersion,
@@ -337,7 +360,35 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 	)
 	ja3Hash := fmt.Sprintf("%x", md5.Sum([]byte(ja3String)))
 
-	// Determine actual TLS version
+	// ── Compute JA3N fingerprint (sorted extensions — Chrome 110+ stable) ──
+	// JA3N is identical to JA3 except extension types are sorted **numerically**
+	// before joining. This neutralises Chrome's ClientHello extension-order
+	// randomisation introduced in Chrome 110 (early 2023). Attack-tool stacks
+	// (sqlmap, scripts, malware) typically use static TLS implementations and
+	// produce identical JA3 and JA3N values.
+	//
+	// Bug #7 fix: sort numerically, not lexicographically. Lexicographic sort on
+	// decimal strings breaks for values ≥ 10 (e.g. "9" > "10" as strings).
+	sortedExtVals := make([]uint16, 0, len(filteredExts))
+	for _, s := range filteredExts {
+		v, _ := strconv.ParseUint(s, 10, 16)
+		sortedExtVals = append(sortedExtVals, uint16(v))
+	}
+	sort.Slice(sortedExtVals, func(i, j int) bool { return sortedExtVals[i] < sortedExtVals[j] })
+	sortedExts := make([]string, len(sortedExtVals))
+	for i, v := range sortedExtVals {
+		sortedExts[i] = fmt.Sprintf("%d", v)
+	}
+	ja3nString := fmt.Sprintf("%d,%s,%s,%s,%s",
+		clientVersion,
+		strings.Join(filteredCiphers, "-"),
+		strings.Join(sortedExts, "-"),
+		strings.Join(filteredEC, "-"),
+		strings.Join(ecpfStrs, "-"),
+	)
+	ja3nHash := fmt.Sprintf("%x", md5.Sum([]byte(ja3nString)))
+
+	// ── Determine actual TLS version ──
 	actualVersion := tlsVersionString(clientVersion)
 	if len(supportedVersions) > 0 {
 		for _, sv := range supportedVersions {
@@ -348,8 +399,16 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 		}
 	}
 
+	// ── Compute JA4 fingerprint (FoxIO spec, 2023) ──
+	// JA4 format: {a}_{b}_{c}
+	//   a = t{tlsVer}{sniFlag}{cipherCount:02}{extCount:02}{alpnFirstLast}
+	//   b = SHA-256[:12] of sorted comma-joined GREASE-filtered cipher hex codes
+	//   c = SHA-256[:12] of (sorted ext hex codes)_(sorted sig-alg hex codes)
+	ja4Hash := computeJA4(clientVersion, supportedVersions, sni, alpn, cipherSuites, extensions, signatureAlgorithms)
+
 	sessionResumption := (sessionIDLen > 0) || hasPSK
 
+	// ── Emit TLS-JA3-BAD-001 if JA3 matches known-bad feed ──
 	if ja3Note, found := t.knownBadJA3[ja3Hash]; found {
 		t.bus.EmitDetection(Detection{
 			ID:         "TLS-JA3-BAD-001",
@@ -365,6 +424,8 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 			Details: map[string]any{
 				"ja3_hash":   ja3Hash,
 				"ja3_string": truncate(ja3String, 500),
+				"ja3n_hash":  ja3nHash,
+				"ja4_hash":   ja4Hash,
 				"note":       ja3Note,
 			},
 		})
@@ -378,11 +439,13 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 			SourceIP:   sess.srcIP,
 			SourcePort: sess.srcPort,
 			DestPort:   sess.dstPort,
-			Summary:    fmt.Sprintf("TLS ClientHello: %s, SNI=%s, JA3=%s", actualVersion, sni, ja3Hash),
+			Summary:    fmt.Sprintf("TLS ClientHello: %s, SNI=%s, JA3=%s JA4=%s", actualVersion, sni, ja3Hash, ja4Hash),
 			ConnID:     sess.connID,
 			Details: map[string]any{
 				"ja3_hash":                   ja3Hash,
 				"ja3_string":                 truncate(ja3String, 500),
+				"ja3n_hash":                  ja3nHash,
+				"ja4_hash":                   ja4Hash,
 				"tls_version":                actualVersion,
 				"sni":                        sni,
 				"alpn":                       alpn,
@@ -390,6 +453,30 @@ func (t *TLSInspector) parseClientHello(sess *tlsSession, data []byte) {
 				"extension_count":            len(extensions),
 				"supported_versions":         supportedVersions,
 				"session_resumption_attempt": sessionResumption,
+			},
+		})
+	}
+
+	// ── Emit TLS-JA4-BAD-001 if JA4 matches known-bad feed ──
+	// This fires independently of the JA3 check so both can alert on the same
+	// connection without one suppressing the other.
+	if ja4Note, found := t.knownBadJA4[ja4Hash]; found {
+		t.bus.EmitDetection(Detection{
+			ID:         "TLS-JA4-BAD-001",
+			Timestamp:  time.Now(),
+			Severity:   SevHigh,
+			Category:   CatTLSKnownBadFingerprint,
+			Protocol:   "TLS",
+			SourceIP:   sess.srcIP,
+			SourcePort: sess.srcPort,
+			DestPort:   sess.dstPort,
+			Summary:    fmt.Sprintf("Malicious TLS Client JA4 detected: %s (%s)", ja4Hash, ja4Note),
+			ConnID:     sess.connID,
+			Details: map[string]any{
+				"ja4_hash":   ja4Hash,
+				"ja3_hash":   ja3Hash,
+				"ja3n_hash":  ja3nHash,
+				"note":       ja4Note,
 			},
 		})
 	}
@@ -583,6 +670,23 @@ func extractSupportedVersions(data []byte) []uint16 {
 	return versions
 }
 
+// extractSignatureAlgorithms parses the signature_algorithms extension (type 0x000D).
+// Format: 2-byte total list length, followed by 2-byte SignatureScheme values.
+// Required for correct JA4 extension hash (FoxIO spec: ext_hash = SHA-256(ext_types_"_"_sig_algs)).
+func extractSignatureAlgorithms(data []byte) []uint16 {
+	if len(data) < 2 {
+		return nil
+	}
+	listLen := int(binary.BigEndian.Uint16(data[0:2]))
+	offset := 2
+	var schemes []uint16
+	for i := 0; i < listLen && offset+2 <= len(data); i += 2 {
+		schemes = append(schemes, binary.BigEndian.Uint16(data[offset:offset+2]))
+		offset += 2
+	}
+	return schemes
+}
+
 func tlsVersionString(v uint16) string {
 	switch v {
 	case 0x0300:
@@ -612,6 +716,173 @@ func filterGREASE16(strs []string, vals []uint16) []string {
 		}
 	}
 	return result
+}
+
+// ── JA4 fingerprint implementation ────────────────────────────────────────────
+// Spec: https://github.com/FoxIO-LLC/ja4/blob/main/technical_details/JA4.md
+//
+// JA4 format: {prefix}_{cipherHash}_{extHash}
+//
+//	{prefix}     = t{tlsVer}{sniFlag}{cipherCount:02}{extCount:02}{alpnFirstLast}
+//	{cipherHash} = SHA-256[:12] of comma-joined sorted 4-char lowercase hex cipher codes
+//	{extHash}    = SHA-256[:12] of:
+//	                 (sorted 4-char hex ext types, SNI+ALPN excluded)
+//	                 _ (sorted 4-char hex sig-alg scheme values)
+//
+// Fixes applied vs. initial implementation:
+//	#1  Ciphers use 4-char lowercase hex (was: 5-char decimal)
+//	#2  Signature algorithms appended to ext hash input after "_" separator
+//	#3  Extension types use 4-char lowercase hex (was: 5-char decimal)
+//	#4  SNI-absent flag is "i" (IP), not "n" (spec §SNI)
+//	#5  ALPN token is first+last char of first protocol, not first 2 chars
+//
+// All fields are computed from already-parsed ClientHello data — no additional
+// parsing needed. The function is pure (no side-effects) so it is easily testable.
+func computeJA4(
+	clientVersion uint16,
+	supportedVersions []uint16,
+	sni string,
+	alpn []string,
+	cipherSuites []uint16,
+	extensions []uint16,
+	sigAlgs []uint16, // signature_algorithms extension values (ext type 0x000D)
+) string {
+	// ── 1. Determine TLS version token ──────────────────────────────────────
+	// Prefer the highest non-GREASE supported_versions entry; fall back to the
+	// ClientHello legacy_version field. (Spec: handshake version is ignored.)
+	effectiveVer := clientVersion
+	for _, sv := range supportedVersions {
+		if !isGREASE(sv) && sv > effectiveVer {
+			effectiveVer = sv
+		}
+	}
+	verToken := ja4TLSVersionToken(effectiveVer)
+
+	// ── 2. SNI flag ──────────────────────────────────────────────────────────
+	// FoxIO spec §SNI: SNI present → 'd' (domain), absent → 'i' (IP address).
+	// Bug #4 fix: was incorrectly using 'n'; spec clearly states 'i' for no SNI.
+	sniFlag := "i"
+	if sni != "" {
+		sniFlag = "d"
+	}
+
+	// ── 3. Cipher suites: GREASE-filtered, 4-char hex, sorted, count ≤ 99 ────
+	// Bug #1 fix: spec says "cipher hex codes sorted in hex order".
+	// 4-char lowercase hex strings sort lexicographically into correct hex order.
+	var filteredCS []string
+	for _, cs := range cipherSuites {
+		if !isGREASE(cs) {
+			filteredCS = append(filteredCS, fmt.Sprintf("%04x", cs))
+		}
+	}
+	sort.Strings(filteredCS) // lexicographic on 4-char hex == hex order ✓
+	cipherCount := len(filteredCS)
+	if cipherCount > 99 {
+		cipherCount = 99
+	}
+
+	// ── 4. Extensions: GREASE-filtered, 4-char hex, SNI+ALPN excluded from hash
+	// Bug #3 fix: spec says "extension hex codes"; was using decimal.
+	// filteredExtAll  → used for extension count in prefix (includes SNI, ALPN).
+	// filteredExtHash → used for the hash input (SNI=0x0000, ALPN=0x0010 excluded;
+	//                   they are captured in the prefix instead — per FoxIO spec).
+	var filteredExtAll []string
+	var filteredExtHash []string
+	for _, ext := range extensions {
+		if isGREASE(ext) {
+			continue
+		}
+		h := fmt.Sprintf("%04x", ext)
+		filteredExtAll = append(filteredExtAll, h)
+		if ext != 0x0000 && ext != 0x0010 {
+			filteredExtHash = append(filteredExtHash, h)
+		}
+	}
+	sort.Strings(filteredExtAll)
+	sort.Strings(filteredExtHash)
+	extCount := len(filteredExtAll)
+	if extCount > 99 {
+		extCount = 99
+	}
+
+	// ── 5. ALPN token: first + last character of first protocol ──────────────
+	// Bug #5 fix: spec says "first and last characters of first ALPN extension
+	// value". Was using first 2 chars (wrong for protocols like "http/1.1" where
+	// correct token is 'h'+'1'="h1", not "ht").
+	alpnToken := "00"
+	if len(alpn) > 0 {
+		p := alpn[0]
+		switch len(p) {
+		case 0:
+			// no-op — alpnToken stays "00"
+		case 1:
+			// single-char protocol: repeat it
+			alpnToken = string(p[0]) + string(p[0])
+		default:
+			// first + last char
+			alpnToken = string(p[0]) + string(p[len(p)-1])
+		}
+	}
+
+	// ── 6. Build human-readable prefix ───────────────────────────────────────
+	prefix := fmt.Sprintf("t%s%s%02d%02d%s",
+		verToken,
+		sniFlag,
+		cipherCount,
+		extCount,
+		alpnToken,
+	)
+
+	// ── 7. Cipher hash: SHA-256[:12] of comma-joined sorted hex ciphers ──────
+	cipherInput := strings.Join(filteredCS, ",")
+	cipherSum := sha256.Sum256([]byte(cipherInput))
+	cipherHashFull := hex.EncodeToString(cipherSum[:])
+	cipherHash := cipherHashFull
+	if len(cipherHash) > 12 {
+		cipherHash = cipherHash[:12]
+	}
+
+	// ── 8. Extension hash: SHA-256[:12] of (ext_types)_(sig_algs) ────────────
+	// Bug #2 fix: spec §ext-hash says the hash input is:
+	//   (comma-joined sorted ext hex codes) + "_" + (comma-joined sorted sig-alg hex codes)
+	// GREASE-filter sig algs, format as 4-char hex, sort in hex order.
+	var filteredSigAlgs []string
+	for _, sa := range sigAlgs {
+		if !isGREASE(sa) {
+			filteredSigAlgs = append(filteredSigAlgs, fmt.Sprintf("%04x", sa))
+		}
+	}
+	sort.Strings(filteredSigAlgs) // hex order ✓
+
+	extInput := strings.Join(filteredExtHash, ",") + "_" + strings.Join(filteredSigAlgs, ",")
+	extSum := sha256.Sum256([]byte(extInput))
+	extHashFull := hex.EncodeToString(extSum[:])
+	extHash := extHashFull
+	if len(extHash) > 12 {
+		extHash = extHash[:12]
+	}
+
+	// ── 9. Assemble final JA4 fingerprint ────────────────────────────────────
+	return fmt.Sprintf("%s_%s_%s", prefix, cipherHash, extHash)
+}
+
+// ja4TLSVersionToken converts a TLS wire-format version to the JA4 two-char token.
+// Reference: FoxIO JA4 spec §3 TLS Version.
+func ja4TLSVersionToken(v uint16) string {
+	switch v {
+	case 0x0300:
+		return "s3" // SSL 3.0
+	case 0x0301:
+		return "10" // TLS 1.0
+	case 0x0302:
+		return "11" // TLS 1.1
+	case 0x0303:
+		return "12" // TLS 1.2
+	case 0x0304:
+		return "13" // TLS 1.3
+	default:
+		return "00" // Unknown
+	}
 }
 
 // parseCertificate extracts data from a TLS Certificate message.
