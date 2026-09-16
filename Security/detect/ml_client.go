@@ -30,10 +30,10 @@ var mlHTTPClient = &http.Client{Timeout: mlTimeout}
 // ──────────────────────────────────────────────────────────────────────────────
 
 // MLScoreRequest is the JSON body sent to the scoring service.
-// Only one of PayloadStats or FlowRecord should be populated per call.
 type MLScoreRequest struct {
 	PayloadStats map[string]interface{} `json:"payload_stats,omitempty"`
 	FlowRecord   map[string]interface{} `json:"flow_record,omitempty"`
+	SSHRecord    *SSHFeatureVector      `json:"ssh_record,omitempty"`
 }
 
 // MLScoreResponse is the JSON body returned by the scoring service.
@@ -46,11 +46,21 @@ type MLScoreResponse struct {
 	Confidence float64 `json:"confidence"`
 	// ModelVersion identifies which model artifact was used.
 	ModelVersion string `json:"model_version"`
+	// ContributingFeatures explains why the model scored the way it did.
+	ContributingFeatures map[string]float64 `json:"contributing_features"`
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Public API
 // ──────────────────────────────────────────────────────────────────────────────
+
+// ScoreSSH sends a combined L4+L7 SSH feature vector to the ML service.
+func ScoreSSH(ctx context.Context, vec SSHFeatureVector) (*MLScoreResponse, error) {
+	req := MLScoreRequest{
+		SSHRecord: &vec,
+	}
+	return scoreML(ctx, mlServiceURL+"/score/ssh", req)
+}
 
 // ScoreHTTPPayload calls the ML service for HTTP payload anomaly scoring and
 // multi-class attack classification. The caller should pass the PayloadStats
@@ -66,7 +76,10 @@ func ScoreHTTPPayload(ctx context.Context, stats map[string]interface{}) (*MLSco
 // The caller should pass a map of flow feature columns that match the
 // FlowRecord schema in feature_encoder.py.
 func ScoreFlow(ctx context.Context, flow map[string]interface{}) (*MLScoreResponse, error) {
-	return scoreML(ctx, mlServiceURL+"/score/flow", MLScoreRequest{FlowRecord: flow})
+	req := MLScoreRequest{
+		FlowRecord: flow,
+	}
+	return scoreML(ctx, mlServiceURL+"/score/flow", req)
 }
 
 // MLServiceHealthy performs a lightweight /health probe against the scoring
@@ -124,9 +137,10 @@ func scoreML(ctx context.Context, url string, payload MLScoreRequest) (*MLScoreR
 // so log consumers can distinguish a real low-risk score from a fail-open.
 func failOpen() *MLScoreResponse {
 	return &MLScoreResponse{
-		RiskScore:         0,
-		PredictedCategory: "",
-		Confidence:        0,
-		ModelVersion:      "unavailable",
+		RiskScore:            0,
+		PredictedCategory:    "",
+		Confidence:           0,
+		ModelVersion:         "unavailable",
+		ContributingFeatures: nil,
 	}
 }

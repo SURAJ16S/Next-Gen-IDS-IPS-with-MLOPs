@@ -28,6 +28,7 @@ type BehavioralEngine struct {
 	// Per-IP tracking
 	mu          sync.Mutex
 	ipTrackers  map[string]*ipTracker
+	dstTrackers map[string]*dstTracker
 	lastCleanup time.Time
 }
 
@@ -55,6 +56,14 @@ type ipTracker struct {
 	lastRateAlert time.Time
 }
 
+// dstTracker maintains state for a single destination IP (target).
+// Used for detecting distributed attacks like credential stuffing.
+type dstTracker struct {
+	authFailures []time.Time
+	sources      map[string]int // srcIP -> failure count
+	lastSeen     time.Time
+}
+
 // NewBehavioralEngine creates a behavioral detection engine.
 func NewBehavioralEngine(bus *DetectionBus, connPerMin, portScan, bruteForce int) *BehavioralEngine {
 	if connPerMin <= 0 {
@@ -73,11 +82,24 @@ func NewBehavioralEngine(bus *DetectionBus, connPerMin, portScan, bruteForce int
 		portScanThreshold:   portScan,
 		bruteForceThreshold: bruteForce,
 		ipTrackers:          make(map[string]*ipTracker),
+		dstTrackers:         make(map[string]*dstTracker),
 		lastCleanup:         time.Now(),
 	}
 
+	bus.Subscribe(engine)
 	return engine
 }
+
+// OnDetection satisfies DetectionSubscriber to intercept events for cross-connection analysis.
+func (b *BehavioralEngine) OnDetection(d Detection) {
+	if d.ID == "SSH-TEARDOWN-001" {
+		// Single rapid teardown event from ssh_analyzer.go
+		b.TrackSSHFailAtDst(d.Details["target_ip"].(string), d.SourceIP, d.DestPort)
+	}
+}
+
+// OnConnectionClose satisfies DetectionSubscriber (no-op here).
+func (b *BehavioralEngine) OnConnectionClose(c ConnectionRecord) {}
 
 // TrackConnection records a new connection from an IP to a port.
 func (b *BehavioralEngine) TrackConnection(srcIP string, dstPort uint16) {
@@ -230,6 +252,64 @@ func (b *BehavioralEngine) TrackAuthFailure(srcIP string, dstPort uint16, protoc
 	}
 }
 
+// TrackSSHFailAtDst records an authentication failure against a specific target.
+// It detects distributed brute-force / credential stuffing where many IPs attack one target.
+func (b *BehavioralEngine) TrackSSHFailAtDst(dstIP, srcIP string, dstPort uint16) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	now := time.Now()
+	tracker, exists := b.dstTrackers[dstIP]
+	if !exists {
+		tracker = &dstTracker{
+			sources: make(map[string]int),
+		}
+		b.dstTrackers[dstIP] = tracker
+	}
+
+	tracker.authFailures = append(tracker.authFailures, now)
+	tracker.sources[srcIP]++
+	tracker.lastSeen = now
+
+	// Prune old failures (keep last 10 minutes for distributed attacks)
+	cutoff := now.Add(-10 * time.Minute)
+	pruned := tracker.authFailures[:0]
+	// Also we need to decrement source counts for pruned events, but that's complex
+	// since we don't store srcIP per event. For an IDS heuristic, we can approximate
+	// or just clear the sources map if it gets too old.
+	// We'll simplify: just prune timestamps. The source map resets when the tracker expires.
+	for _, t := range tracker.authFailures {
+		if t.After(cutoff) {
+			pruned = append(pruned, t)
+		}
+	}
+	tracker.authFailures = pruned
+
+	// Threshold: > 15 failures from > 3 distinct IPs
+	if len(tracker.authFailures) > 15 && len(tracker.sources) > 3 {
+		b.bus.EmitDetection(Detection{
+			ID:        "BEH-DIST-BRUTE-001",
+			Timestamp: now,
+			Severity:  SevCritical,
+			Category:  CatSSHBruteForce,
+			Protocol:  "SSH", // Defaulting to SSH as per use case
+			SourceIP:  "Multiple",
+			DestPort:  dstPort,
+			Summary:   fmt.Sprintf("Distributed Brute-Force: %d failures from %d IPs against %s", len(tracker.authFailures), len(tracker.sources), dstIP),
+			Details: map[string]any{
+				"target_ip":      dstIP,
+				"failure_count":  len(tracker.authFailures),
+				"distinct_ips":   len(tracker.sources),
+				"threshold_ip":   3,
+				"threshold_fail": 15,
+			},
+		})
+		// Reset to avoid alert storm
+		tracker.authFailures = nil
+		tracker.sources = make(map[string]int)
+	}
+}
+
 // TrackDataVolume records data transfer volume for exfiltration detection.
 func (b *BehavioralEngine) TrackDataVolume(srcIP string, bytesIn, bytesOut int64) {
 	b.mu.Lock()
@@ -345,6 +425,11 @@ func (b *BehavioralEngine) cleanup(now time.Time) {
 	for ip, tracker := range b.ipTrackers {
 		if tracker.lastSeen.Before(cutoff) {
 			delete(b.ipTrackers, ip)
+		}
+	}
+	for ip, tracker := range b.dstTrackers {
+		if tracker.lastSeen.Before(cutoff) {
+			delete(b.dstTrackers, ip)
 		}
 	}
 }

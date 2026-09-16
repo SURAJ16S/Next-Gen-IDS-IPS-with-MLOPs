@@ -292,6 +292,16 @@ def train_ssh_classifier(input_path: str) -> None:
         model_name="ssh_brute_classifier",
     )
 
+    # Ablation pass: remove rule-adjacent features to see if ML learns them independently
+    print("\n--- Running Feature Ablation Pass (Step 8) ---")
+    ablation_cols = [c for c in SSH_FEATURE_COLUMNS if c not in ("banner_scan_flag", "hassh_known_bad")]
+    _train_generic_classifier(
+        input_path, load_ssh_features, ablation_cols,
+        experiment_name="ids-ml/ssh-brute-classifier",
+        run_name="random-forest-ssh-brute-ablated",
+        model_name="ssh_brute_classifier_ablated",
+    )
+
 
 def train_dns_classifier(input_path: str) -> None:
     """Model #5 — DNS tunneling/DGA classifier. Labels:

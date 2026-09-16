@@ -10,7 +10,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -871,10 +873,71 @@ func runEBPFMonitor(targetPort uint16, ifaceName string, proxyStats *detect.Stat
 	}
 	defer flowLogger.Close()
 
-	// Drain completed flows to JSONL logger
+	// ── Initialize flow correlator ──
+	sshCorrelator := detect.NewFlowCorrelator()
+
+	// ── Initialize SSH Feature Logger ──
+	sshFeatureFile, err := os.OpenFile("logs/ssh_features.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("❌  Failed to open ssh_features.jsonl: %v", err)
+	}
+	defer sshFeatureFile.Close()
+	sshFeatureEncoder := json.NewEncoder(sshFeatureFile)
+
+	// Drain completed flows to JSONL logger and Correlator
 	go func() {
 		for rec := range flowTracker.CompletedFlows() {
 			flowLogger.LogFlow(rec)
+			sshCorrelator.AddFlowRecord(rec)
+		}
+	}()
+
+	// Drain SSH sessions to Correlator
+	go func() {
+		for sshRec := range detect.SSHSessionChan {
+			sshCorrelator.AddSSHSessionRecord(sshRec)
+		}
+	}()
+
+	// Drain completed correlated vectors to ML Client and JSONL Logger
+	go func() {
+		for vec := range sshCorrelator.OutCh {
+			// Write to JSONL for training (Data Collection Step 7)
+			sshFeatureEncoder.Encode(vec)
+
+			// Call ML Service; fail-open
+			score, _ := detect.ScoreSSH(context.Background(), vec)
+			if score != nil && score.RiskScore > 70 && score.ModelVersion != "unavailable" {
+				sev := detect.SevMedium
+				if score.RiskScore > 85 {
+					sev = detect.SevHigh
+				}
+
+				details := map[string]any{
+					"risk_score":         score.RiskScore,
+					"predicted_category": score.PredictedCategory,
+					"confidence":         score.Confidence,
+					"model_version":      score.ModelVersion,
+				}
+				for k, v := range score.ContributingFeatures {
+					details["feature_"+k] = v
+				}
+
+				flowLoggerBus.EmitDetection(detect.Detection{
+					ID:         fmt.Sprintf("ML-SSH-%s", score.PredictedCategory),
+					Timestamp:  time.Now(),
+					Severity:   sev,
+					Category:   "ml-anomaly",
+					Protocol:   "TCP", // SSH is over TCP
+					SourceIP:   vec.SrcIP,
+					SourcePort: 0, // not readily available in vec, 0 is fine
+					DestPort:   22,
+					Summary: fmt.Sprintf("ML SSH anomaly score %.1f — predicted: %s (model: %s)",
+						score.RiskScore, score.PredictedCategory, score.ModelVersion),
+					ConnID:  vec.ConnID,
+					Details: details,
+				})
+			}
 		}
 	}()
 

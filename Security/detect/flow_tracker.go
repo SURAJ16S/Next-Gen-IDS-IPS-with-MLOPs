@@ -8,6 +8,8 @@
 package detect
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -74,14 +76,14 @@ type FlowRecord struct {
 	TotalBytes    int64 `json:"total_bytes"`
 
 	// ── Packet Size Statistics ──
-	FwdPktSizeMax  float64 `json:"fwd_pkt_size_max"`
-	FwdPktSizeMin  float64 `json:"fwd_pkt_size_min"`
-	FwdPktSizeMean float64 `json:"fwd_pkt_size_mean"`
-	FwdPktSizeStd  float64 `json:"fwd_pkt_size_std"`
-	BwdPktSizeMax  float64 `json:"bwd_pkt_size_max"`
-	BwdPktSizeMin  float64 `json:"bwd_pkt_size_min"`
-	BwdPktSizeMean float64 `json:"bwd_pkt_size_mean"`
-	BwdPktSizeStd  float64 `json:"bwd_pkt_size_std"`
+	FwdPktSizeMax  float64 `json:"fwd_pkt_len_max"`
+	FwdPktSizeMin  float64 `json:"fwd_pkt_len_min"`
+	FwdPktSizeMean float64 `json:"fwd_pkt_len_mean"`
+	FwdPktSizeStd  float64 `json:"fwd_pkt_len_std"`
+	BwdPktSizeMax  float64 `json:"bwd_pkt_len_max"`
+	BwdPktSizeMin  float64 `json:"bwd_pkt_len_min"`
+	BwdPktSizeMean float64 `json:"bwd_pkt_len_mean"`
+	BwdPktSizeStd  float64 `json:"bwd_pkt_len_std"`
 
 	// ── TCP Flag Counts ──
 	SYNCount int64 `json:"syn_count"`
@@ -125,6 +127,7 @@ type FlowRecord struct {
 // flowState is the internal mutable state used to accumulate per-packet data.
 type flowState struct {
 	key FlowKey
+	flowID string
 
 	startTime time.Time
 	lastSeen  time.Time
@@ -233,8 +236,13 @@ func (ft *FlowTracker) TrackPacket(pkt PacketEvent) {
 		if len(ft.flows) >= ft.maxFlows {
 			ft.evictOldest()
 		}
+		
+		hashInput := fmt.Sprintf("%s|%d|%s|%d|%s|%d", key.SrcIP, key.SrcPort, key.DstIP, key.DstPort, key.Protocol, pkt.Timestamp.UnixNano())
+		hashBytes := sha256.Sum256([]byte(hashInput))
+		
 		fs = &flowState{
 			key:           key,
+			flowID:        fmt.Sprintf("%x", hashBytes)[:16],
 			startTime:     pkt.Timestamp,
 			initiatorIP:   pkt.SrcIP,
 			initiatorPort: pkt.SrcPort,
@@ -350,7 +358,7 @@ func (ft *FlowTracker) finalize(fs *flowState) FlowRecord {
 	activePeriods, idlePeriods := computeActiveIdle(fs.allTimestamps, 1*time.Second)
 
 	rec := FlowRecord{
-		FlowID:     fs.key.SrcIP + ":" + itoa(fs.key.SrcPort) + "-" + fs.key.DstIP + ":" + itoa(fs.key.DstPort) + "-" + fs.key.Protocol,
+		FlowID:     fs.flowID,
 		SrcIP:      fs.key.SrcIP,
 		DstIP:      fs.key.DstIP,
 		SrcPort:    fs.key.SrcPort,

@@ -63,16 +63,22 @@ FLOW_FEATURE_COLUMNS = [
 # per-IP rolling counters already defined in the master plan's Redis schema
 # (roll:conn:{ip}, roll:failedlogin:{ip}) plus a couple of SSH-specific flags.
 SSH_FEATURE_COLUMNS = [
-    "failed_login_count_10min",   # ZCARD roll:failedlogin:{ip} in last 10 min
-    "conn_count_10min",           # ZCARD roll:conn:{ip} in last 10 min
-    "distinct_ports_touched",     # SCARD roll:ports:{ip}
-    "avg_session_duration_ms",
-    "rapid_teardown_ratio",       # fraction of sessions closed within the brute-force window (see ssh_analyzer.go bruteForceWindow)
-    "hassh_seen_before",          # 0/1 — has this HASSH been seen from this IP before (repeat tool vs one-off)
-    "hassh_known_bad",            # 0/1 — matched knownBadHASSH lookup
-    "banner_scan_flag",           # 0/1 — CatSSHBannerScan fired on this connection
-    "weak_algo_flag",             # 0/1 — CatSSHWeakAlgo fired
-    "iat_std_ms",                 # inter-attempt-time std dev — low = scripted, high = human
+    # --- L4 Features ---
+    "flow_duration_ms",
+    "fwd_pkts", "bwd_pkts", "fwd_bytes", "bwd_bytes",
+    "fwd_pkt_len_mean", "fwd_pkt_len_std",
+    "bwd_pkt_len_mean", "bwd_pkt_len_std",
+    "fwd_iat_mean", "fwd_iat_std",
+    "bwd_iat_mean", "bwd_iat_std",
+    # --- Derived Ratios ---
+    "fwd_bwd_byte_ratio", "fwd_bwd_pkt_ratio",
+    # --- L7 SSH Features ---
+    "hassh_known_bad", "weak_algo_flag", "banner_scan_flag",
+    "tcp_to_banner_ms", "banner_to_kex_ms", "kex_to_newkeys_ms",
+    "total_duration_ms", "pkts_before_newkeys", "bytes_before_newkeys",
+    "client_software_cat", # Mapped to int (0=standard, 1=auto, 2=scanner, 3=unknown)
+    # --- Behavioral Aggregates ---
+    "dst_failed_sessions_10min",
 ]
 
 # --- Model #5: DNS tunneling / DGA detector ---------------------------------
@@ -163,9 +169,25 @@ def _flatten_ssh_record(rec: dict) -> dict:
     Expected upstream shape (Go side, once emitted alongside the existing
     Detection events): one JSON object per closed SSH session, with the
     rolling-counter fields pulled from Redis DB 1 at session-close time."""
-    out = {col: rec.get(col, 0.0) for col in SSH_FEATURE_COLUMNS}
+    out = {col: float(rec.get(col, 0.0)) for col in SSH_FEATURE_COLUMNS if col != "client_software_cat"}
+    
+    # Handle boolean flags explicitly to ensure they are 0.0/1.0
+    for flag in ["hassh_known_bad", "weak_algo_flag", "banner_scan_flag"]:
+        out[flag] = 1.0 if rec.get(flag) else 0.0
+    
+    # Handle categorical client_software_cat
+    cat_str = str(rec.get("client_software_cat", "unknown")).lower()
+    if cat_str == "standard":
+        out["client_software_cat"] = 0.0
+    elif cat_str == "auto":
+        out["client_software_cat"] = 1.0
+    elif cat_str == "scanner":
+        out["client_software_cat"] = 2.0
+    else:
+        out["client_software_cat"] = 3.0
+
     out["_conn_id"] = rec.get("conn_id")
-    out["_source_ip"] = rec.get("source_ip")
+    out["_source_ip"] = rec.get("src_ip")
     out["_label"] = rec.get("label")  # "benign" | "brute_force" | "cred_stuff" | "pwd_spray" | "bot"
     return out
 
@@ -266,5 +288,32 @@ if __name__ == "__main__":
         },
     }
     flat = _flatten_http_record(sample)
-    print("Flattened columns check:", all(c in flat for c in HTTP_FEATURE_COLUMNS))
+    print("Flattened HTTP columns check:", all(c in flat for c in HTTP_FEATURE_COLUMNS))
     print(pd.DataFrame([flat])[HTTP_FEATURE_COLUMNS])
+
+    sample_ssh = {
+        "conn_id": "test_ssh1",
+        "src_ip": "203.0.113.11",
+        "flow_duration_ms": 1500.5,
+        "fwd_pkts": 10, "bwd_pkts": 12,
+        "fwd_bytes": 1000, "bwd_bytes": 3500,
+        "fwd_pkt_len_mean": 100.0, "fwd_pkt_len_std": 10.0,
+        "bwd_pkt_len_mean": 291.6, "bwd_pkt_len_std": 50.0,
+        "fwd_iat_mean": 150.0, "fwd_iat_std": 20.0,
+        "bwd_iat_mean": 125.0, "bwd_iat_std": 15.0,
+        "fwd_bwd_byte_ratio": 0.285, "fwd_bwd_pkt_ratio": 0.833,
+        "hassh_known_bad": False,
+        "weak_algo_flag": True,
+        "banner_scan_flag": False,
+        "tcp_to_banner_ms": 10.5,
+        "banner_to_kex_ms": 25.1,
+        "kex_to_newkeys_ms": 55.0,
+        "total_duration_ms": 1500.5,
+        "pkts_before_newkeys": 5,
+        "bytes_before_newkeys": 800,
+        "client_software_cat": "standard",
+        "dst_failed_sessions_10min": 0
+    }
+    flat_ssh = _flatten_ssh_record(sample_ssh)
+    print("\nFlattened SSH columns check:", all(c in flat_ssh for c in SSH_FEATURE_COLUMNS))
+    print(pd.DataFrame([flat_ssh])[SSH_FEATURE_COLUMNS])

@@ -214,7 +214,10 @@ def score_ssh(req: SSHRequest) -> ScoreResponse:
         response.predicted_category = predicted
         response.confidence = confidence
         response.model_version = artifact["version"]
-        response.contributing_features = dict(zip(SSH_FEATURE_COLUMNS, X[0].tolist()))
+        all_feats = dict(zip(SSH_FEATURE_COLUMNS, X[0].tolist()))
+        # Return only top 3 features by absolute magnitude for explainability
+        top_3 = dict(sorted(all_feats.items(), key=lambda x: abs(x[1]), reverse=True)[:3])
+        response.contributing_features = top_3
 
     if req.source_ip:
         rep = lookup_reputation(req.source_ip)

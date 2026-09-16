@@ -169,6 +169,18 @@ type sshSession struct {
 	state         sshConnState
 	stateEntered  time.Time
 	newKeysAt     time.Time // monotonic: when sshPostNewKeys was entered
+	tcpSynAt      time.Time
+	bannerAt      time.Time
+	kexInitAt     time.Time
+	
+	pktsBeforeNewKeys  int
+	bytesBeforeNewKeys int64
+	
+	clientSoftwareCat string
+	weakAlgoFlag      bool
+	hasshKnownBad     bool
+	bannerScanFlag    bool
+	
 	clientVersion string    // e.g. "SSH-2.0-OpenSSH_8.9"
 	serverVersion string
 	clientHASSH   string
@@ -212,6 +224,39 @@ func (w *bruteForceWindow) count(window time.Duration) int {
 func (w *bruteForceWindow) add() {
 	w.events = append(w.events, rapidTeardownEvent{at: time.Now()})
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ML-L4 Session Export
+// ──────────────────────────────────────────────────────────────────────────────
+
+// SSHSessionRecord contains ML-L4 behavioral features extracted by the L7 Proxy.
+// This is emitted at session close and correlated with the eBPF FlowRecord.
+type SSHSessionRecord struct {
+	ConnID          string `json:"conn_id"`
+	SrcIP           string `json:"src_ip"`
+	DstIP           string `json:"dst_ip"`
+	SrcPort         uint16 `json:"src_port"`
+	DstPort         uint16 `json:"dst_port"`
+	ClientSoftware  string `json:"client_software_cat"`
+	ClientVersion   string `json:"client_version"`
+	ServerVersion   string `json:"server_version"`
+	WeakAlgoFlag    bool   `json:"weak_algo_flag"`
+	HASSHKnownBad   bool   `json:"hassh_known_bad"`
+	BannerScanFlag  bool   `json:"banner_scan_flag"`
+
+	// Timers (nanoseconds duration from start, converted to ms by ML later)
+	TcpToBannerDuration  time.Duration `json:"tcp_to_banner_duration"`
+	BannerToKexDuration  time.Duration `json:"banner_to_kex_duration"`
+	KexToNewKeysDuration time.Duration `json:"kex_to_newkeys_duration"`
+	TotalDuration        time.Duration `json:"total_duration"`
+
+	// Counters before encryption boundary
+	PktsBeforeNewKeys  int   `json:"pkts_before_newkeys"`
+	BytesBeforeNewKeys int64 `json:"bytes_before_newkeys"`
+}
+
+// SSHSessionChan is a global channel for async correlation of SSH sessions.
+var SSHSessionChan = make(chan SSHSessionRecord, 1000)
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SSH Analyzer
@@ -346,6 +391,7 @@ func (a *SSHAnalyzer) getOrCreate(connID, srcIP string, srcPort, dstPort uint16)
 			dstPort:      dstPort,
 			state:        sshTCPEstablished,
 			stateEntered: time.Now(),
+			tcpSynAt:     time.Now(),
 			lastActivity: time.Now(),
 		}
 		a.sessions[connID] = sess
@@ -356,6 +402,11 @@ func (a *SSHAnalyzer) getOrCreate(connID, srcIP string, srcPort, dstPort uint16)
 // transition moves a session to a new state.
 // Caller MUST hold a.sessionMu.
 func (a *SSHAnalyzer) transition(sess *sshSession, newState sshConnState) {
+	if newState == sshVersionExchange && sess.state == sshTCPEstablished {
+		sess.bannerAt = time.Now()
+	} else if newState == sshKEXInit && sess.state == sshVersionExchange {
+		sess.kexInitAt = time.Now()
+	}
 	sess.state = newState
 	sess.stateEntered = time.Now()
 	if newState == sshPostNewKeys {
@@ -498,6 +549,7 @@ func (a *SSHAnalyzer) AnalyzeClose(connID, srcIP string, srcPort, dstPort uint16
 	// Confidence: MEDIUM. Legitimate clients can also disconnect early on
 	// authentication failure or connectivity errors.
 	if sess.state == sshVersionExchange && sess.gotServerVer && !sess.gotClientVer {
+		sess.bannerScanFlag = true
 		detections = append(detections, Detection{
 			ID:         "SSH-SCAN-001",
 			Timestamp:  time.Now(),
@@ -521,6 +573,37 @@ func (a *SSHAnalyzer) AnalyzeClose(connID, srcIP string, srcPort, dstPort uint16
 		})
 	}
 
+	// ── Emit SSHSessionRecord to the ML Correlator ──
+	rec := SSHSessionRecord{
+		ConnID:             connID,
+		SrcIP:              srcIP,
+		SrcPort:            srcPort,
+		DstPort:            dstPort,
+		ClientSoftware:     sess.clientSoftwareCat,
+		ClientVersion:      sess.clientVersion,
+		ServerVersion:      sess.serverVersion,
+		WeakAlgoFlag:       sess.weakAlgoFlag,
+		HASSHKnownBad:      sess.hasshKnownBad,
+		BannerScanFlag:     sess.bannerScanFlag,
+		TotalDuration:      time.Since(sess.tcpSynAt),
+		PktsBeforeNewKeys:  sess.pktsBeforeNewKeys,
+		BytesBeforeNewKeys: sess.bytesBeforeNewKeys,
+	}
+	if !sess.bannerAt.IsZero() {
+		rec.TcpToBannerDuration = sess.bannerAt.Sub(sess.tcpSynAt)
+	}
+	if !sess.kexInitAt.IsZero() {
+		rec.BannerToKexDuration = sess.kexInitAt.Sub(sess.bannerAt)
+	}
+	if !sess.newKeysAt.IsZero() {
+		rec.KexToNewKeysDuration = sess.newKeysAt.Sub(sess.kexInitAt)
+	}
+	select {
+	case SSHSessionChan <- rec:
+	default:
+	}
+
+
 	// ── SSH-BRUTE-001: Heuristic Rapid-Teardown / Failed Auth Indicator ──
 	// A connection that entered PostNewKeys (completed KEX) and closed within
 	// sshBruteTeardownMax is a heuristic indicator of a failed authentication
@@ -535,6 +618,24 @@ func (a *SSHAnalyzer) AnalyzeClose(connID, srcIP string, srcPort, dstPort uint16
 	if sess.state == sshPostNewKeys {
 		teardownDelay := time.Since(sess.newKeysAt)
 		if teardownDelay <= sshBruteTeardownMax {
+			
+			// Emit single event for behavioral correlation (distributed brute-force)
+			detections = append(detections, Detection{
+				ID:         "SSH-TEARDOWN-001",
+				Timestamp:  time.Now(),
+				Severity:   SevInfo,
+				Category:   CatConnLifecycle,
+				Protocol:   "SSH",
+				SourceIP:   srcIP,
+				SourcePort: srcPort,
+				DestPort:   dstPort,
+				Summary:    "Rapid SSH connection teardown",
+				ConnID:     connID,
+				Details: map[string]any{
+					"target_ip": "honeypot", // Default for now
+				},
+			})
+
 			windowKey := fmt.Sprintf("%s:%d", srcIP, dstPort)
 			a.bfMu.Lock()
 			w, exists := a.bfWindows[windowKey]
@@ -688,6 +789,11 @@ func (a *SSHAnalyzer) consumeSSHPacket(sess *sshSession, fromClient bool, out *[
 
 	msgType := pkt[1]
 	paddingLen := int(pkt[0])
+
+	if sess.state != sshPostNewKeys {
+		sess.pktsBeforeNewKeys++
+		sess.bytesBeforeNewKeys += int64(pktLen)
+	}
 
 	a.dispatchSSHPacket(sess, pkt, msgType, paddingLen, fromClient, out)
 	return true
@@ -921,6 +1027,7 @@ func (a *SSHAnalyzer) parseKEXInit(sess *sshSession, pkt []byte, paddingLen int,
 
 	hasshNote := a.knownBadHASSH[hassh]
 	if hasshNote != "" {
+		sess.hasshKnownBad = true
 		*out = append(*out, Detection{
 			ID:         "SSH-HASSH-BAD-001",
 			Timestamp:  time.Now(),
@@ -985,6 +1092,7 @@ func (a *SSHAnalyzer) detectKnownTool(sess *sshSession, softVer, direction strin
 	lower := strings.ToLower(softVer)
 	for keyword, info := range a.knownTools {
 		if strings.Contains(lower, keyword) {
+			sess.clientSoftwareCat = string(info.class)
 			if info.severity > SevInfo { // skip sshClassKnownClient (SevInfo)
 				*out = append(*out, Detection{
 					ID:         "SSH-TOOL-001",
@@ -1031,6 +1139,7 @@ func (a *SSHAnalyzer) checkWeak(sess *sshSession, ruleID, algoType, algoList str
 	if len(weak) == 0 {
 		return
 	}
+	sess.weakAlgoFlag = true
 	*out = append(*out, Detection{
 		ID:         ruleID,
 		Timestamp:  time.Now(),
