@@ -1,4 +1,4 @@
-# Definitive SSH ML-L4 Detection Implementation Plan
+# Definitive SSH ML-L4 Detection Implementation Documentation
 
 > **Objective:** Use ML-L4 behavioral anomaly detection to identify abnormal SSH sessions,
 > while retaining rule-based detection for deterministic SSH attack signatures and known

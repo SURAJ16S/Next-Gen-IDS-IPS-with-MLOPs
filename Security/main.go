@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1162,6 +1163,8 @@ func initProxyEngine(configPath string) (*proxy.ProxyEngine, *detect.StatsCollec
 	detect.NewGraphEngine(bus)
 	detect.NewThresholdCalibrator(bus)
 	detect.NewDeceptionMesh(bus, []int{3306, 5432, 23}).Start()
+	
+	go startDNSDrainLoop(bus, cfg)
 
 	nodeCfg, _ := LoadNodeConfig()
 	if nodeCfg != nil && globalStreamInterval > 0 {
@@ -1221,3 +1224,113 @@ func runStandaloneProxy(stats *detect.StatsCollector) {
 	}
 	fmt.Println("\n  " + ingressStyle.Render("✓") + " Shutting down reverse proxy gracefully...")
 }
+
+func startDNSDrainLoop(bus *detect.DetectionBus, cfg *proxy.ProxyConfig) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	
+	batch := make([]detect.DNSFeatureVector, 0, 100)
+	
+	logPath := "dns_features.jsonl"
+	if cfg.Logging.Dir != "" {
+		logPath = filepath.Join(cfg.Logging.Dir, "dns_features.jsonl")
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Printf("Failed to open %s: %v", logPath, err)
+	}
+	if logFile != nil {
+		defer logFile.Close()
+	}
+	
+	var lastNXDomainFlood = make(map[string]time.Time)
+	var lastZoneTransfer = make(map[string]time.Time)
+	var mu sync.Mutex
+	
+	// Subscribe to rule alerts to update suppression windows
+	bus.Subscribe(&dnsRuleSubscriber{
+		lastNXDomainFlood: lastNXDomainFlood,
+		lastZoneTransfer:  lastZoneTransfer,
+		mu:                &mu,
+	})
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		
+		if logFile != nil {
+			for _, vec := range batch {
+				b, _ := json.Marshal(vec)
+				logFile.Write(b)
+				logFile.WriteString("\n")
+			}
+		}
+
+		resps, err := detect.ScoreDNSBatch(context.Background(), batch)
+		if err == nil {
+			mu.Lock()
+			for i, resp := range resps {
+				if resp == nil {
+					continue
+				}
+				vec := batch[i]
+				
+				nxFlood := time.Since(lastNXDomainFlood[vec.SrcIP]) < 5*time.Second
+				zoneTx := time.Since(lastZoneTransfer[vec.SrcIP]) < 5*time.Second
+
+				if resp.PredictedCategory == "dga" && resp.RiskScore > cfg.Detection.DNSDGAMinScore {
+					if !nxFlood { // Suppress if NXDOMAIN flood fired
+						bus.EmitDetection(detect.Detection{
+							ID: "ML-DNS-DGA", Timestamp: time.Now(), Severity: detect.SevHigh, Category: detect.CatDGA, Protocol: "DNS",
+							SourceIP: vec.SrcIP, ConnID: vec.ConnID,
+							Summary: fmt.Sprintf("ML detected DGA behavior (Score: %.1f)", resp.RiskScore),
+							Details: map[string]any{"features": resp.ContributingFeatures},
+						})
+					}
+				} else if resp.PredictedCategory == "tunnel" && resp.RiskScore > cfg.Detection.DNSTunnelMinScore {
+					if !zoneTx { // Suppress if Zone Transfer fired
+						bus.EmitDetection(detect.Detection{
+							ID: "ML-DNS-TUNNEL", Timestamp: time.Now(), Severity: detect.SevHigh, Category: detect.CatDNSTunnel, Protocol: "DNS",
+							SourceIP: vec.SrcIP, ConnID: vec.ConnID,
+							Summary: fmt.Sprintf("ML detected DNS Tunneling (Score: %.1f)", resp.RiskScore),
+							Details: map[string]any{"features": resp.ContributingFeatures},
+						})
+					}
+				}
+			}
+			mu.Unlock()
+		}
+		batch = batch[:0]
+	}
+
+	for {
+		select {
+		case vec := <-detect.DNSFeatureChan:
+			batch = append(batch, vec)
+			if len(batch) >= 100 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+type dnsRuleSubscriber struct {
+	lastNXDomainFlood map[string]time.Time
+	lastZoneTransfer  map[string]time.Time
+	mu                *sync.Mutex
+}
+
+func (s *dnsRuleSubscriber) OnDetection(d detect.Detection) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d.Category == detect.CatNXDomainFlood {
+		s.lastNXDomainFlood[d.SourceIP] = time.Now()
+	} else if d.Category == detect.CatZoneTransfer {
+		s.lastZoneTransfer[d.SourceIP] = time.Now()
+	}
+}
+
+func (s *dnsRuleSubscriber) OnConnectionClose(conn detect.ConnectionRecord) {}

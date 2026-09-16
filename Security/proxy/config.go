@@ -53,6 +53,8 @@ type LoggingConfig struct {
 type DetectionConfig struct {
 	RateLimit         RateLimitConfig `yaml:"rate_limit"`
 	MaxPayloadInspect int             `yaml:"max_payload_inspect_bytes"` // Max bytes to inspect per stream
+	DNSTunnelMinScore float64         `yaml:"dns_tunnel_min_score"`
+	DNSDGAMinScore    float64         `yaml:"dns_dga_min_score"`
 }
 
 // RateLimitConfig holds rate-limiting thresholds.
@@ -172,6 +174,8 @@ func DefaultConfig() *ProxyConfig {
 		},
 		Detection: DetectionConfig{
 			MaxPayloadInspect: 65536, // 64KB per stream direction
+			DNSTunnelMinScore: 72.0,
+			DNSDGAMinScore:    68.0,
 			RateLimit: RateLimitConfig{
 				ConnectionsPerMinute: 120,
 				ConnectionsPerSecond: 30,

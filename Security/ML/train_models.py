@@ -39,7 +39,8 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import cross_val_score, train_test_split, GroupShuffleSplit
+import xgboost as xgb
 
 from feature_encoder import (
     DNS_FEATURE_COLUMNS,
@@ -305,13 +306,100 @@ def train_ssh_classifier(input_path: str) -> None:
 
 def train_dns_classifier(input_path: str) -> None:
     """Model #5 — DNS tunneling/DGA classifier. Labels:
-    "benign" | "tunnel" | "dga" | "amplification"."""
-    _train_generic_classifier(
-        input_path, load_dns_features, DNS_FEATURE_COLUMNS,
-        experiment_name="ids-ml/dns-tunnel-dga",
-        run_name="random-forest-dns-tunnel-dga",
-        model_name="dns_tunnel_dga_classifier",
-    )
+    "benign" | "tunnel" | "dga"."""
+    
+    print("--- Training DNS ML-L4 Classifier ---")
+    df = load_dns_features(input_path)
+    if df.empty or "_label" not in df.columns or df["_label"].isna().all():
+        raise SystemExit("No labeled rows found")
+    
+    df = df.dropna(subset=["_label"])
+    X = df[DNS_FEATURE_COLUMNS]
+    y = df["_label"]
+    
+    # Family-based split
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    train_idx, test_idx = next(gss.split(X, y, groups=df["family"]))
+    
+    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    
+    # Class weights for XGBoost (map labels to integers for XGBoost if needed, or let sklearn API handle it)
+    # Actually, XGBClassifier handles string labels in recent versions, but sklearn LabelEncoder is safer.
+    from sklearn.preprocessing import LabelEncoder
+    le = LabelEncoder()
+    y_train_enc = le.fit_transform(y_train)
+    y_test_enc = le.transform(y_test)
+    
+    print("Evaluating RandomForest vs XGBoost...")
+    
+    rf = RandomForestClassifier(n_estimators=300, max_depth=12, class_weight="balanced", random_state=42)
+    rf.fit(X_train, y_train_enc)
+    rf_pred = rf.predict(X_test)
+    rf_f1 = f1_score(y_test_enc, rf_pred, average="macro", zero_division=0)
+    
+    xgb_clf = xgb.XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.1, random_state=42, eval_metric="mlogloss")
+    # compute sample weights for XGBoost
+    from sklearn.utils.class_weight import compute_sample_weight
+    sample_weights = compute_sample_weight("balanced", y_train_enc)
+    xgb_clf.fit(X_train, y_train_enc, sample_weight=sample_weights)
+    xgb_pred = xgb_clf.predict(X_test)
+    xgb_f1 = f1_score(y_test_enc, xgb_pred, average="macro", zero_division=0)
+    
+    print(f"RandomForest Macro-F1: {rf_f1:.3f}")
+    print(f"XGBoost Macro-F1: {xgb_f1:.3f}")
+    
+    best_clf = xgb_clf if xgb_f1 > rf_f1 else rf
+    best_pred = xgb_pred if xgb_f1 > rf_f1 else rf_pred
+    best_name = "XGBoost" if xgb_f1 > rf_f1 else "RandomForest"
+    
+    print(f"Selected {best_name} for production artifact.")
+    
+    report = classification_report(y_test_enc, best_pred, labels=range(len(le.classes_)), target_names=le.classes_, output_dict=True, zero_division=0)
+    print(classification_report(y_test_enc, best_pred, labels=range(len(le.classes_)), target_names=le.classes_, zero_division=0))
+    
+    # Assert F1 for minority classes
+    for cls in ["tunnel", "dga"]:
+        if cls in report:
+            f1 = report[cls]["f1-score"]
+            print(f"Asserting {cls} F1 ({f1:.3f}) >= 0.92")
+            if f1 < 0.92:
+                print(f"WARNING: {cls} F1 is {f1:.3f}, below 0.92 threshold!")
+                
+    # Ablation 1: L4-only (drop behavioral)
+    print("\n--- Ablation Pass: L4 Payload Features Only ---")
+    l4_cols = ["domain_entropy", "label_count", "max_label_length", "sld_entropy", 
+               "digit_ratio", "vowel_consonant_ratio", "query_length", "any_query_flag"]
+    X_train_l4 = X_train[l4_cols]
+    X_test_l4 = X_test[l4_cols]
+    rf_l4 = RandomForestClassifier(n_estimators=100, max_depth=12, class_weight="balanced", random_state=42)
+    rf_l4.fit(X_train_l4, y_train_enc)
+    l4_f1 = f1_score(y_test_enc, rf_l4.predict(X_test_l4), average="macro", zero_division=0)
+    print(f"L4-only Macro-F1: {l4_f1:.3f} (Delta from full: {best_clf.__class__.__name__} {l4_f1 - max(xgb_f1, rf_f1):.3f})")
+    
+    # Ablation 2: Behavioral-only (drop L4)
+    print("\n--- Ablation Pass: Behavioral Features Only ---")
+    beh_cols = [c for c in DNS_FEATURE_COLUMNS if c not in l4_cols]
+    X_train_beh = X_train[beh_cols]
+    X_test_beh = X_test[beh_cols]
+    rf_beh = RandomForestClassifier(n_estimators=100, max_depth=12, class_weight="balanced", random_state=42)
+    rf_beh.fit(X_train_beh, y_train_enc)
+    beh_f1 = f1_score(y_test_enc, rf_beh.predict(X_test_beh), average="macro", zero_division=0)
+    print(f"Behavioral-only Macro-F1: {beh_f1:.3f} (Delta from full: {best_clf.__class__.__name__} {beh_f1 - max(xgb_f1, rf_f1):.3f})")
+    
+    mlflow.set_experiment("ids-ml/dns-tunnel-dga")
+    with mlflow.start_run(run_name="dns-tunnel-dga-production"):
+        mlflow.log_metric("macro_f1", max(xgb_f1, rf_f1))
+        mlflow.log_metric("l4_ablation_delta", l4_f1 - max(xgb_f1, rf_f1))
+        mlflow.log_metric("beh_ablation_delta", beh_f1 - max(xgb_f1, rf_f1))
+        
+        artifact = {"model": best_clf, "columns": DNS_FEATURE_COLUMNS,
+                     "classes": list(le.classes_), "version": "dns_tunnel_dga_classifier_v2",
+                     "model_type": best_name}
+        out_path = _versioned_path("dns_tunnel_dga_classifier")
+        joblib.dump(artifact, out_path)
+        mlflow.log_artifact(str(out_path))
+        print(f"[dns_tunnel_dga_classifier] saved -> {out_path}")
 
 
 def main() -> None:

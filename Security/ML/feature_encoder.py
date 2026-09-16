@@ -87,16 +87,20 @@ SSH_FEATURE_COLUMNS = [
 # Protocol Data Collection Inventory doc section 12.7 — this is the numeric
 # contract those fields must satisfy once implemented.
 DNS_FEATURE_COLUMNS = [
-    "domain_entropy",             # shannonEntropy() already implemented in dns_analyzer.go — reuse, don't reimplement
-    "label_count",                # number of dot-separated labels
-    "sld_entropy",                # entropy of the second-level domain specifically (dga's usual target)
+    "domain_entropy",
+    "label_count",
+    "max_label_length",
+    "sld_entropy",
+    "digit_ratio",
+    "vowel_consonant_ratio",
     "query_length",
-    "txt_query_ratio",            # fraction of queries in this window that were TXT/NULL (tunneling signal)
-    "nxdomain_ratio_10min",       # fraction of queries from this IP resolving NXDOMAIN in last 10 min
-    "unique_subdomain_count_10min",
-    "avg_response_size",
-    "query_rate_10min",
-    "any_query_flag",             # 0/1 — ANY query type used (amplification signal, synopsis section 8)
+    "any_query_flag",
+    "uncommon_qtype_ratio_1m",
+    "uncommon_qtype_ratio_10m",
+    "nxdomain_ratio_10m",
+    "unique_subdomain_count",
+    "repeatability_factor",
+    "avg_response_size_ewma",
 ]
 
 
@@ -197,7 +201,8 @@ def _flatten_dns_record(rec: dict) -> dict:
     out = {col: rec.get(col, 0.0) for col in DNS_FEATURE_COLUMNS}
     out["_conn_id"] = rec.get("conn_id")
     out["_source_ip"] = rec.get("source_ip")
-    out["_label"] = rec.get("label")  # "benign" | "tunnel" | "dga" | "amplification"
+    out["_label"] = rec.get("_label", rec.get("label"))  # "benign" | "tunnel" | "dga" | "amplification"
+    out["family"] = rec.get("family")
     return out
 
 

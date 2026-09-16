@@ -7,6 +7,7 @@
 package detect
 
 import (
+	"sync"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,7 +17,7 @@ import (
 )
 
 const (
-	mlServiceURL = "http://localhost:8500"
+	mlServiceURL = "http://127.0.0.1:8500"
 	// mlTimeout is the HARD maximum latency budget for an ML call.
 	// If the scoring service doesn't respond within this window, we fail-open
 	// and return RiskScore=0 so the proxy is never blocked by model latency.
@@ -143,4 +144,136 @@ func failOpen() *MLScoreResponse {
 		ModelVersion:         "unavailable",
 		ContributingFeatures: nil,
 	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Circuit Breaker for DNS Batch Scoring
+// ──────────────────────────────────────────────────────────────────────────────
+
+
+
+type circuitBreaker struct {
+	mu               sync.Mutex
+	failures         int
+	maxFailures      int
+	cooldown         time.Duration
+	lastFailure      time.Time
+	state            string // "CLOSED", "OPEN", "HALF-OPEN"
+}
+
+func newCircuitBreaker(maxFail int, cooldown time.Duration) *circuitBreaker {
+	return &circuitBreaker{
+		maxFailures: maxFail,
+		cooldown:    cooldown,
+		state:       "CLOSED",
+	}
+}
+
+func (cb *circuitBreaker) allow() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.state == "CLOSED" {
+		return true
+	}
+
+	if cb.state == "OPEN" {
+		if time.Since(cb.lastFailure) > cb.cooldown {
+			cb.state = "HALF-OPEN"
+			return true
+		}
+		return false
+	}
+
+	if cb.state == "HALF-OPEN" {
+		return false // Only one request allowed in HALF-OPEN state
+	}
+
+	return true
+}
+
+func (cb *circuitBreaker) reportSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures = 0
+	cb.state = "CLOSED"
+}
+
+func (cb *circuitBreaker) reportFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures++
+	cb.lastFailure = time.Now()
+	if cb.failures >= cb.maxFailures {
+		cb.state = "OPEN"
+	}
+}
+
+var dnsCB = newCircuitBreaker(5, 10*time.Second)
+
+// ScoreDNSBatch sends a batch of DNS feature vectors to /score/dns.
+// Uses a circuit breaker to prevent blocking the micro-batcher when ML is slow.
+func ScoreDNSBatch(ctx context.Context, vecs []DNSFeatureVector) ([]*MLScoreResponse, error) {
+	if !dnsCB.allow() {
+		// Fail open for entire batch
+		resps := make([]*MLScoreResponse, len(vecs))
+		for i := range resps {
+			resps[i] = failOpen()
+		}
+		return resps, nil
+	}
+
+	// Clean out metadata before sending
+	type dnsReq struct {
+		Vectors []DNSFeatureVector `json:"vectors"`
+	}
+	
+	reqPayload := dnsReq{Vectors: vecs}
+	
+	body, err := json.Marshal(reqPayload)
+	if err != nil {
+		dnsCB.reportFailure()
+		resps := make([]*MLScoreResponse, len(vecs))
+		for i := range resps {
+			resps[i] = failOpen()
+		}
+		return resps, fmt.Errorf("ml_client: marshal batch: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mlServiceURL+"/score/dns-batch", bytes.NewReader(body))
+	if err != nil {
+		dnsCB.reportFailure()
+		resps := make([]*MLScoreResponse, len(vecs))
+		for i := range resps {
+			resps[i] = failOpen()
+		}
+		return resps, fmt.Errorf("ml_client: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := mlHTTPClient.Do(req)
+	if err != nil {
+		dnsCB.reportFailure()
+		resps := make([]*MLScoreResponse, len(vecs))
+		for i := range resps {
+			resps[i] = failOpen()
+		}
+		return resps, nil
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Responses []*MLScoreResponse `json:"responses"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		dnsCB.reportFailure()
+		resps := make([]*MLScoreResponse, len(vecs))
+		for i := range resps {
+			resps[i] = failOpen()
+		}
+		return resps, fmt.Errorf("ml_client: decode batch: %w", err)
+	}
+
+	dnsCB.reportSuccess()
+	return result.Responses, nil
 }

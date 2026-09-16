@@ -1,4 +1,4 @@
-# Next-Gen IDS/IPS — ML Pipeline Completion Plan
+# Next-Gen IDS/IPS — ML Pipeline Completion Documentation
 
 > **Branch**: `main` | **Last Reviewed**: 2026-08-30
 > **Owner**: Suraj

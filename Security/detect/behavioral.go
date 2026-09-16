@@ -8,8 +8,12 @@ package detect
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
+
+	"github.com/axiomhq/hyperloglog"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -29,6 +33,7 @@ type BehavioralEngine struct {
 	mu          sync.Mutex
 	ipTrackers  map[string]*ipTracker
 	dstTrackers map[string]*dstTracker
+	dnsTrackers *lru.Cache[string, *dnsSrcTracker]
 	lastCleanup time.Time
 }
 
@@ -64,6 +69,69 @@ type dstTracker struct {
 	lastSeen     time.Time
 }
 
+// dnsSrcTracker tracks per-source-IP DNS behavioral aggregates.
+// All counters use exponential decay — O(1) memory.
+type dnsSrcTracker struct {
+	mu sync.Mutex
+
+	// Rates
+	totalQueries10m  float64
+	totalQueries1m   float64
+	uncommonQtype10m float64
+	uncommonQtype1m  float64
+	nxdomain10m      float64
+	totalRespSize    float64
+
+	hll *hyperloglog.Sketch
+
+	totalQueryCount int64
+	lastSeen        time.Time
+}
+
+func newDNSSrcTracker() *dnsSrcTracker {
+	return &dnsSrcTracker{
+		hll:      hyperloglog.New(),
+		lastSeen: time.Now(),
+	}
+}
+
+// decay updates the EWMA counters based on time elapsed
+func (t *dnsSrcTracker) decay(now time.Time) {
+	if t.lastSeen.IsZero() {
+		t.lastSeen = now
+		return
+	}
+	delta := now.Sub(t.lastSeen).Seconds()
+	if delta <= 0 {
+		return
+	}
+	
+	// tau = 600s (10 min) and 60s (1 min)
+	decay10m := math.Exp(-delta / 600.0)
+	decay1m := math.Exp(-delta / 60.0)
+
+	t.totalQueries10m *= decay10m
+	t.uncommonQtype10m *= decay10m
+	t.nxdomain10m *= decay10m
+	t.totalRespSize *= decay10m
+
+	t.totalQueries1m *= decay1m
+	t.uncommonQtype1m *= decay1m
+
+	t.lastSeen = now
+}
+
+// DNSAggregates snapshot for the ML vector
+type DNSAggregates struct {
+	UncommonQtypeRatio1m  float64
+	UncommonQtypeRatio10m float64
+	NXDomainRatio10m      float64
+	UniqueSubdomainCount  float64
+	RepeatabilityFactor   float64
+	AvgResponseSizeEWMA   float64
+	QueryRate             float64
+}
+
 // NewBehavioralEngine creates a behavioral detection engine.
 func NewBehavioralEngine(bus *DetectionBus, connPerMin, portScan, bruteForce int) *BehavioralEngine {
 	if connPerMin <= 0 {
@@ -76,6 +144,8 @@ func NewBehavioralEngine(bus *DetectionBus, connPerMin, portScan, bruteForce int
 		bruteForce = 5
 	}
 
+	dnsCache, _ := lru.New[string, *dnsSrcTracker](50000)
+
 	engine := &BehavioralEngine{
 		bus:                 bus,
 		connPerMinThreshold: connPerMin,
@@ -83,6 +153,7 @@ func NewBehavioralEngine(bus *DetectionBus, connPerMin, portScan, bruteForce int
 		bruteForceThreshold: bruteForce,
 		ipTrackers:          make(map[string]*ipTracker),
 		dstTrackers:         make(map[string]*dstTracker),
+		dnsTrackers:         dnsCache,
 		lastCleanup:         time.Now(),
 	}
 
@@ -95,6 +166,35 @@ func (b *BehavioralEngine) OnDetection(d Detection) {
 	if d.ID == "SSH-TEARDOWN-001" {
 		// Single rapid teardown event from ssh_analyzer.go
 		b.TrackSSHFailAtDst(d.Details["target_ip"].(string), d.SourceIP, d.DestPort)
+	} else if d.ID == "DNS-QUERY-001" {
+		qtype := d.Details["qtype"].(string)
+		qname := d.Details["qname"].(string)
+		sld := ExtractSLD(qname)
+		b.TrackDNSQuery(d.SourceIP, qtype, sld)
+	} else if d.ID == "DNS-RESP-001" {
+		respSize := 0
+		if rs, ok := d.Details["resp_size"].(int); ok {
+			respSize = rs
+		}
+		rcodeStr, _ := d.Details["rcode"].(string)
+		rcode := uint8(0)
+		if rcodeStr == "NXDOMAIN" {
+			rcode = 3
+		}
+		
+		b.TrackDNSResponse(d.SourceIP, respSize, rcode)
+		
+		qname, _ := d.Details["qname"].(string)
+		qtype, _ := d.Details["qtype"].(string)
+		
+		aggs := b.GetDNSAggregates(d.SourceIP)
+		vec := BuildDNSFeatureVector(d.SourceIP, d.ConnID, qname, qtype, aggs)
+		
+		select {
+		case DNSFeatureChan <- vec:
+		default:
+			DNSDropped.Add(1)
+		}
 	}
 }
 
@@ -444,4 +544,88 @@ func sqrt(x float64) float64 {
 		z = z - (z*z-x)/(2*z)
 	}
 	return z
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DNS Behavioral Tracking
+// ──────────────────────────────────────────────────────────────────────────────
+
+func (b *BehavioralEngine) getOrCreateDNSTracker(srcIP string) *dnsSrcTracker {
+	if t, ok := b.dnsTrackers.Get(srcIP); ok {
+		return t
+	}
+	t := newDNSSrcTracker()
+	b.dnsTrackers.Add(srcIP, t)
+	return t
+}
+
+func (b *BehavioralEngine) TrackDNSQuery(srcIP, qtype, sld string) {
+	now := time.Now()
+	t := b.getOrCreateDNSTracker(srcIP)
+	
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.decay(now)
+	
+	t.totalQueries10m += 1.0
+	t.totalQueries1m += 1.0
+	t.totalQueryCount += 1
+	
+	if qtype == "TXT" || qtype == "NULL" || qtype == "CNAME" {
+		t.uncommonQtype10m += 1.0
+		t.uncommonQtype1m += 1.0
+	}
+	
+	if sld != "" {
+		t.hll.Insert([]byte(sld))
+	}
+}
+
+func (b *BehavioralEngine) TrackDNSResponse(srcIP string, respSize int, rcode uint8) {
+	now := time.Now()
+	t := b.getOrCreateDNSTracker(srcIP)
+	
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.decay(now)
+	
+	t.totalRespSize += float64(respSize)
+	// rcode 3 is NXDOMAIN
+	if rcode == 3 {
+		t.nxdomain10m += 1.0
+	}
+}
+
+func (b *BehavioralEngine) GetDNSAggregates(srcIP string) DNSAggregates {
+	t, ok := b.dnsTrackers.Get(srcIP)
+	if !ok {
+		return DNSAggregates{}
+	}
+	
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	
+	t.decay(time.Now())
+	
+	aggs := DNSAggregates{}
+	
+	if t.totalQueries10m > 0 {
+		aggs.UncommonQtypeRatio10m = t.uncommonQtype10m / t.totalQueries10m
+		aggs.NXDomainRatio10m = t.nxdomain10m / t.totalQueries10m
+		aggs.AvgResponseSizeEWMA = t.totalRespSize / t.totalQueries10m
+	}
+	if t.totalQueries1m > 0 {
+		aggs.UncommonQtypeRatio1m = t.uncommonQtype1m / t.totalQueries1m
+	}
+	
+	aggs.UniqueSubdomainCount = float64(t.hll.Estimate())
+	aggs.QueryRate = t.totalQueries10m // raw EWMA sum acts as a rate indicator
+	
+	if t.totalQueryCount > 0 {
+		aggs.RepeatabilityFactor = aggs.UniqueSubdomainCount / float64(t.totalQueryCount)
+	}
+	
+	return aggs
 }

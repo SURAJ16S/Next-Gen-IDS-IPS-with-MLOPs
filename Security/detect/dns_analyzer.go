@@ -328,7 +328,13 @@ func (a *DNSAnalyzer) processMessage(connID, srcIP, dstIP string, srcPort, dstPo
 			ID: "DNS-RESP-001", Timestamp: time.Now(), Severity: SevInfo, Category: CatConnLifecycle, Protocol: "DNS",
 			SourceIP: srcIP, SourcePort: srcPort, DestPort: dstPort, ConnID: connID,
 			Summary: fmt.Sprintf("DNS response: %s %s → %s (answers: %d)", dnsTypeString(qtype), qname, rcodeStr, anCount),
-			Details: map[string]any{"transaction_id": txID, "qname": qname, "rcode": rcodeStr},
+			Details: map[string]any{
+				"transaction_id": txID, 
+				"qname": qname, 
+				"qtype": dnsTypeString(qtype),
+				"rcode": rcodeStr,
+				"resp_size": len(data),
+			},
 		})
 
 		if rcode == 3 {
