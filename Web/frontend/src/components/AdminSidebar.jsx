@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Server, Users, Bot, ShieldAlert, Network,
-  FileText, Cpu, ChevronLeft, ChevronRight, ShieldAlert as ShieldIcon
+  FileText, Cpu, ChevronLeft, ChevronRight, ShieldAlert as ShieldIcon, ShieldOff
 } from 'lucide-react';
 
 const adminNavItems = [
@@ -14,6 +14,7 @@ const adminNavItems = [
   { to: '/admin/manage-network', label: 'Network Policies', icon: Network },
   { to: '/admin/manage-logs', label: 'Log Auditor', icon: FileText },
   { to: '/admin/manage-nodes', label: 'Cluster Nodes', icon: Cpu },
+  { to: '/admin/blocklist', label: 'IP Blocklist', icon: ShieldOff },
 ];
 
 function AdminSidebar() {

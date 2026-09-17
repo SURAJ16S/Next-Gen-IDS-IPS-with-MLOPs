@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 
 	"ngfw-monitor/detect"
 	"ngfw-monitor/proxy"
+	"ngfw-monitor/streamer"
 )
 
 var (
@@ -530,6 +532,10 @@ func initProxyEngineWithPort(configPath string, listenPort, backendPort uint16, 
 		bus.Subscribe(globalStreamer)
 		globalStreamer.Start()
 	}
+
+	dashStreamer := streamer.New()
+	go dashStreamer.Run(context.Background())
+	bus.Subscribe(dashStreamer)
 
 	engine := proxy.NewProxyEngine(cfg, bus, stats)
 	if err := engine.Start(); err != nil {
@@ -1106,6 +1112,10 @@ func initProxyEngine(configPath string) (*proxy.ProxyEngine, *detect.StatsCollec
 		bus.Subscribe(globalStreamer)
 		globalStreamer.Start()
 	}
+
+	dashStreamer := streamer.New()
+	go dashStreamer.Run(context.Background())
+	bus.Subscribe(dashStreamer)
 
 	engine := proxy.NewProxyEngine(cfg, bus, stats)
 	if err := engine.Start(); err != nil {

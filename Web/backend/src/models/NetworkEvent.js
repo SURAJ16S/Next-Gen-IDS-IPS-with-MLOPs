@@ -10,6 +10,10 @@ const networkEventSchema = new mongoose.Schema(
     connectionDuration: { type: Number },
     ja4Fingerprint: { type: String },
     status: { type: String, enum: ['normal', 'suspicious', 'blocked'], default: 'normal' },
+
+    // Multi-tenant node scoping — set by agent.controller.js from req.node
+    nodeId:    { type: String, index: true }, // the Go proxy's registered nodeId
+    nodeOwner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true }, // user who owns this node
   },
   { timestamps: true }
 );
