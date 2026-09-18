@@ -218,10 +218,15 @@ const runContainerCommand = (image, cmd, binds, deploymentId, jobId, stepName) =
       Cmd: cmd,
       HostConfig: {
         Binds: binds,
-        NanoCPUs: 1000000000,
-        Memory: 536870912,
-        PidsLimit: 100
+        NanoCPUs: 4000000000,
+        Memory: 2147483648,
+        PidsLimit: 500
       },
+      Env: [
+        'NODE_OPTIONS=--max-old-space-size=2048',
+        'NEXT_TELEMETRY_DISABLED=1',
+        'CI=true'
+      ],
       WorkingDir: '/workspace'
     }, (err, container) => {
       if (err) return reject(new Error(`Failed to create container for ${stepName}: ${err.message}`));
@@ -640,7 +645,13 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
       logToJob(deploymentId, jobId, `[!] Failed to run credentials scan: ${scanErr.message}`);
     }
 
-
+    // ── Step 4.5: Automated Performance & Build Speed Optimization ────────────
+    try {
+      const { optimizeProjectForBuildSpeed } = require('./performance-optimizer.service');
+      optimizeProjectForBuildSpeed(targetBuildDir, detection.framework, (msg) => logToJob(deploymentId, jobId, msg));
+    } catch (perfErr) {
+      logToJob(deploymentId, jobId, `[!] Failed to run build speed optimizer: ${perfErr.message}`);
+    }
 
     // ── Step 5: Build ────────────────────────────────────────────────────────
     let buildAttempts = 0;
@@ -717,7 +728,6 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
           } catch (cacheErr) {
             logToJob(deploymentId, jobId, `[!] Failed to mount cache folders: ${cacheErr.message}`);
           }
-
           await ensureDockerImage(detection.buildImage, deploymentId, jobId);
           await runContainerCommand(detection.buildImage, ['sh', '-c', detection.runCommand], binds, deploymentId, jobId, 'COMPILE/BUILD');
         } else {
@@ -735,7 +745,7 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
 
         if (buildAttempts >= maxRetries) {
           logToJob(deploymentId, jobId, `[SELF-HEALING] Reached maximum retry limit (${maxRetries}). Failing build.`);
-          throw err; // throw original compile error to trigger outer catch diagnostics/cleanup
+          throw err;
         }
 
         // Proactive tsconfig.json relaxation to try and fix TS errors before LLM
@@ -762,9 +772,165 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
             fs.writeFileSync(tsconfigPath, JSON.stringify(tsconfigObj, null, 2), 'utf8');
             logToJob(deploymentId, jobId, `  ↪ Successfully relaxed tsconfig.json options. Retrying compilation...`);
             buildAttempts++;
-            continue; // Retry compilation immediately
+            continue;
           } catch (tsconfigErr) {
             logToJob(deploymentId, jobId, `  [!] Failed to proactively relax tsconfig.json: ${tsconfigErr.message}`);
+          }
+        }
+
+        // ── Proactive npm peer dependency conflict self-healing ─────────────────
+        const isNpmPeerConflict = (
+          buildErrorLogs.includes('ERESOLVE') ||
+          buildErrorLogs.includes('Could not resolve dependency') ||
+          buildErrorLogs.includes('Conflicting peer dependency') ||
+          (buildErrorLogs.includes('npm error') && buildErrorLogs.includes('peer dep'))
+        );
+
+        const packageJsonPath = path.join(targetBuildDir, 'package.json');
+        if (isNpmPeerConflict && buildAttempts === 0 && fs.existsSync(packageJsonPath)) {
+          logToJob(deploymentId, jobId, `[SELF-HEALING] npm peer dependency conflict detected (ERESOLVE). Retrying with --legacy-peer-deps to relax strict peer resolution...`);
+          try {
+            const originalRunCommand = detection.runCommand;
+            const healedRunCommand = originalRunCommand
+              .replace(/npm install(?!\s*--legacy-peer-deps)/g, 'npm install --legacy-peer-deps')
+              .replace(/npm ci(?!\s*--legacy-peer-deps)/g, 'npm install --legacy-peer-deps');
+
+            if (dockerAvailable) {
+              const bind = `${path.resolve(targetBuildDir)}:/workspace`;
+              const binds = [bind];
+              try {
+                const fw = (detection.framework || '').toLowerCase();
+                const cDir = path.join(CACHE_BASE_DIR, 'npm');
+                if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+                if (fw !== 'generic' && fw !== 'rust') binds.push(`${path.resolve(cDir)}:/root/.npm`);
+              } catch (_) {}
+
+              await ensureDockerImage(detection.buildImage, deploymentId, jobId);
+              logToJob(deploymentId, jobId, `[SELF-HEALING] Running: ${healedRunCommand}`);
+              await runContainerCommand(detection.buildImage, ['sh', '-c', healedRunCommand], binds, deploymentId, jobId, 'COMPILE/BUILD');
+            } else {
+              logToJob(deploymentId, jobId, `[SELF-HEALING] Running: ${healedRunCommand}`);
+              await runHostCommand(healedRunCommand, targetBuildDir, deploymentId, jobId, 'COMPILE/BUILD');
+            }
+
+            buildSuccess = true;
+            logToJob(deploymentId, jobId, `[SELF-HEALING] ✅ Build succeeded with --legacy-peer-deps!`);
+            break;
+          } catch (peerHealErr) {
+            logToJob(deploymentId, jobId, `[SELF-HEALING] --legacy-peer-deps retry also failed: ${peerHealErr.message.split('\n')[0]}`);
+
+            try {
+              logToJob(deploymentId, jobId, `[SELF-HEALING] Attempting final fallback with npm install --force...`);
+              const forceRunCommand = detection.runCommand
+                .replace(/npm install(?!\s*--force)/g, 'npm install --force')
+                .replace(/npm ci(?!\s*--force)/g, 'npm install --force');
+
+              if (dockerAvailable) {
+                const bind = `${path.resolve(targetBuildDir)}:/workspace`;
+                const binds = [bind];
+                try {
+                  const fw = (detection.framework || '').toLowerCase();
+                  const cDir = path.join(CACHE_BASE_DIR, 'npm');
+                  if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+                  if (fw !== 'generic' && fw !== 'rust') binds.push(`${path.resolve(cDir)}:/root/.npm`);
+                } catch (_) {}
+                await ensureDockerImage(detection.buildImage, deploymentId, jobId);
+                logToJob(deploymentId, jobId, `[SELF-HEALING] Running: ${forceRunCommand}`);
+                await runContainerCommand(detection.buildImage, ['sh', '-c', forceRunCommand], binds, deploymentId, jobId, 'COMPILE/BUILD');
+              } else {
+                logToJob(deploymentId, jobId, `[SELF-HEALING] Running: ${forceRunCommand}`);
+                await runHostCommand(forceRunCommand, targetBuildDir, deploymentId, jobId, 'COMPILE/BUILD');
+              }
+              buildSuccess = true;
+              logToJob(deploymentId, jobId, `[SELF-HEALING] ✅ Build succeeded with --force!`);
+              break;
+            } catch (forceErr) {
+              logToJob(deploymentId, jobId, `[SELF-HEALING] --force retry also failed. Falling back to next healing step...`);
+            }
+          }
+          buildAttempts++;
+          continue;
+        }
+
+        // ── Proactive missing module & PostCSS self-healing ────────────────────
+        const missingModuleMatch = buildErrorLogs.match(/(?:Error:\s*Cannot find module|Module not found:\s*Can't resolve)\s+['"]([^'"]+)['"]/i);
+        const isTailwindPostcssErr = /tailwindcss directly as a PostCSS plugin|@tailwindcss\/postcss/i.test(buildErrorLogs);
+
+        if ((missingModuleMatch || isTailwindPostcssErr) && buildAttempts <= 1 && fs.existsSync(packageJsonPath)) {
+          let patchedPackage = false;
+          try {
+            const pkgContent = fs.readFileSync(packageJsonPath, 'utf8');
+            const pkgObj = JSON.parse(pkgContent || '{}');
+            if (!pkgObj.dependencies) pkgObj.dependencies = {};
+            if (!pkgObj.devDependencies) pkgObj.devDependencies = {};
+
+            if (missingModuleMatch) {
+              const missingPkg = missingModuleMatch[1];
+              if (!missingPkg.startsWith('.') && !missingPkg.startsWith('@/') && !missingPkg.startsWith('/')) {
+                logToJob(deploymentId, jobId, `[SELF-HEALING] Missing package dependency detected: "${missingPkg}". Automatically injecting into package.json...`);
+                pkgObj.dependencies[missingPkg] = 'latest';
+                patchedPackage = true;
+              }
+            }
+
+            if (isTailwindPostcssErr) {
+              logToJob(deploymentId, jobId, `[SELF-HEALING] Tailwind CSS v4 PostCSS plugin mismatch detected. Injecting @tailwindcss/postcss into package.json...`);
+              pkgObj.devDependencies['@tailwindcss/postcss'] = 'latest';
+              patchedPackage = true;
+
+              // Patch postcss.config.mjs / postcss.config.js if exists
+              const pcssFiles = ['postcss.config.mjs', 'postcss.config.js', 'postcss.config.cjs'];
+              for (const pFile of pcssFiles) {
+                const pPath = path.join(targetBuildDir, pFile);
+                if (fs.existsSync(pPath)) {
+                  let pContent = fs.readFileSync(pPath, 'utf8');
+                  if (pContent.includes('tailwindcss:') || pContent.includes("'tailwindcss':") || pContent.includes('"tailwindcss":')) {
+                    pContent = pContent.replace(/['"]?tailwindcss['"]?\s*:/g, "'@tailwindcss/postcss':");
+                    fs.writeFileSync(pPath, pContent, 'utf8');
+                    logToJob(deploymentId, jobId, `  ↪ Patched ${pFile} to use @tailwindcss/postcss plugin.`);
+                  }
+                }
+              }
+            }
+
+            if (patchedPackage) {
+              fs.writeFileSync(packageJsonPath, JSON.stringify(pkgObj, null, 2), 'utf8');
+              logToJob(deploymentId, jobId, `  ↪ Successfully injected missing dependencies. Retrying build compilation...`);
+              buildAttempts++;
+              continue;
+            }
+          } catch (mErr) {
+            logToJob(deploymentId, jobId, `  [!] Failed missing module auto-injection: ${mErr.message}`);
+          }
+        }
+
+        // ── Proactive missing environment variable self-healing ─────────────
+        const missingEnvMatch = buildErrorLogs.match(/(?:Please define the|Missing|Define the)\s+([A-Z0-9_]+)\s+environment variable/i) ||
+                                buildErrorLogs.match(/([A-Z0-9_]+_URI|[A-Z0-9_]+_URL)\s+is (?:not defined|required|missing)/i);
+
+        if (missingEnvMatch && fs.existsSync(targetBuildDir)) {
+          const missingVar = missingEnvMatch[1];
+          logToJob(deploymentId, jobId, `[SELF-HEALING] Missing environment variable detected during static build evaluation: "${missingVar}". Automatically injecting fallback variable into .env.local...`);
+          try {
+            const envLocalPath = path.join(targetBuildDir, '.env.local');
+            let envContent = fs.existsSync(envLocalPath) ? fs.readFileSync(envLocalPath, 'utf8') : '';
+            
+            let fallbackVal = 'development_secret_key_123';
+            if (missingVar.includes('MONGO')) fallbackVal = 'mongodb://localhost:27017/preview_db';
+            else if (missingVar.includes('POSTGRES') || missingVar.includes('DATABASE')) fallbackVal = 'postgresql://postgres@localhost:5432/preview_db';
+            else if (missingVar.includes('MYSQL')) fallbackVal = 'mysql://root@localhost:3306/preview_db';
+            else if (missingVar.includes('REDIS')) fallbackVal = 'redis://localhost:6379';
+            else if (missingVar.includes('URL') || missingVar.includes('ORIGIN')) fallbackVal = 'http://localhost:3000';
+
+            if (!envContent.includes(missingVar)) {
+              envContent += `\n${missingVar}=${fallbackVal}\n`;
+              fs.writeFileSync(envLocalPath, envContent, 'utf8');
+              logToJob(deploymentId, jobId, `  ↪ Successfully injected ${missingVar}=${fallbackVal} into .env.local. Retrying build compilation...`);
+              buildAttempts++;
+              continue;
+            }
+          } catch (envErr) {
+            logToJob(deploymentId, jobId, `  [!] Failed to inject missing environment variable: ${envErr.message}`);
           }
         }
 
@@ -779,7 +945,6 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
           logToJob(deploymentId, jobId, `[SELF-HEALING] Querying LLM with compile logs and ${diagnoses.length} diagnostic hint(s)...`);
           const llmResponse = await generateHealingPatches(buildErrorLogs, relevantFiles, diagnoses);
 
-          // Parse patches using regex
           const patchRegex = /<patch\s+file=["']([^"']+)["']\s*>([\s\S]*?)<\/patch>/g;
           let match;
           const patches = [];
@@ -787,7 +952,6 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
           while ((match = patchRegex.exec(llmResponse)) !== null) {
             const relativePath = match[1];
             const rawContent = match[2];
-            // Remove one leading newline and one trailing newline if they exist to keep indentation clean
             const cleanContent = rawContent
               .replace(/^\r?\n|^\n/, '')
               .replace(/\r?\n$|\n$/, '');
@@ -797,11 +961,8 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
             llmPatchedFiles[normalizedRelPath] = cleanContent;
           }
 
-          // Unconditional Auto-TS-Ignore for TS errors to guarantee they are bypassed
           if (buildErrorLogs.includes('error TS') || buildErrorLogs.includes('TypeScript Compiler Error')) {
             logToJob(deploymentId, jobId, `[SELF-HEALING] Applying Auto-TS-Ignore to bypass fatal TypeScript compilation errors...`);
-            
-            // Extract all TS errors: e.g. Csrc/controllers/blogController.ts(742,12): error TS2339
             const tsErrorRegex = /([a-zA-Z0-9_\-\.\/]+)\((\d+),\d+\):\s*error TS/g;
             let match;
             const filesToPatch = {};
@@ -809,16 +970,9 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
             while ((match = tsErrorRegex.exec(buildErrorLogs)) !== null) {
               const rawTsPath = match[1];
               const lineNum = parseInt(match[2], 10);
-              
-              // Clean stray leading characters from tsc TTY output (e.g. Csrc -> src)
               const srcIdx = rawTsPath.indexOf('src/');
               const cleanTsPath = srcIdx !== -1 ? rawTsPath.slice(srcIdx) : rawTsPath;
               const normalizedTsPath = cleanTsPath.replace(/\\/g, '/');
-              
-              // If LLM patched this file in the current iteration, do not apply Auto-TS-Ignore
-              // using old/outdated line numbers. We will let the LLM patch take effect.
-              // If the compiler still fails on the new code, the next compile attempt
-              // will provide the updated line numbers.
               const isLlmPatched = Object.keys(llmPatchedFiles).some(lpKey => 
                 lpKey.endsWith(normalizedTsPath) || normalizedTsPath.endsWith(lpKey)
               );
@@ -827,7 +981,6 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
                 continue;
               }
 
-              // Find matching workspace file (supporting bidirectional matching due to TTY / Docker workspace path differences)
               for (const [relPath, content] of Object.entries(relevantFiles)) {
                 const normalizedRelPath = relPath.replace(/\\/g, '/');
                 if (normalizedRelPath.endsWith(normalizedTsPath) || normalizedTsPath.endsWith(normalizedRelPath)) {
@@ -839,7 +992,6 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
 
             for (const [relPath, data] of Object.entries(filesToPatch)) {
               let lines = data.content.split(/\r?\n/);
-              // Sort descending to not mess up line numbers when inserting
               const uniqueLines = [...new Set(data.linesToIgnore)].sort((a, b) => b - a);
               let applied = false;
               
@@ -868,33 +1020,28 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
           logToJob(deploymentId, jobId, `[SELF-HEALING] LLM generated ${patches.length} patch(es). Applying patches...`);
           for (const patch of patches) {
             const resolvedPath = path.join(targetBuildDir, patch.relativePath);
-            
-            // Validate that the target file resides within the workspace target directory (security)
             if (!resolvedPath.startsWith(path.resolve(targetBuildDir))) {
               logToJob(deploymentId, jobId, `[SELF-HEALING] [Warning] Rejected attempt to write outside workspace: ${patch.relativePath}`);
               continue;
             }
-
-            // Create directories if missing
             fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-
-            // Create a backup file (.bak) if file exists and has not been backed up yet
             const backupPath = resolvedPath + '.bak';
             if (fs.existsSync(resolvedPath) && !fs.existsSync(backupPath)) {
               fs.copyFileSync(resolvedPath, backupPath);
             }
-
-            // Write healed file content
             fs.writeFileSync(resolvedPath, patch.content, 'utf8');
             logToJob(deploymentId, jobId, `  ↪ Successfully patched: ${patch.relativePath} (${patch.content.length} bytes)`);
           }
-
           buildAttempts++;
         } catch (healErr) {
           if (healErr.message !== 'NO_PATCHES') {
             logToJob(deploymentId, jobId, `[SELF-HEALING] [Warning] Skipping self-healing: ${healErr.message}`);
           }
-          throw err; // throw original compile error to fall back to old workflow
+          if (buildAttempts >= maxRetries) {
+            throw err;
+          }
+          buildAttempts++;
+          continue;
         }
       }
     }
@@ -1047,14 +1194,14 @@ const runPipeline = async (jobId, deploymentId, zipPath, previewPort = 3001, env
       }
     } catch (_) {}
   } finally {
-    // Keep workspace alive so the preview process can access files.
-    // We delete it if the build failed OR if it is a GUI app (which needs no preview process).
+    // Keep workspace alive so the preview process & AI Agent can access files.
+    // We only clean up if it is a GUI app (which needs no preview process or file server).
     const isGui = detection && detection.isGuiApp;
-    if (deploymentStatus === 'failed' || isGui) {
-      logToJob(deploymentId, jobId, 'Cleaning up workspace directory...');
+    if (isGui) {
+      logToJob(deploymentId, jobId, 'Cleaning up GUI workspace directory...');
       try { deleteFolderRecursive(extractDir); } catch (_) {}
     } else {
-      logToJob(deploymentId, jobId, 'Workspace retained for live preview process.');
+      logToJob(deploymentId, jobId, 'Workspace retained for live preview process and AI agent diagnostics.');
     }
 
     if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);

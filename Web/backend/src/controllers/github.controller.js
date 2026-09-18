@@ -126,10 +126,16 @@ const githubOAuthCallback = async (req, res) => {
 
       // 1. Already linked by githubUsername → log in directly
       let user = await User.findOne({ githubUsername });
+      if (!user) {
+        user = await Admin.findOne({ githubUsername });
+      }
 
       if (!user) {
         // 2. Email exists but unlinked → prompt for password to link
         user = await User.findOne({ email });
+        if (!user) {
+          user = await Admin.findOne({ email });
+        }
         if (user) {
           const linkToken = jwt.sign(
             { email, githubUsername, githubAccessToken: access_token },
@@ -390,10 +396,15 @@ const importGithubRepo = async (req, res) => {
 // ─── 6. Unlink GitHub ─────────────────────────────────────────────────────────
 const unlinkGithub = async (req, res) => {
   try {
-    await User.findByIdAndUpdate(req.user._id, {
-      githubAccessToken: null,
-      githubUsername:    null,
-    });
+    const user = await findUserOrAdminById(req.user._id);
+    if (user) {
+      user.githubAccessToken = null;
+      user.githubUsername = null;
+      await user.save();
+    }
+    // Also clear both collections just in case
+    await User.findByIdAndUpdate(req.user._id, { githubAccessToken: null, githubUsername: null });
+    await Admin.findByIdAndUpdate(req.user._id, { githubAccessToken: null, githubUsername: null });
     res.json({ message: 'GitHub account unlinked successfully.' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -408,8 +419,8 @@ const getGithubBranches = async (req, res) => {
   }
 
   try {
-    const user = await User.findById(req.user._id).select('+githubAccessToken');
-    if (!user.githubAccessToken) {
+    const user = await findUserOrAdminById(req.user._id);
+    if (!user || !user.githubAccessToken) {
       return res.status(401).json({ message: 'GitHub not linked.' });
     }
 
@@ -430,7 +441,12 @@ const getGithubBranches = async (req, res) => {
     res.json(branches);
   } catch (err) {
     if (err.response?.status === 401) {
-      await User.findByIdAndUpdate(req.user._id, { githubAccessToken: null, githubUsername: null });
+      const user = await findUserOrAdminById(req.user._id);
+      if (user) {
+        user.githubAccessToken = null;
+        user.githubUsername = null;
+        await user.save();
+      }
       return res.status(401).json({ message: 'GitHub token expired. Please reconnect GitHub.' });
     }
     res.status(err.response?.status || 500).json({ message: err.response?.data?.message || err.message });
@@ -440,8 +456,8 @@ const getGithubBranches = async (req, res) => {
 // ─── 8. Get GitHub User Profile ───────────────────────────────────────────────
 const getGithubUserProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('+githubAccessToken');
-    if (!user.githubAccessToken) {
+    const user = await findUserOrAdminById(req.user._id);
+    if (!user || !user.githubAccessToken) {
       return res.status(400).json({ message: 'GitHub not linked.' });
     }
 
@@ -512,7 +528,12 @@ const getGithubUserProfile = async (req, res) => {
     });
   } catch (err) {
     if (err.response?.status === 401) {
-      await User.findByIdAndUpdate(req.user._id, { githubAccessToken: null, githubUsername: null });
+      const user = await findUserOrAdminById(req.user._id);
+      if (user) {
+        user.githubAccessToken = null;
+        user.githubUsername = null;
+        await user.save();
+      }
       return res.status(401).json({ message: 'GitHub session expired. Please reconnect.' });
     }
     res.status(500).json({ message: err.message });
@@ -538,7 +559,7 @@ const publishBranchToGithub = async (req, res) => {
       return res.status(400).json({ message: 'This build has already been published to the maximum limit of 3 branches.' });
     }
 
-    const user = await User.findById(req.user._id).select('+githubAccessToken');
+    const user = await findUserOrAdminById(req.user._id);
     if (!user?.githubAccessToken) {
       return res.status(401).json({ message: 'GitHub not linked. Please reconnect GitHub.' });
     }

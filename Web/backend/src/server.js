@@ -33,9 +33,9 @@ app.use(
   })
 );
 
-// ─── Body Parsing (capped at 10kb to prevent payload DoS) ────────────────────
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+// ─── Body Parsing (50mb limit for agent prompts, code patches & build artifacts) ─
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // ─── Request Logger ───────────────────────────────────────────────────────────
 app.use(requestLogger);

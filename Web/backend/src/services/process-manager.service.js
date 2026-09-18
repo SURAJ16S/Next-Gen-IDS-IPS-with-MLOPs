@@ -629,17 +629,20 @@ const cleanupDockerResources = async (activeDocker, jobId) => {
     const dbContainerName = `devops-db-${dbType}-${jobId}`;
     try {
       const dbContainer = activeDocker.getContainer(dbContainerName);
-      await dbContainer.stop().catch(() => {});
-      // Do NOT remove db container to preserve database files/volumes!
+      await dbContainer.stop({ t: 2 }).catch(() => {});
+      await dbContainer.remove({ force: true }).catch(() => {});
     } catch (_) {}
   }
   const containerName = `devops-preview-${jobId}`;
   try {
     const appContainer = activeDocker.getContainer(containerName);
-    await appContainer.stop().catch(() => {});
-    await appContainer.remove().catch(() => {});
+    await appContainer.stop({ t: 2 }).catch(() => {});
+    await appContainer.remove({ force: true }).catch(() => {});
   } catch (_) {}
-  // Do NOT remove network to keep Stopped DB container attached!
+  try {
+    const network = activeDocker.getNetwork(`devops-net-${jobId}`);
+    await network.remove().catch(() => {});
+  } catch (_) {}
 };
 
 /**
@@ -1220,6 +1223,29 @@ server.listen(PREVIEW_PORT, () => {
           containerEnv.push(`${key}=${val}`);
         }
       }
+
+      // Inject provisioned database container URIs if not already provided in .env
+      for (const db of requiredDbs) {
+        const dbHost = `devops-db-${db.type}-${jobId}`;
+        if (db.type === 'mongodb') {
+          const mongoUri = `mongodb://${dbHost}:27017/${detectedDbName}`;
+          if (!containerEnv.some(e => e.startsWith('MONGODB_URI='))) containerEnv.push(`MONGODB_URI=${mongoUri}`);
+          if (!containerEnv.some(e => e.startsWith('MONGO_URI='))) containerEnv.push(`MONGO_URI=${mongoUri}`);
+        } else if (db.type === 'postgres') {
+          const pgUri = `postgresql://postgres@${dbHost}:5432/${detectedDbName}`;
+          if (!containerEnv.some(e => e.startsWith('DATABASE_URL='))) containerEnv.push(`DATABASE_URL=${pgUri}`);
+          if (!containerEnv.some(e => e.startsWith('POSTGRES_URI='))) containerEnv.push(`POSTGRES_URI=${pgUri}`);
+        } else if (db.type === 'mysql') {
+          const mysqlUri = `mysql://root@${dbHost}:3306/${detectedDbName}`;
+          if (!containerEnv.some(e => e.startsWith('DATABASE_URL='))) containerEnv.push(`DATABASE_URL=${mysqlUri}`);
+          if (!containerEnv.some(e => e.startsWith('MYSQL_URI='))) containerEnv.push(`MYSQL_URI=${mysqlUri}`);
+        } else if (db.type === 'redis') {
+          const redisUri = `redis://${dbHost}:6379`;
+          if (!containerEnv.some(e => e.startsWith('REDIS_URL='))) containerEnv.push(`REDIS_URL=${redisUri}`);
+          if (!containerEnv.some(e => e.startsWith('REDIS_URI='))) containerEnv.push(`REDIS_URI=${redisUri}`);
+        }
+      }
+
       return containerEnv;
     })();
 
@@ -1401,8 +1427,11 @@ const stopPreview = async (jobId, isRestart = false) => {
     }
   }
 
-  // Graceful fallback: If it's not in our map but the database shows it running, update it in DB anyway
   if (!entry) {
+    const activeDocker = await getDockerInstance();
+    if (activeDocker && !isRestart) {
+      await cleanupDockerResources(activeDocker, jobId);
+    }
     await Deployment.findOneAndUpdate({ jobId }, { previewStatus: 'stopped', previewPid: null });
     return true;
   }
@@ -1410,7 +1439,8 @@ const stopPreview = async (jobId, isRestart = false) => {
   if (entry && entry.type === 'container') {
     await logPreview(entry.deploymentId, jobId, `[PREVIEW] Shutting down preview container...`);
     try {
-      await entry.container.stop().catch(() => {});
+      await entry.container.stop({ t: 2 }).catch(() => {});
+      await entry.container.remove({ force: true }).catch(() => {});
     } catch (_) {}
   } else {
     const pid = entry.process.pid;
@@ -1451,5 +1481,35 @@ const getRunningPreviews = () => {
   }
   return result;
 };
+
+// ─── Self-Healing Preview Container Monitor ──────────────────────────────────
+// Checks every 20 seconds for deployments marked 'running' whose preview container stopped/crashed,
+// and automatically re-spawns them cleanly.
+setInterval(async () => {
+  try {
+    const activeDocker = await getDockerInstance();
+    if (!activeDocker) return;
+
+    const activeDeployments = await Deployment.find({ previewStatus: 'running' });
+    for (const dep of activeDeployments) {
+      if (rebuildInProgress.has(dep.jobId)) continue;
+
+      const containerName = `devops-preview-${dep.jobId}`;
+      try {
+        const container = activeDocker.getContainer(containerName);
+        const inspect = await container.inspect();
+        if (!inspect.State.Running && !inspect.State.Restarting) {
+          console.log(`[SELF-HEAL WATCHDOG] Preview container ${containerName} stopped unexpectedly. Auto-healing...`);
+          const WORKSPACE_DIR = path.resolve(__dirname, '..', '..', '..', '..');
+          const targetBuildDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', dep.jobId);
+          if (fs.existsSync(targetBuildDir)) {
+            await stopPreview(dep.jobId, true);
+            await spawnPreview(dep.jobId, dep._id.toString(), targetBuildDir, dep.framework || 'nextjs', dep.previewPort || 3001);
+          }
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+}, 20000);
 
 module.exports = { spawnPreview, stopPreview, getRunningPreviews, suggestPort };

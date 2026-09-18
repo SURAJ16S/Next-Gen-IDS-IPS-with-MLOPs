@@ -425,12 +425,39 @@ const runAgentChatLoop = async (deployment, chatSession, userMessage, resumeLogs
         break;
       }
 
+      // Filter out redundant dev server commands & duplicate failing commands
+      let iterationLogs = '';
+      const filteredCommands = [];
+      if (!global.commandHistoryByChat) global.commandHistoryByChat = {};
+      if (!global.commandHistoryByChat[chatId]) global.commandHistoryByChat[chatId] = [];
+      const pastCommands = global.commandHistoryByChat[chatId];
+
+      for (let cmd of commandsToRun) {
+        const lowerCmd = cmd.toLowerCase().trim();
+        const cleanCmd = cmd.trim();
+        const runCount = pastCommands.filter(c => c.trim() === cleanCmd).length;
+
+        if (/\b(npm\s+run\s+dev|next\s+dev|npm\s+start|nodemon)\b/.test(lowerCmd)) {
+          iterationLogs += `\n$ ${cmd}\n[Command Skipped]: Preview server is already running and managed by DevOps process manager. Your patches will hot-reload automatically.\n`;
+        } else if (runCount >= 1) {
+          iterationLogs += `\n$ ${cmd}\n[Execution Blocked]: Duplicate command loop detected. You already executed "${cleanCmd}" in a previous turn. Create or patch the required file using <patch file="..."> before re-running.\n`;
+        } else {
+          filteredCommands.push(cmd);
+          pastCommands.push(cleanCmd);
+        }
+      }
+
+      if (filteredCommands.length === 0 && commandsToRun.length > 0) {
+        // Only skipped or duplicate commands were issued; loop complete!
+        break;
+      }
+
       // Sort into read-only, CUD, and unsafe
       const unsafeCommands = [];
       const readOnlyCommands = [];
       const cudCommands = [];
 
-      for (const cmd of commandsToRun) {
+      for (const cmd of filteredCommands) {
         if (!isCommandSafe(cmd)) {
           unsafeCommands.push(cmd);
         } else if (isReadOnlyCommand(cmd)) {
@@ -447,10 +474,9 @@ const runAgentChatLoop = async (deployment, chatSession, userMessage, resumeLogs
       }
 
       // Execute read-only commands immediately
-      let iterationLogs = '';
       for (const cmd of readOnlyCommands) {
         iterationLogs += `\n$ ${cmd}\n`;
-        const out = await runCommandInContainer(containerName, cmd);
+        const out = await runCommandInContainer(containerName, cmd, extractDir);
         iterationLogs += out;
       }
 
@@ -463,7 +489,7 @@ const runAgentChatLoop = async (deployment, chatSession, userMessage, resumeLogs
         } else if (execPermission === 'always') {
           for (const cmd of cudCommands) {
             iterationLogs += `\n$ ${cmd}\n`;
-            const out = await runCommandInContainer(containerName, cmd);
+            const out = await runCommandInContainer(containerName, cmd, extractDir);
             iterationLogs += out;
           }
         } else if (execPermission === 'ask') {
@@ -540,6 +566,12 @@ const runAgentChatLoop = async (deployment, chatSession, userMessage, resumeLogs
           observationMsg.push(`Terminal output:\n${iterationLogs}`);
         }
         
+        // If file patches were applied and only read-only diagnostic commands were executed, break loop immediately
+        if (patchesApplied.length > 0 && cudCommands.length === 0) {
+          console.log(`[REACT LOOP] Patches applied and diagnostic checks complete. Ending loop early at iteration ${currentIteration}.`);
+          break;
+        }
+
         reactHistory.push({
           role: 'user',
           content: `OBSERVATION (Iteration ${currentIteration}):\n` + 
@@ -568,6 +600,24 @@ const runAgentChatLoop = async (deployment, chatSession, userMessage, resumeLogs
       // If not already explicitly mentioned in the text, append them
       if (!finalMessage.includes('[AI Agent applied patches to files]')) {
         finalMessage += `\n\n**[AI Agent applied patches to files]:**\n${patchesApplied.map(p => ` - \`${p.file}\``).join('\n')}`;
+      }
+
+      // Fast Cached Live Preview Hot-Reload
+      if (deployment.status === 'deployed') {
+        try {
+          const { stopPreview, spawnPreview } = require('./process-manager.service');
+          const { detectFramework } = require('./framework-detector.service');
+          const targetBuildDir = path.join(WORKSPACE_DIR, 'DevOps', 'builds', deployment.jobId);
+          const detection = detectFramework(targetBuildDir);
+
+          console.log(`[AGENT HOT-RELOAD] Patches applied to live deployment ${deployment.jobId}. Rebuilding preview using cached build artifacts...`);
+          await stopPreview(deployment.jobId, true);
+          await spawnPreview(deployment.jobId, deployment._id, targetBuildDir, detection.framework, deployment.previewPort || 3001);
+
+          finalMessage += `\n\n⚡ **[Live Preview Hot-Reloaded]**: Applied patches to workspace. Re-built preview container on port \`${deployment.previewPort || 3001}\` using cached build artifacts. Your changes are live at http://localhost:${deployment.previewPort || 3001}!`;
+        } catch (rebuildErr) {
+          console.error('[AGENT HOT-RELOAD ERROR] Failed to hot-reload preview:', rebuildErr.message);
+        }
       }
     }
 

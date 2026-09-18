@@ -3,7 +3,7 @@
 # DevOps Linux VPS Orchestrator & Installer (k3s + K8s sidecars)
 # Optimized for Hostinger KVM4 / standard Linux VPS (≤8GB RAM host constraints).
 
-# Enforce running as root/sudo for k3s installation
+Enforce running as root/sudo for k3s installation
 if [[ $EUID -ne 0 ]]; then
    echo "[ERROR] This installation script must be run with sudo or root privileges."
    echo "        Please run: sudo ./start-devops-vps.sh"

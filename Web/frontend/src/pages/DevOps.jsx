@@ -1239,8 +1239,7 @@ function DevOps() {
         <p className="page-subtitle">Compile, secure-gate, and run application source containers dynamically — no Docker Desktop required</p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: isLogExpanded ? '5fr 5fr' : '7fr 3fr', gap: '24px', alignItems: 'start', transition: 'grid-template-columns 0.3s ease' }}>
-
+     <div style={{ display: 'grid', gridTemplateColumns: window.innerWidth <= 900 ? '1fr' : (isLogExpanded ? '5fr 5fr' : '7fr 3fr'), gap: '24px', alignItems: 'start', transition: 'grid-template-columns 0.3s ease' }}>
         {/* ── Upload Card ──────────────────────────────────────────────── */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '18px', height: '1250px', overflowY: 'auto', paddingRight: '12px' }}>
 
@@ -2054,7 +2053,7 @@ function DevOps() {
           <form onSubmit={handleUploadSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
 
             {/* Project name + port side-by-side */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '10px' }}>
+           <div style={{ display: 'grid', gridTemplateColumns: window.innerWidth <= 480 ? '1fr' : '1fr auto', gap: '10px' }}>
               <div style={sectionStyle}>
                 <label style={labelStyle}>Project Name</label>
                 <input
@@ -3869,7 +3868,7 @@ function DevOps() {
       {/* ── Deployment History Table ────────────────────────────────────────── */}
       <div>
         <h3 className="section-heading" style={{ margin: '12px 0 14px' }}>Deployment History</h3>
-        <div className="card" style={{ padding: '0', height: '400px', overflowY: 'auto' }}>
+        <div className="card" style={{ padding: '0', height: '400px', overflowY: 'auto', overflowX: 'auto' }}>
           <table>
             <thead>
               <tr>
@@ -4313,7 +4312,7 @@ function DevOps() {
           position: 'fixed',
           bottom: '90px',
           right: '24px',
-          width: '380px',
+           width: 'min(380px, calc(100vw - 32px))',
           height: '520px',
           background: 'var(--bg-secondary)',
           border: '1px solid var(--border-subtle)',
