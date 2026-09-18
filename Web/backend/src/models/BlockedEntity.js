@@ -44,6 +44,10 @@ const blockedEntitySchema = new mongoose.Schema(
     },
     unblockedBy: { type: String },
     unblockedAt: { type: Date },
+
+    // Multi-tenant node scoping — null for manual admin blocks, set for automatic blocks from Go proxy
+    nodeId:    { type: String, index: true }, // the Go proxy's registered nodeId that triggered this block
+    nodeOwner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true }, // user who owns the node
   },
   { timestamps: true }
 );

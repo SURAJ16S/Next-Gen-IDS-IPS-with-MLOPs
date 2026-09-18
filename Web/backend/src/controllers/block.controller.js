@@ -111,6 +111,7 @@ const createAutomaticBlock = async ({
   riskScoreAtBlock,
   modelVersion,
   nodeId,
+  nodeOwner,
   autoExpireSeconds,
 }) => {
   const expiresAt = autoExpireSeconds
@@ -129,6 +130,8 @@ const createAutomaticBlock = async ({
     blockedBy: 'system',
     expiresAt,
     status: 'active',
+    nodeId,
+    nodeOwner,
   });
 
   if (targetType === 'ip') {

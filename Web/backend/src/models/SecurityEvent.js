@@ -10,6 +10,10 @@ const securityEventSchema = new mongoose.Schema(
     action: { type: String, enum: ['allow', 'alert', 'block', 'tarpit'], default: 'allow' },
     payload: { type: String },
     riskScore: { type: Number, default: 0 }, // 0-100 from ML
+
+    // Multi-tenant node scoping — set by agent.controller.js from req.node
+    nodeId:    { type: String, index: true }, // the Go proxy's registered nodeId
+    nodeOwner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true }, // user who owns this node
   },
   { timestamps: true }
 );

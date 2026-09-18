@@ -35,6 +35,15 @@ function Dashboard() {
 
     const socket = io('http://localhost:5000');
 
+    const storedUser = localStorage.getItem('user');
+    if (storedUser) {
+      try {
+        const u = JSON.parse(storedUser);
+        const userId = u._id || u.id;
+        if (userId) socket.emit('join:myroom', userId);
+      } catch (e) {}
+    }
+
     socket.on('new_detection', (det) => {
       setStats(prev => {
         if (!prev) return prev;

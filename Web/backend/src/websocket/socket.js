@@ -36,6 +36,14 @@ const initSocket = (server) => {
       console.log(`Dashboard client connected: ${socket.id}`);
     }
 
+    // Join per-user scoped room for multi-tenant telemetry broadcasts
+    socket.on('join:myroom', (userId) => {
+      if (userId) {
+        socket.join(`owner:${userId}`);
+        console.log(`Socket ${socket.id} joined room owner:${userId}`);
+      }
+    });
+
     // Subscribe dashboard client to real-time pipeline log streams by jobId
     socket.on('subscribe:pipeline', ({ jobId }) => {
       socket.join(`pipeline:${jobId}`);
