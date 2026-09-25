@@ -13,8 +13,8 @@ The Go security agent ([`Security/reputation/feed_ingest.go`](file:///home/kali/
 Set your API key in `.env` and `Web/backend/.env`:
 
 ```env
-OTX_KEY=028baf9a96973fecbf3578c4053efb039e873d9b0ba2837d471c3cad4470a057
-OTX_API_KEY=028baf9a96973fecbf3578c4053efb039e873d9b0ba2837d471c3cad4470a057
+OTX_KEY=<your_otx_api_key>
+OTX_API_KEY=<your_otx_api_key>
 ```
 
 ---

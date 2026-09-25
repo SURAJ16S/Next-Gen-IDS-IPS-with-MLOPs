@@ -13,8 +13,8 @@ The Go security agent ([`Security/reputation/feed_ingest.go`](file:///home/kali/
 Set your VirusTotal API key in `.env` and `Web/backend/.env`:
 
 ```env
-VIRUSTOTAL_KEY=bb81bcacf6b4fb7b5117f047066caabe115a5c4209d83d1f434e92e0f721af1e
-VIRUSTOTAL_API_KEY=bb81bcacf6b4fb7b5117f047066caabe115a5c4209d83d1f434e92e0f721af1e
+VIRUSTOTAL_KEY=<your_virustotal_key>
+VIRUSTOTAL_API_KEY=<your_virustotal_key>
 ```
 
 ---
