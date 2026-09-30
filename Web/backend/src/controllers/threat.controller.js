@@ -1,9 +1,10 @@
 const Threat = require('../models/Threat');
-
+const { ownerFilter, listWithPaging } = require('../utils/queryHelpers');
 const getThreats = async (req, res) => {
   try {
-    const threats = await Threat.find().sort({ createdAt: -1 });
-    res.json(threats);
+    await listWithPaging(req, res, Threat, {
+      allowedSort: ['createdAt', 'threatType', 'sourceIP', 'riskScore', 'status'],
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -11,7 +12,7 @@ const getThreats = async (req, res) => {
 
 const createThreat = async (req, res) => {
   try {
-    const threat = await Threat.create(req.body);
+       const threat = await Threat.create({ ...req.body, nodeOwner: req.user._id });
     res.status(201).json(threat);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -20,8 +21,8 @@ const createThreat = async (req, res) => {
 
 const updateThreatStatus = async (req, res) => {
   try {
-    const threat = await Threat.findByIdAndUpdate(
-      req.params.id,
+     const threat = await Threat.findOneAndUpdate(
+      { _id: req.params.id, ...ownerFilter(req) },
       { status: req.body.status },
       { new: true }
     );

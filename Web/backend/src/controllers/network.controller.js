@@ -1,14 +1,15 @@
 const NetworkEvent = require('../models/NetworkEvent');
-
+const { listWithPaging } = require('../utils/queryHelpers');
 const getNetworkEvents = async (req, res) => {
   try {
-    const events = await NetworkEvent.find().sort({ createdAt: -1 }).limit(100);
-    res.json(events);
+    await listWithPaging(req, res, NetworkEvent, {
+      allowedSort: ['createdAt', 'sourceIP', 'destinationIP', 'port', 'protocol', 'status'],
+      legacyLimit: 100,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
-
 const createNetworkEvent = async (req, res) => {
   try {
     const event = await NetworkEvent.create(req.body);
