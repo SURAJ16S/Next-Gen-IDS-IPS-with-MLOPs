@@ -6,6 +6,7 @@ const systemLogSchema = new mongoose.Schema(
     source: { type: String }, // proxy, devops-agent, ml-engine etc.
     message: { type: String, required: true },
     meta: { type: mongoose.Schema.Types.Mixed },
+        nodeOwner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   },
   { timestamps: true }
 );

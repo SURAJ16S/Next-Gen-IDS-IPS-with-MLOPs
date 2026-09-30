@@ -8,6 +8,7 @@ const threatSchema = new mongoose.Schema(
     riskScore: { type: Number, default: 0 },
     status: { type: String, enum: ['open', 'investigating', 'resolved', 'blocked'], default: 'open' },
     description: { type: String },
+        nodeOwner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   },
   { timestamps: true }
 );
