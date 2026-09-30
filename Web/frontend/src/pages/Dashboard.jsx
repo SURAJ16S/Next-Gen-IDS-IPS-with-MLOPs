@@ -8,7 +8,7 @@ import ThreatTable from '../components/ThreatTable';
 import EmptyState from '../components/EmptyState';
 import { getDashboardStats, getRecentRequests } from '../services/api';
 import { io } from 'socket.io-client';
-
+import toast from 'react-hot-toast';
 const PIE_COLORS = ['#006bb4', '#17a2b8', '#39a0ed', '#7fd1e0', '#0b4f8a'];
 
 function Dashboard() {
@@ -45,6 +45,7 @@ function Dashboard() {
     }
 
     socket.on('new_detection', (det) => {
+              toast.error(`New detection: ${det?.attackType || det?.threatType || 'threat'} from ${det?.sourceIP || 'unknown'}`);
       setStats(prev => {
         if (!prev) return prev;
         return {

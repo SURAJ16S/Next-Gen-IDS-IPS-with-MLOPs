@@ -27,15 +27,15 @@ export const getDashboardStats = () => api.get('/dashboard/stats');
 export const getRecentRequests = () => api.get('/dashboard/requests');
 
 // Threats
-export const getThreats = () => api.get('/threats');
+export const getThreats = (params) => api.get('/threats', { params });
 export const createThreat = (data) => api.post('/threats', data);
 export const updateThreatStatus = (id, status) => api.put(`/threats/${id}`, { status });
 
 // Network
-export const getNetworkEvents = () => api.get('/network');
+export const getNetworkEvents = (params) => api.get('/network', { params });
 
 // Logs
-export const getLogs = () => api.get('/logs');
+export const getLogs = (params) => api.get('/logs', { params });
 
 // Analytics
 export const getAnalyticsSummary = () => api.get('/analytics/summary');

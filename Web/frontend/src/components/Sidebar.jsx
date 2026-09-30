@@ -41,6 +41,7 @@ function Sidebar() {
 
   return (
     <aside
+     aria-label="Sidebar"
       style={{
         width: isCollapsed ? '68px' : '230px',
         background: 'var(--bg-secondary)',
@@ -91,6 +92,7 @@ function Sidebar() {
             onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
             onMouseLeave={(e) => e.currentTarget.style.background = 'none'}
             title="Collapse Sidebar"
+            aria-label="Collapse sidebar"
           >
             <ChevronLeft size={16} />
           </button>
@@ -113,7 +115,8 @@ function Sidebar() {
               justifyContent: 'center',
               borderRadius: 'var(--radius-sm)',
             }}
-            title="Expand Sidebar"
+           title="Expand Sidebar"
+           aria-label="Expand sidebar"
           >
             <ChevronRight size={14} />
           </button>
@@ -127,7 +130,7 @@ function Sidebar() {
       )}
 
       {/* Navigation */}
-      <nav style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+      <nav aria-label="Main navigation" style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
         {visibleNavItems.map(({ to, label, icon: Icon, end }) => {
           return (
             <div key={to}>
@@ -135,6 +138,7 @@ function Sidebar() {
                 to={to}
                 end={end}
                 className="sidebar-nav-link"
+                aria-label={label}
                 style={({ isActive }) => ({
                   display: 'flex',
                   alignItems: 'center',
@@ -153,7 +157,7 @@ function Sidebar() {
                 })}
                 title={isCollapsed ? label : undefined}
               >
-                <Icon size={17} style={{ flexShrink: 0 }} />
+               <Icon size={17} style={{ flexShrink: 0 }} aria-hidden="true" />
                 {!isCollapsed && (
                   <span style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: 1 }}>
                     {label}

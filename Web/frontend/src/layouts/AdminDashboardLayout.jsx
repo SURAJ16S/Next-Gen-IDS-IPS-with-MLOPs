@@ -1,6 +1,7 @@
 import { Outlet } from 'react-router-dom';
 import AdminSidebar from '../components/AdminSidebar';
 import Header from '../components/Header';
+import Breadcrumbs from '../components/Breadcrumbs';
 import '../styles/theme.css';
 
 function AdminDashboardLayout() {
@@ -10,7 +11,8 @@ function AdminDashboardLayout() {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <Header />
         <main style={{ padding: '24px', flex: 1, overflowX: 'auto', background: '#f9fafb' }}>
-          <Outlet />
+            <Breadcrumbs />
+            <Outlet />
         </main>
       </div>
     </div>

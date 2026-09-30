@@ -33,10 +33,13 @@ import AdminManageNetwork from './pages/AdminManageNetwork';
 import AdminManageLogs from './pages/AdminManageLogs';
 import AdminManageNodes from './pages/AdminManageNodes';
 import AdminManageBlocklist from './pages/AdminManageBlocklist';
+import { Toaster } from 'react-hot-toast';
 
 function App() {
   return (
-    <Routes>
+    <>
+      <Toaster position="top-right" />
+      <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/admin/login" element={<AdminLogin />} />
       <Route path="/register" element={<Register />} />
@@ -92,8 +95,8 @@ function App() {
       <Route path="/admin/agent-performance" element={<Navigate to="/admin/manage-agent" replace />} />
       <Route path="/agent-performance" element={<Navigate to="/admin/manage-agent" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+      </Routes>
+    </>
   );
 }
-
 export default App;
